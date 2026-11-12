@@ -1,0 +1,1 @@
+- The admin UI shell and design system: the ported tokens, UI primitives, themes, router, command palette and sign-in, with the SEO navigation, site switcher and Home setup checklist. The API is a typed interface backed by a demo implementation until the server client lands.

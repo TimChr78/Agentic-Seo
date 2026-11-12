@@ -11,6 +11,7 @@ Source repository: https://github.com/TimChr78/Agentic-Marketing
 |---|---|---|---|
 | `core` | `packages/core` | `311460e` (0.14.8) | Package scope renamed; `personalData.ts` dropped (marketing-specific); brand name and glyph changed |
 | `telemetry` | `packages/telemetry` | `311460e` (0.14.8) | Package scope renamed |
+| `web` | `apps/web` (shell, `src/ui`, `src/index.css`, theme, router) | `311460e` (0.14.8) | Package scope, storage keys and `as-` CSS prefixes renamed; marketing screens, editors, integrations and demo entries dropped; SEO navigation, site switcher, Home and a typed demo API added; brand assets generated as SVG only |
 
 Rules: keep file structure and names where the code is unchanged, so a diff against upstream stays
 readable. Remove marketing-only concepts (profiles, consent, journeys, e-mail, segments) instead of

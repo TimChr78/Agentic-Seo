@@ -8,6 +8,8 @@
     "node": ">=24"
   },
   "scripts": {
+    "dev:web": "pnpm --filter @agentic-seo/web dev",
+    "build:web": "pnpm --filter @agentic-seo/web build",
     "lint": "biome check . && node scripts/changelog.mjs check",
     "format": "biome format --write .",
     "typecheck": "pnpm -r --filter './packages/*' --filter './apps/*' typecheck",
