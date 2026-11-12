@@ -124,7 +124,9 @@ export const NAV: NavGroup[] = [
 
 /**
  * Settings is pinned at the bottom of the shell, outside the collapsible work groups. Its children
- * are the secondary navigation (`ui/SettingsLayout.tsx`); they never appear in the main nav.
+ * are the secondary navigation (`ui/SettingsLayout.tsx`); they never appear in the main nav. The
+ * gates follow the server's permission matrix: editing the site needs `sites:write`, workspace
+ * configuration needs `workspace:admin`, and API tokens are the person's own account surface.
  */
 export const SETTINGS_GROUP: NavGroup = {
   key: 'settings',
@@ -132,26 +134,29 @@ export const SETTINGS_GROUP: NavGroup = {
   path: '/settings',
   icon: Settings,
   items: [
-    { path: '/settings/site', label: 'Site', icon: Building2, needs: ANYONE },
-    { path: '/settings/connections', label: 'Connections', icon: Cable, needs: ANYONE },
-    { path: '/settings/providers', label: 'Providers and budgets', icon: Plug, needs: ANYONE },
-    { path: '/settings/crawler-access', label: 'Crawler access', icon: Radar, needs: ANYONE },
-    { path: '/settings/users', label: 'Users and roles', icon: UsersRound, needs: ANYONE },
+    { path: '/settings/site', label: 'Site', icon: Building2, needs: ['sites:write'] },
+    { path: '/settings/connections', label: 'Connections', icon: Cable, needs: ['workspace:admin'] },
+    { path: '/settings/providers', label: 'Providers and budgets', icon: Plug, needs: ['workspace:admin'] },
+    { path: '/settings/crawler-access', label: 'Crawler access', icon: Radar, needs: ['workspace:admin'] },
+    { path: '/settings/users', label: 'Users and roles', icon: UsersRound, needs: ['workspace:admin'] },
     { path: '/settings/api-tokens', label: 'API tokens', icon: KeyRound, needs: ANYONE },
     {
       path: '/settings/approval-policy',
       label: 'Approval policy and agent autonomy',
       icon: ShieldCheck,
-      needs: ANYONE,
+      needs: ['artifacts:read'],
     },
-    { path: '/settings/usage', label: 'Usage', icon: ChartNoAxesColumn, needs: ANYONE },
+    { path: '/settings/usage', label: 'Usage', icon: ChartNoAxesColumn, needs: ['workspace:admin'] },
   ],
 };
 
 export const SETTINGS_ITEMS = SETTINGS_GROUP.items;
 
+/** Whether this role may open the entry: one of its permissions is enough. */
+export const canOpen = (item: NavItem, can: (p: string) => boolean) => !item.needs.length || item.needs.some(can);
+
 const permitted = (item: NavItem, can: (p: string) => boolean, visibility: NavVisibility) =>
-  (!item.needs.length || item.needs.some(can)) && (!item.localOnly || visibility.localBusiness === true);
+  canOpen(item, can) && (!item.localOnly || visibility.localBusiness === true);
 
 /** The work groups this role and site can use, with empty groups removed. */
 export function visibleNav(can: (p: string) => boolean, visibility: NavVisibility = {}): NavGroup[] {
@@ -160,12 +165,12 @@ export function visibleNav(can: (p: string) => boolean, visibility: NavVisibilit
 
 /** The Settings secondary items this role can open. */
 export function visibleSettings(can: (p: string) => boolean): NavItem[] {
-  return SETTINGS_ITEMS.filter((i) => !i.needs.length || i.needs.some(can));
+  return SETTINGS_ITEMS.filter((i) => canOpen(i, can));
 }
 
-/** The first page a role can open in Settings; Site is the fallback everyone reaches. */
+/** The first page a role can open in Settings; API tokens is the fallback everyone reaches. */
 export function settingsPath(can: (p: string) => boolean): string {
-  return visibleSettings(can)[0]?.path ?? '/settings/site';
+  return visibleSettings(can)[0]?.path ?? '/settings/api-tokens';
 }
 
 const matches = (itemPath: string, path: string) =>

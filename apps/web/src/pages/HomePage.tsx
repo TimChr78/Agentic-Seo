@@ -4,7 +4,7 @@ import { ButtonLink } from '../app/links';
 import { useCrumbs } from '../app/page';
 import { Link } from '../app/router';
 import { useSite } from '../app/session';
-import { useApi } from '../app/useApi';
+import { useKeyedApi } from '../app/useApi';
 import { Alert, Card, EmptyState, KpiTile, LineChart, LoadingBlock, PageHeader, StatusPill, Tag } from '../ui';
 import { Button } from '../ui/Button';
 import { cx } from '../ui/cx';
@@ -20,7 +20,9 @@ import { formatDateTime } from '../ui/time';
 export default function HomePage() {
   useCrumbs([{ label: 'Home' }]);
   const { site } = useSite();
-  const home = useApi(() => api.getHome(site.id), [site.id]);
+  // Keyed by site: while the new site loads, or if it fails, the previous site's numbers are never
+  // shown under the new site's name.
+  const home = useKeyedApi(site.id, () => api.getHome(site.id));
 
   const header = (
     <PageHeader
@@ -112,7 +114,7 @@ export default function HomePage() {
             value={data.averagePosition.value}
             previousValue={data.averagePosition.previousValue}
             precision={1}
-            favourableDirection="up"
+            favourableDirection="down"
             dataState={data.averagePosition.value === null ? 'no-data' : 'populated'}
             explanation={data.averagePosition.noDataReason}
             period={`Last ${data.averagePosition.periodDays} days · Search Console`}

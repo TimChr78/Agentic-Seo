@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { Site } from '../src/app/api';
+import { NoSite } from '../src/app/Root';
 import { Shell, SiteSwitcher } from '../src/app/Shell';
 import { SessionContext, type SessionValue } from '../src/app/session';
 import { ToastProvider } from '../src/ui';
@@ -37,7 +38,7 @@ function session(overrides: Partial<SessionValue> = {}): SessionValue {
       name: 'Workspace',
       timeZone: 'UTC',
       role: 'owner',
-      permissions: ['site:read', 'site:write'],
+      permissions: ['sites:read', 'sites:write'],
     },
     sites: SITES,
     site: SITES[0],
@@ -114,6 +115,40 @@ describe('site switcher', () => {
     expect(sidebar().className).toContain('w-16');
     expect(localStorage.getItem('as.nav.usr_1')).toBe('collapsed');
     expect(screen.getByRole('button', { name: 'Expand navigation' })).toBeTruthy();
+  });
+
+  it('offers New site to a role that may write sites', async () => {
+    renderSwitcher(session({ can: (permission) => permission === 'sites:write' }));
+    await userEvent.click(screen.getByRole('button', { name: /Switch site/ }));
+    expect(screen.getByRole('menuitem', { name: 'New site…' })).toBeTruthy();
+  });
+
+  it('hides New site from a role that may only read sites', async () => {
+    renderSwitcher(session({ can: (permission) => permission === 'sites:read' }));
+    await userEvent.click(screen.getByRole('button', { name: /Switch site/ }));
+    expect(screen.queryByRole('menuitem', { name: 'New site…' })).toBeNull();
+  });
+
+  it('disables the first-site CTA with a reason when the role cannot write sites', () => {
+    render(
+      <SessionContext.Provider value={session({ status: 'no-site', sites: [], site: null, can: () => false })}>
+        <NoSite />
+      </SessionContext.Provider>,
+    );
+    const button = screen.getByRole('button', { name: 'Add your first site' });
+    expect(button).toHaveProperty('disabled', true);
+    expect(screen.getByText(/Ask a workspace admin to add the first one/)).toBeTruthy();
+  });
+
+  it('offers the first-site CTA to a role that may write sites', () => {
+    render(
+      <SessionContext.Provider
+        value={session({ status: 'no-site', sites: [], site: null, can: (permission) => permission === 'sites:write' })}
+      >
+        <NoSite />
+      </SessionContext.Provider>,
+    );
+    expect(screen.getByRole('button', { name: 'Add your first site' })).toHaveProperty('disabled', false);
   });
 
   it('creates a site from the New site dialog with a name and a domain', async () => {

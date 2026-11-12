@@ -69,9 +69,10 @@ function Gate() {
 }
 
 /** The first run: a workspace with no site yet. The switcher cannot help before a site exists. */
-function NoSite() {
-  const { signOut } = useSession();
+export function NoSite() {
+  const { signOut, can } = useSession();
   const [open, setOpen] = useState(false);
+  const canCreate = can('sites:write');
   return (
     <main className="flex min-h-screen flex-col bg-bg">
       <div className="flex h-14 items-center justify-between px-4 md:px-6">
@@ -85,15 +86,23 @@ function NoSite() {
           title="No sites yet"
           icon={<span className="text-[28px] font-semibold">+</span>}
           action={
-            <Button variant="primary" onClick={() => setOpen(true)}>
+            <Button
+              variant="primary"
+              onClick={() => setOpen(true)}
+              disabled={!canCreate}
+              title={canCreate ? undefined : 'Only editors and admins can add a site.'}
+              aria-description={canCreate ? undefined : 'Your role cannot add sites.'}
+            >
               Add your first site
             </Button>
           }
         >
-          Add the site you want to audit. Verification, Search Console and the first audit come after it exists.
+          {canCreate
+            ? 'Add the site you want to audit. Verification, Search Console and the first audit come after it exists.'
+            : 'Your role cannot add sites. Ask a workspace admin to add the first one.'}
         </EmptyState>
       </div>
-      {open && <NewSiteDialog open onClose={() => setOpen(false)} />}
+      {canCreate && open && <NewSiteDialog open onClose={() => setOpen(false)} />}
     </main>
   );
 }

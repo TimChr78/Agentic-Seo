@@ -133,6 +133,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setSites((current) => [...current, created]);
         if (user) writeSiteId(user.id, created.id);
         setSiteId(created.id);
+        // The first site is what the shell waits for; creating it opens the app.
+        setStatus('ready');
         return created;
       },
       signOutError,

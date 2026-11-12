@@ -59,7 +59,8 @@ export function NewSiteDialog({ open, onClose, onCreated }: { open: boolean; onC
           >
             Cancel
           </Button>
-          <Button type="button" variant="primary" loading={busy} onClick={() => void submit()}>
+          {/* A submit control for the form above, so required fields and Enter both work. */}
+          <Button type="submit" form="new-site-form" variant="primary" loading={busy}>
             Add site
           </Button>
         </>

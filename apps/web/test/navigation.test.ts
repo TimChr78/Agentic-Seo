@@ -5,6 +5,37 @@ import { redirectTarget } from '../src/app/redirects';
 
 const can = () => true;
 
+// Mirrors ROLE_PERMISSIONS in packages/commands/src/principal.ts: the server's matrix is canonical.
+const OWNER = [
+  'artifacts:read',
+  'artifacts:write',
+  'artifacts:publish',
+  'artifacts:approve',
+  'sites:read',
+  'sites:write',
+  'audits:run',
+  'research:spend',
+  'changes:apply',
+  'audit:read',
+  'secrets:read',
+  'secrets:write',
+  'workspace:admin',
+];
+const EDITOR = [
+  'artifacts:read',
+  'artifacts:write',
+  'artifacts:publish',
+  'sites:read',
+  'sites:write',
+  'audits:run',
+  'research:spend',
+  'changes:apply',
+  'audit:read',
+];
+const APPROVER = ['artifacts:read', 'artifacts:approve', 'sites:read', 'audit:read'];
+const VIEWER = ['artifacts:read', 'sites:read'];
+const canFor = (permissions: string[]) => (permission: string) => permissions.includes(permission);
+
 // docs/design/DESIGN.md §3, verbatim: each group, its entries and the Settings secondary nav. When
 // the design changes, this table and nav.ts change together; a missing or duplicate path fails here.
 const DESIGN: Record<string, [string, string][]> = {
@@ -79,12 +110,24 @@ describe('navigation', () => {
     }
   });
 
-  it('opens Settings at Site and keeps its children under Settings', () => {
+  it('opens Settings at the first section the role can use, keeping its children under Settings', () => {
     expect(settingsPath(can)).toBe('/settings/site');
+    expect(settingsPath(canFor(EDITOR))).toBe('/settings/site');
     expect(visibleSettings(can).map((item) => item.path)).toEqual(SETTINGS.map(([path]) => path));
     expect(navFor('/settings')?.group?.label).toBe('Settings');
     expect(navFor('/settings/providers')?.item?.label).toBe('Providers and budgets');
     expect(navFor('/settings/providers/123')?.item?.label).toBe('Providers and budgets');
+  });
+
+  it('gates Settings with the server permissions for each role', () => {
+    const pathsFor = (permissions: string[]) => visibleSettings(canFor(permissions)).map((item) => item.path);
+
+    expect(pathsFor(OWNER)).toEqual(SETTINGS.map(([path]) => path));
+    expect(pathsFor(EDITOR)).toEqual(['/settings/site', '/settings/api-tokens', '/settings/approval-policy']);
+    expect(pathsFor(APPROVER)).toEqual(['/settings/api-tokens', '/settings/approval-policy']);
+    expect(pathsFor(VIEWER)).toEqual(['/settings/api-tokens', '/settings/approval-policy']);
+    // API tokens are account-accessible, so Settings always has somewhere to open.
+    expect(settingsPath(canFor(VIEWER))).toBe('/settings/api-tokens');
   });
 
   it('matches Home exactly and chooses the longest item path', () => {

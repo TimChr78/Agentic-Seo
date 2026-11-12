@@ -114,7 +114,7 @@ const DEMO_WORKSPACE: Workspace = {
   name: 'Agentic SEO demo',
   timeZone: 'UTC',
   role: 'owner',
-  permissions: ['site:read', 'site:write', 'research:spend', 'workspace:admin'],
+  permissions: ['sites:read', 'sites:write', 'research:spend', 'workspace:admin'],
 };
 
 /**

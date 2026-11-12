@@ -19,6 +19,7 @@ import { NewSiteDialog } from './NewSiteDialog';
 import { type NavGroup, type NavItem, navFor, visibleNav } from './nav';
 import { type Crumb, CrumbsProvider } from './page';
 import { useCollapsedNavGroups, useNavPref } from './prefs';
+import { roleName } from './roles';
 import { Link, navigate, useLocation } from './router';
 import { useSession } from './session';
 import { THEME_ITEMS } from './ThemeMenu';
@@ -345,14 +346,7 @@ function RailNav({ groups, path, pending }: { groups: NavGroup[]; path: string; 
   );
 }
 
-const roleLabel: Record<string, string> = {
-  owner: 'Owner',
-  admin: 'Admin',
-  editor: 'Editor',
-  analyst: 'Analyst',
-  viewer: 'Viewer',
-};
-export const roleName = (role: string) => roleLabel[role] ?? role;
+export { roleName } from './roles';
 
 /** A site's favicon, contained in a fixed square, or its initial when no icon is available. */
 function SiteMark({ faviconUrl, name, className }: { faviconUrl: string | null; name: string; className?: string }) {
@@ -383,7 +377,7 @@ export function SiteSwitcher({ rail = false }: { rail?: boolean }) {
   const [newSiteOpen, setNewSiteOpen] = useState(false);
   const name = site?.name ?? 'No site';
   const domain = site?.domain ?? null;
-  const canCreate = can('site:write') || can('workspace:admin');
+  const canCreate = can('sites:write');
   const others = sites.filter((candidate) => candidate.id !== site?.id);
   const label = (
     <>
