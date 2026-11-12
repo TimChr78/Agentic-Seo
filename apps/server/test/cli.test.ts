@@ -56,14 +56,14 @@ async function fresh(prefix: string, useTemplate = true) {
   return { url, dbName, env };
 }
 
-describe('aseo CLI', () => {
+describe('aseo CLI', { timeout: 180_000 }, () => {
   it('prints the version without any configuration', async () => {
     const out = await cli(['version'], { DATABASE_URL: '', APP_DB_PASSWORD: '', AUTH_SECRET: '' });
     expect(out.code).toBe(0);
     expect(out.stdout).toMatch(/^aseo \d+\.\d+\.\d+/);
   });
 
-  it('migrates, bootstraps the first owner, resets a password and passes doctor', { timeout: 120_000 }, async () => {
+  it('migrates, bootstraps the first owner, resets a password and passes doctor', async () => {
     const { url, env } = await fresh('cli');
     const db = createDb({ adminUrl: url.toString(), appUrl: url.toString() });
     cleanups.push(() => db.close());

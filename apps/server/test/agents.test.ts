@@ -19,15 +19,27 @@ const tokenApi = (value = token) => createClient<Commands>({ baseUrl: t.base, he
 // A stand-in for a real agent write: Phase 0 ships no SEO write command an agent may run yet
 // (everything that changes a site lands with its phase), so the ledger is exercised through the
 // executor's public path with a command of its own.
-const testWrite = defineCommand({
-  name: 'test.write',
-  title: 'Test write',
-  description: 'A write used by the server tests to exercise the agent policy engine and the action ledger.',
+const testDraft = defineCommand({
+  name: 'test.draft',
+  title: 'Test draft',
+  description: 'A draft used by the server tests to exercise the agent policy engine and the action ledger.',
   input: z.object({}),
   output: z.object({ ok: z.boolean() }),
   permission: 'sites:write',
   effect: 'write',
-  actionClass: 'settings',
+  actionClass: 'draft',
+  handler: async () => ({ ok: true }),
+});
+
+const testSubmit = defineCommand({
+  name: 'test.submit',
+  title: 'Test submit',
+  description: 'A non-draft write used by the server tests to exercise the agent policy engine.',
+  input: z.object({}),
+  output: z.object({ ok: z.boolean() }),
+  permission: 'sites:write',
+  effect: 'write',
+  actionClass: 'index.submit',
   handler: async () => ({ ok: true }),
 });
 
@@ -59,14 +71,18 @@ describe('agents as principals', () => {
 
   it('records an allowed write and a refused write in the action ledger', async () => {
     const me = await tokenApi().call('agents.get', {});
-    const principal = {
-      ...agentPrincipal(owner.id, `token:${token.slice(0, 4)}`, ws, 'owner', ['sites:write']),
-      agent: { id: me.id, name: me.name, status: me.status, statusReason: me.statusReason },
-    };
-    await t.srv.executor.execute(testWrite, {}, principal, { surface: 'internal' });
+    const principal = agentPrincipal(
+      { id: me.id, name: me.name, status: me.status, statusReason: me.statusReason },
+      owner.id,
+      `token:${token.slice(0, 4)}`,
+      ws,
+      'owner',
+      ['sites:write'],
+    );
+    await t.srv.executor.execute(testDraft, {}, principal, { surface: 'internal' });
 
     await t.srv.db.admin.query(`UPDATE workspaces SET settings = '{"switch":"propose_only"}' WHERE id = $1`, [ws]);
-    await expect(t.srv.executor.execute(testWrite, {}, principal, { surface: 'internal' })).rejects.toMatchObject({
+    await expect(t.srv.executor.execute(testSubmit, {}, principal, { surface: 'internal' })).rejects.toMatchObject({
       status: 403,
       message: expect.stringContaining('propose-only'),
     });
@@ -75,8 +91,8 @@ describe('agents as principals', () => {
     const activity = await t.api(owner, ws).call('agents.activity', { agentId });
     expect(activity.actions).toHaveLength(2);
     const [denied, allowed] = activity.actions;
-    expect(allowed).toMatchObject({ command: 'test.write', decision: 'allow', ok: true, actionClass: 'settings' });
-    expect(denied).toMatchObject({ command: 'test.write', decision: 'deny', ok: false });
+    expect(allowed).toMatchObject({ command: 'test.draft', decision: 'allow', ok: true, actionClass: 'draft' });
+    expect(denied).toMatchObject({ command: 'test.submit', decision: 'deny', ok: false });
     expect(denied?.reasons.join(' ')).toContain('propose-only');
     expect(denied?.intent).toBeNull();
   });
@@ -127,7 +143,9 @@ describe('agents as principals', () => {
   it('counts what an agent did in the last 24 hours', async () => {
     const list = await t.api(owner, ws).call('agents.list', {});
     const hermes = list.agents.find((a) => a.id === agentId)!;
-    expect(hermes.last24h.changes).toBe(1);
+    // Drafts are not changes, and a refused submission is not one either; the refusal is counted.
+    expect(hermes.last24h.changes).toBe(0);
+    expect(hermes.last24h.denied).toBe(1);
     // The ledger is append-only for the app role: no update or delete grant beyond undoing.
     const grants = await t.srv.db.admin.query<{ privilege_type: string }>(
       `SELECT privilege_type FROM information_schema.role_table_grants WHERE table_name = 'agent_actions' AND grantee = '${APP_ROLE.appRole}'`,

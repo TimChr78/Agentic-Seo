@@ -30,6 +30,33 @@ const messagesOf = (err: unknown) => {
  * database has a tenant table this map does not know, so a new table cannot arrive unprotected.
  */
 const SEED: Record<string, { insert: string; appendOnly: boolean }> = {
+  agent_actions: {
+    insert: `INSERT INTO agent_actions (workspace_id, agent_id, command, action_class, decision, ok, surface)
+            VALUES ($1, 'agt-seed', 'test.write', 'site.content', 'allow', true, 'internal')`,
+    // The table grant is INSERT and SELECT only; undoing is column-level.
+    appendOnly: true,
+  },
+  agents: {
+    insert: `INSERT INTO agents (workspace_id, id, name, sponsor_user_id)
+            VALUES ($1, 'agt-seed', 'Seed agent', 'seed-user')`,
+    appendOnly: false,
+  },
+  agent_credentials: {
+    insert: `INSERT INTO agent_credentials (workspace_id, kind, credential_id, agent_id)
+            VALUES ($1, 'api_token', 'tok-seed', 'agt-seed')`,
+    // No UPDATE grant: a credential is attached or removed, never rewritten.
+    appendOnly: true,
+  },
+  api_token_changes: {
+    insert: `INSERT INTO api_token_changes (workspace_id, id, token_id, changed_by, changes)
+            VALUES ($1, 'tch-seed', 'tok-seed', 'seed-user', '{}'::jsonb)`,
+    appendOnly: false,
+  },
+  api_tokens: {
+    insert: `INSERT INTO api_tokens (workspace_id, id, user_id, name, token_hash, token_hint, scopes)
+            VALUES ($1, 'tok-seed', 'seed-user', 'Seed token', 'token-hash-' || md5(random()::text), 'hint', '{sites:read}')`,
+    appendOnly: false,
+  },
   audit_log: {
     insert: `INSERT INTO audit_log (workspace_id, principal_type, principal_id, surface, command, effect, input_hash, ok, hash)
             VALUES ($1, 'user', 'seed-user', 'rest', 'seed.run', 'write', 'seed-hash', true, 'seed-hash')`,
@@ -50,9 +77,22 @@ const SEED: Record<string, { insert: string; appendOnly: boolean }> = {
             VALUES ($1, 'user', 'seed-user', 'seed-client', 'seed.run', 'unknown_key')`,
     appendOnly: false,
   },
+  invitations: {
+    insert: `INSERT INTO invitations (workspace_id, id, email, role, token_hash, invited_by, expires_at)
+            VALUES ($1, 'inv-seed', 'seed@example.com', 'viewer', 'invitation-hash-' || md5(random()::text), 'seed-user', now() + interval '7 days')`,
+    appendOnly: false,
+  },
+  oauth_workspace_selections: {
+    insert: `INSERT INTO oauth_workspace_selections (session_id, workspace_id) VALUES ('session-' || md5(random()::text), $1)`,
+    appendOnly: false,
+  },
   secrets: {
     insert: `INSERT INTO secrets (workspace_id, name, data_key_id, iv, ciphertext, auth_tag, updated_by)
             VALUES ($1, 'seed-secret', 'dk-seed', '\\x00'::bytea, '\\x01'::bytea, '\\x02'::bytea, 'seed-user')`,
+    appendOnly: false,
+  },
+  workspace_members: {
+    insert: `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, 'seed-user', 'viewer')`,
     appendOnly: false,
   },
 };

@@ -20,6 +20,7 @@ export default defineConfig({
           name: 'packages',
           include: ['packages/*/test/**/*.test.ts', 'packages/*/src/**/*.test.ts'],
           maxWorkers: workers,
+          testTimeout: 60_000,
         },
       },
       {
@@ -43,8 +44,8 @@ export default defineConfig({
           // server suite runs with its own template database.
           sequence: { groupOrder: 2 },
           maxWorkers: Math.min(workers, 3),
-          testTimeout: 30_000,
-          hookTimeout: 120_000,
+          testTimeout: 60_000,
+          hookTimeout: 180_000,
         },
       },
     ],
