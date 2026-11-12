@@ -59,6 +59,22 @@ describe('MemoryHostLimiter', () => {
     await Promise.all(leases.map((lease) => lease.release()));
   });
 
+  it('keeps the spacing across sequential runs after the last lease is released', async () => {
+    const limiter = new MemoryHostLimiter({ maxConcurrencyPerHost: 1, minDelayMs: 300 });
+    const starts: number[] = [];
+    const run = () =>
+      limiter.run('sequential.test', async () => {
+        starts.push(performance.now());
+      });
+
+    await run();
+    await run();
+
+    expect(starts).toHaveLength(2);
+    // Releasing the last lease must not forget the next start time: the second run waits its turn.
+    expect(starts[1]! - starts[0]!).toBeGreaterThanOrEqual(250);
+  });
+
   it('uses the crawl-delay as the spacing when one is given', async () => {
     const limiter = new MemoryHostLimiter({ maxConcurrencyPerHost: 4, minDelayMs: 0 });
     await limiter.acquire('crawl.test', { minDelayMs: 40 });

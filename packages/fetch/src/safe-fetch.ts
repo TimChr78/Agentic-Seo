@@ -1,7 +1,8 @@
 import { lookup } from 'node:dns/promises';
 import type { LookupFunction } from 'node:net';
 import { isIP } from 'node:net';
-import type { Transform } from 'node:stream';
+import { Readable, type Transform, Writable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import { Client } from 'undici';
 import { isBlockedAddress, isIpAddress, isMetadataAddress, normalizeHostname } from './addresses';
@@ -51,12 +52,13 @@ export const systemResolver: HostResolver = async (hostname) => {
 };
 
 /**
- * Credentials for one site, bound to the hosts they belong to (security-and-privacy.md §4). They
- * are added only when the hop's host matches exactly, so a cross-host redirect never receives them.
+ * Credentials for one site, bound to the exact origins they belong to (security-and-privacy.md §4).
+ * Scheme, host and port must all match, so a redirect to another origin — another port, another
+ * host, or an https -> http downgrade — never receives them.
  */
 export interface FetchCredentials {
-  /** Exact host names these credentials belong to. */
-  hosts: ReadonlyArray<string>;
+  /** Exact origins (`https://example.com`, `https://example.com:8443`) these credentials belong to. */
+  origins: ReadonlyArray<string>;
   /** Extra headers, e.g. a verified-bot token. */
   headers?: Record<string, string>;
   basicAuth?: { username: string; password: string };
@@ -120,11 +122,22 @@ export interface SafeFetchOptions {
   credentials?: FetchCredentials | ReadonlyArray<FetchCredentials>;
   /** Overrides the per-type limit (10 MB HTML, 2 MB otherwise). */
   maxBytes?: number;
+  /**
+   * Return the bytes read before the limit instead of failing a non-HTML body with `too_large`.
+   * robots.txt uses it to read Google's bounded prefix (the first part of the file) and ignore the
+   * rest. {@link FetchResult.truncated} reports whether the limit was reached.
+   */
+  truncate?: boolean;
   maxRedirects?: number;
   connectTimeoutMs?: number;
   totalTimeoutMs?: number;
   resolver?: HostResolver;
   signal?: AbortSignal;
+  /**
+   * Extra CA certificate(s) to trust for the handshake. Test-only: production uses the system store,
+   * and certificate verification is never disabled.
+   */
+  ca?: string | Buffer | Array<string | Buffer>;
 }
 
 const DEFAULT_ACCEPT = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
@@ -256,8 +269,46 @@ function flattenHeaders(headers: Record<string, string | string[] | undefined>):
   return flat;
 }
 
-function decoderFor(contentEncoding: string): Transform | null {
-  switch (contentEncoding.split(',')[0]?.trim().toLowerCase()) {
+/**
+ * Collects a body up to a byte limit. Once more than the limit arrives it keeps the prefix, flags
+ * truncation and destroys itself, which makes `pipeline` tear the source (and its socket) down.
+ * Every byte that reached the sink is kept, so a truncated HTML head is exact.
+ */
+class BodyCollector extends Writable {
+  readonly chunks: Buffer[] = [];
+  size = 0;
+  truncated = false;
+  readonly #limit: number;
+
+  constructor(limit: number) {
+    super();
+    this.#limit = limit;
+  }
+
+  override _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+    const room = this.#limit - this.size;
+    if (buffer.length > room) {
+      if (room > 0) this.chunks.push(buffer.subarray(0, room));
+      this.size = this.#limit;
+      this.truncated = true;
+      callback();
+      this.destroy();
+      return;
+    }
+    this.size += buffer.length;
+    this.chunks.push(buffer);
+    callback();
+  }
+
+  body(): Buffer {
+    return Buffer.concat(this.chunks);
+  }
+}
+
+/** The decoder for one `Content-Encoding` value. */
+function decoderFor(encoding: string, url: string): Transform {
+  switch (encoding) {
     case 'gzip':
     case 'x-gzip':
       return createGunzip();
@@ -266,12 +317,83 @@ function decoderFor(contentEncoding: string): Transform | null {
     case 'br':
       return createBrotliDecompress();
     default:
-      // We only advertise gzip, deflate and br; anything else is taken at face value.
-      return null;
+      // We advertise gzip, deflate and br. Returning the encoded bytes as if they were text would
+      // hide the failure, so an encoding we cannot undo is a typed error.
+      throw new SafeFetchError('unsupported_encoding', `content-encoding "${encoding}" is not supported`, { url });
   }
 }
 
-/** The headers for one hop, with the bot identity and the credentials bound to this exact host. */
+/**
+ * The encodings to undo, in order: the last one applied is undone first, so `gzip, deflate` means
+ * the body is `deflate(gzip(content))`. `identity` is a no-op; anything else is a typed error.
+ */
+const SUPPORTED_ENCODINGS = new Set(['gzip', 'x-gzip', 'deflate', 'br']);
+
+function decodePlan(contentEncoding: string, url: string): string[] {
+  const encodings = contentEncoding
+    .split(',')
+    .map((encoding) => encoding.trim().toLowerCase())
+    .filter((encoding) => encoding.length > 0 && encoding !== 'identity');
+  for (const encoding of encodings) {
+    if (!SUPPORTED_ENCODINGS.has(encoding)) {
+      throw new SafeFetchError('unsupported_encoding', `content-encoding "${encoding}" is not supported`, { url });
+    }
+  }
+  return encodings.reverse();
+}
+
+/**
+ * Runs one decode stage over a bounded input and collects at most `limit` decoded bytes. A stage
+ * that crosses the cap (or decodes a prefix already cut short by an earlier cap) still returns what
+ * it produced; a corrupt stage that produced nothing is a real failure.
+ */
+async function runDecodeStage(
+  input: Buffer,
+  encoding: string,
+  limit: number,
+  inputTruncated: boolean,
+  signal: AbortSignal,
+  url: string,
+): Promise<{ body: Buffer; truncated: boolean; error?: unknown }> {
+  const collector = new BodyCollector(limit);
+  const completion = pipeline([Readable.from([input]), decoderFor(encoding, url), collector], { signal });
+  let error: unknown;
+  try {
+    await completion;
+  } catch (caught) {
+    error = caught;
+  }
+  if (error !== undefined && !collector.truncated && !inputTruncated) {
+    return { body: Buffer.alloc(0), truncated: false, error };
+  }
+  return { body: collector.body(), truncated: collector.truncated || inputTruncated };
+}
+
+/** Whether a URL's origin is one of a credential entry's exact origins. */
+function credentialsForOrigin(entry: FetchCredentials, url: URL): boolean {
+  for (const origin of entry.origins) {
+    try {
+      if (new URL(origin).origin === url.origin) return true;
+    } catch {
+      // An origin that does not parse matches nothing: never fall back to a host-only match.
+    }
+  }
+  return false;
+}
+
+/** Rejects a header that would override the request authority (and therefore the TLS identity). */
+function assertNoAuthorityHeader(headers: Record<string, string> | undefined, url: string | undefined): void {
+  for (const name of Object.keys(headers ?? {})) {
+    const lower = name.toLowerCase();
+    if (lower === 'host' || lower === ':authority') {
+      throw new SafeFetchError('blocked_header', `${name} cannot be set by the caller; the authority comes from the URL`, {
+        url,
+      });
+    }
+  }
+}
+
+/** The headers for one hop, with the bot identity and the credentials bound to this exact origin. */
 function headersFor(
   url: URL,
   options: SafeFetchOptions,
@@ -279,14 +401,15 @@ function headersFor(
   method: string,
 ): Record<string, string> {
   const headers: Record<string, string> = {
+    // The authority always comes from the URL, never from the caller's headers.
+    host: url.host,
     'user-agent': options.userAgent ?? buildUserAgent(options.bot),
     accept: DEFAULT_ACCEPT,
     'accept-encoding': 'gzip, deflate, br',
     ...options.headers,
   };
-  const host = normalizeHostname(url.hostname);
   for (const entry of credentials) {
-    if (!entry.hosts.some((name) => normalizeHostname(name) === host)) continue;
+    if (!credentialsForOrigin(entry, url)) continue;
     if (entry.cookies) headers.cookie = headers.cookie ? `${headers.cookie}; ${entry.cookies}` : entry.cookies;
     if (entry.basicAuth) {
       const token = Buffer.from(`${entry.basicAuth.username}:${entry.basicAuth.password}`).toString('base64');
@@ -307,6 +430,8 @@ interface HopOptions {
   headers: Record<string, string>;
   body?: string | Buffer;
   maxBytes?: number;
+  truncate?: boolean;
+  ca?: string | Buffer | Array<string | Buffer>;
   connectTimeoutMs: number;
   signal: AbortSignal;
 }
@@ -332,8 +457,19 @@ async function requestHop(hop: HopOptions): Promise<HopResult> {
     else callback(null, pinned.address, pinned.family);
   }) as unknown as LookupFunction;
 
+  // The TLS identity is the URL's host name, never the pinned address and never the Host header.
+  // IP literals have no valid SNI name, so only a DNS name is passed as the server name.
+  const hostname = normalizeHostname(hop.url.hostname);
+  const servername = isIpAddress(hostname) ? undefined : hostname;
+  const connect = {
+    lookup: lookupPinned,
+    rejectUnauthorized: true,
+    ...(servername ? { servername } : {}),
+    ...(hop.ca ? { ca: hop.ca } : {}),
+  };
+
   const client = new Client(hop.url.origin, {
-    connect: { lookup: lookupPinned },
+    connect,
     connectTimeout: hop.connectTimeoutMs,
     headersTimeout: 0,
     bodyTimeout: 0,
@@ -354,6 +490,7 @@ async function requestHop(hop: HopOptions): Promise<HopResult> {
       path: path === '' ? '/' : path,
       headers: hop.headers,
       ...(hop.body !== undefined ? { body: hop.body } : {}),
+      ...(servername ? { servername } : {}),
       signal: hop.signal,
     });
     const ttfbMs = performance.now() - sentAt;
@@ -361,39 +498,38 @@ async function requestHop(hop: HopOptions): Promise<HopResult> {
     const contentType = headers['content-type'];
     const isHtml = HTML_CONTENT_TYPE.test(contentType ?? '');
     const limit = hop.maxBytes ?? (isHtml ? MAX_HTML_BYTES : MAX_OTHER_BYTES);
-    const decoder = decoderFor(headers['content-encoding'] ?? '');
-    const stream: AsyncIterable<unknown> = decoder ? (response.body.pipe(decoder) as AsyncIterable<unknown>) : response.body;
+    const plan = decodePlan(headers['content-encoding'] ?? '', hop.url.href);
 
-    const chunks: Buffer[] = [];
-    let size = 0;
-    let truncated = false;
+    // 1. Read the wire body through `pipeline`, never `pipe`: an error, a reset or an abort is
+    //    carried through the stream instead of leaving the caller waiting forever. Encoded bodies
+    //    need a little room for the encoding's own overhead; the decoded stages enforce the limit.
+    const wireLimit = plan.length > 0 ? Math.ceil(limit * 1.05) + 1024 : limit;
+    const wire = new BodyCollector(wireLimit);
+    const wireCompletion = pipeline(response.body, wire, { signal: hop.signal });
+    let wireError: unknown;
     try {
-      for await (const chunk of stream) {
-        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
-        if (size + buffer.length > limit) {
-          // Stop reading at the limit instead of draining an endless or bomb-shaped body.
-          chunks.push(buffer.subarray(0, limit - size));
-          size = limit;
-          truncated = true;
-          break;
-        }
-        size += buffer.length;
-        chunks.push(buffer);
-      }
-    } catch (error) {
-      if (!truncated) throw error;
-    } finally {
-      if (truncated) {
-        // Tearing the streams down closes the socket; the head we have is all the crawler gets.
-        response.body.destroy();
-        decoder?.destroy();
-      }
+      await wireCompletion;
+    } catch (caught) {
+      wireError = caught;
+    }
+    if (wireError !== undefined && !wire.truncated) throw wireError;
+
+    // 2. Undo every encoding over a bounded input, keeping the prefix when a stage hits the cap.
+    let body = wire.body();
+    let truncated = wire.truncated;
+    let inputTruncated = wire.truncated;
+    for (const encoding of plan) {
+      const stage = await runDecodeStage(body, encoding, limit, inputTruncated, hop.signal, hop.url.href);
+      if (stage.error !== undefined) throw stage.error;
+      body = stage.body;
+      truncated = truncated || stage.truncated;
+      inputTruncated = stage.truncated;
     }
 
-    if (truncated && !isHtml) {
+    if (truncated && !isHtml && !hop.truncate) {
       throw new SafeFetchError('too_large', `response exceeded ${limit} bytes and is ${contentType ?? 'not HTML'}`, { url: hop.url.href });
     }
-    return { status: response.statusCode, headers, body: Buffer.concat(chunks), truncated, connectMs, ttfbMs };
+    return { status: response.statusCode, headers, body, truncated, connectMs, ttfbMs };
   } finally {
     void client.destroy().catch(() => undefined);
   }
@@ -464,6 +600,11 @@ export async function safeFetch(target: string | URL, options: SafeFetchOptions 
       : [options.credentials as FetchCredentials]
     : [];
 
+  // The authority always comes from the URL. A Host header would change the TLS server name (and
+  // therefore which certificate is accepted), so it is refused rather than silently ignored.
+  assertNoAuthorityHeader(options.headers, typeof target === 'string' ? target : target.href);
+  for (const entry of credentialList) assertNoAuthorityHeader(entry.headers, undefined);
+
   let requestUrl: string;
   let current: URL;
   try {
@@ -519,6 +660,8 @@ export async function safeFetch(target: string | URL, options: SafeFetchOptions 
           headers: headersFor(current, options, credentialList, method),
           body,
           maxBytes: options.maxBytes,
+          truncate: options.truncate,
+          ca: options.ca,
           connectTimeoutMs,
           signal: controller.signal,
         });

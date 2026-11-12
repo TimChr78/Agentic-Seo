@@ -221,14 +221,24 @@ export class MemoryHostLimiter implements HostLimiter {
       },
       Math.max(1, delayMs),
     );
+    // A pending cleanup must never keep the process alive on its own.
+    state.timer.unref?.();
   }
 
-  /** Drops a host's state once it is idle and its pause has passed, so the map stays small. */
+  /**
+   * Drops a host's state once it is idle and both its spacing and pause deadlines have passed, so
+   * the map stays small without forgetting when the next request to that host may start.
+   */
   #cleanup(key: string): void {
     const state = this.#hosts.get(key);
     if (!state) return;
     if (state.queue.length > 0 || state.active > 0) return;
-    if (state.pausedUntil > this.#now()) return;
+    const readyAt = Math.max(state.nextStart, state.pausedUntil);
+    if (readyAt > this.#now()) {
+      // Keep the state (and its next start time) until the deadline, then clean up lazily.
+      this.#schedule(key, state, readyAt - this.#now());
+      return;
+    }
     if (state.timer) {
       clearTimeout(state.timer);
       state.timer = undefined;

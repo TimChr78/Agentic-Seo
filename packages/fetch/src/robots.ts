@@ -121,6 +121,16 @@ function allowsEverything(status: number): boolean {
 }
 
 /**
+ * A truncated prefix is only trustworthy up to its last complete line: the cut may fall in the
+ * middle of a directive, and a fragment must not become a rule.
+ */
+function completeLines(text: string, truncated: boolean): string {
+  if (!truncated) return text;
+  const end = text.lastIndexOf('\n');
+  return end === -1 ? '' : text.slice(0, end + 1);
+}
+
+/**
  * robots.txt for a site (security-and-privacy.md §2). Fetched through the SSRF guard, parsed with
  * Google's precedence rules (via robots-parser), cached per origin.
  *
@@ -213,6 +223,10 @@ export class Robots {
         bot: { product: this.#product },
         userAgent: this.#userAgent,
         maxBytes: this.#maxBytes,
+        // Google reads the first 500 KiB of a robots.txt and ignores the rest
+        // (https://developers.google.com/crawling/docs/robots-txt/robots-txt-spec). Read a bounded
+        // prefix instead of turning an oversized but valid file into "disallow everything".
+        truncate: true,
         ...(this.#signal ? { signal: this.#signal } : {}),
       });
       const status = result.status;
@@ -220,7 +234,7 @@ export class Robots {
       record = {
         origin,
         status,
-        body: status >= 200 && status < 300 ? result.text : '',
+        body: status >= 200 && status < 300 ? completeLines(result.text, result.truncated) : '',
         fetchedAt,
         expiresAt: fetchedAt + ttl,
       };

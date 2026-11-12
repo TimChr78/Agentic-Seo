@@ -27,10 +27,18 @@ const BLOCKED_IPV4: ReadonlyArray<readonly [string, number]> = [
 /**
  * `::/128` unspecified, `::1/128` loopback, `fc00::/7` unique-local (which contains the cloud
  * metadata address `fd00:ec2::254`), `fe80::/10` link-local and `ff00::/8` multicast.
+ *
+ * IPv6 transition forms are refused outright, because their embedded IPv4 address can name a
+ * private or metadata target even when the transitional prefix itself looks public:
+ * `64:ff9b:1::/48` (local-use NAT64, RFC 8215) and `2001::/32` (Teredo, RFC 4380). The well-known
+ * NAT64 `64:ff9b::/96` and 6to4 `2002::/16` are checked through the IPv4 block list instead, so a
+ * transition address that embeds a public address can still be reached.
  */
 const BLOCKED_IPV6: ReadonlyArray<readonly [string, number]> = [
   ['::', 128],
   ['::1', 128],
+  ['64:ff9b:1::', 48],
+  ['2001::', 32],
   ['fc00::', 7],
   ['fe80::', 10],
   ['ff00::', 8],

@@ -11,6 +11,10 @@ export type FetchErrorKind =
   | 'blocked_port'
   /** Userinfo in the URL; credentials come from secrets and scoped headers instead. */
   | 'blocked_credentials'
+  /** A caller-supplied `Host` or `:authority` header, which would change the TLS identity. */
+  | 'blocked_header'
+  /** A `Content-Encoding` we cannot decode, so the body cannot be read as text. */
+  | 'unsupported_encoding'
   /** The URL, or the location of a redirect, does not parse. */
   | 'invalid_url'
   /** The name did not resolve, or the resolver returned no usable address. */

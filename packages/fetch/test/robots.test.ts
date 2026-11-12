@@ -16,7 +16,7 @@ const ROBOTS = [
 ].join('\n');
 
 /** A robots fetch that answers from a table, recording the request. */
-function stubFetch(status: number, body = '', calls: Array<{ url: string; userAgent?: string }> = []): RobotsFetch {
+function stubFetch(status: number, body = '', calls: Array<{ url: string; userAgent?: string }> = [], truncated = false): RobotsFetch {
   return async (url, options) => {
     calls.push({ url, userAgent: options?.userAgent });
     const headers: Record<string, string> = { 'content-type': 'text/plain' };
@@ -29,7 +29,7 @@ function stubFetch(status: number, body = '', calls: Array<{ url: string; userAg
       charset: 'utf-8',
       body: Buffer.from(body),
       text: body,
-      truncated: false,
+      truncated,
       redirects: [],
       timings: { dnsMs: 0, connectMs: 0, ttfbMs: 0, totalMs: 0 },
     };
@@ -150,6 +150,42 @@ describe('robots.txt', () => {
     expect(await robots.isAllowed(`http://site.test:${site.port}/public`)).toBe(true);
     expect(await robots.isAllowed(`http://site.test:${site.port}/private/x`)).toBe(false);
     expect(site.requests[0]?.url).toBe('/robots.txt');
+  });
+
+  it('parses the prefix of an oversized robots.txt instead of disallowing the site', async () => {
+    const head = 'User-agent: *\nDisallow: /private/\n';
+    const filler = 'Sitemap: https://example.test/sitemap.xml\n'.repeat(50);
+    const site = await startSite((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end(`${head}${filler}`);
+    });
+
+    const robots = new Robots({
+      maxBytes: Buffer.byteLength(head) + 80,
+      fetchOptions: {
+        resolver: tableResolver({ 'site.test': loopback }),
+        allow: { privateHosts: ['site.test'], ports: [site.port] },
+      },
+    });
+
+    const policy = await robots.policy(`http://site.test:${site.port}/`);
+
+    expect(policy.status).toBe(200);
+    expect(policy.unavailable).toBe(false);
+    expect(policy.isAllowed(`http://site.test:${site.port}/private/x`)).toBe(false);
+    expect(policy.isAllowed(`http://site.test:${site.port}/public`)).toBe(true);
+    expect(policy.sitemaps).toEqual(['https://example.test/sitemap.xml']);
+  });
+
+  it('keeps only complete lines from a truncated robots.txt', async () => {
+    const body = 'User-agent: *\nDisallow: /blocked\nDisallow: /hal';
+    const robots = new Robots({ fetch: stubFetch(200, body, [], true) });
+
+    const policy = await robots.policy('https://example.test/');
+
+    expect(policy.isAllowed('https://example.test/blocked')).toBe(false);
+    // The last line was cut mid-directive, so it is not a rule at all.
+    expect(policy.isAllowed('https://example.test/half')).toBe(true);
   });
 
   it('rejects a URL it cannot parse', async () => {

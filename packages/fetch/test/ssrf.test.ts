@@ -1,6 +1,6 @@
 import { gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
-import { checkUrl, type HostResolver, MAX_HTML_BYTES, SafeFetchError, type SafeFetchOptions, safeFetch } from '../src';
+import { checkUrl, type HostResolver, isBlockedAddress, MAX_HTML_BYTES, SafeFetchError, type SafeFetchOptions, safeFetch } from '../src';
 import { closeSites, loopback, ok, redirectTo, startSite, tableResolver } from './support';
 
 // The SSRF regression suite CI runs (security-and-privacy.md §1). Every test either fails before a
@@ -43,10 +43,27 @@ describe('SSRF guard: address classes', () => {
       'http://[::ffff:0:127.0.0.1]/',
       'http://[::ffff:0:10.0.0.1]/',
       'http://[64:ff9b::a00:1]/',
+      'http://[64:ff9b::a9fe:a9fe]/',
+      'http://[64:ff9b:1:a9fe:a9:fe00::]/',
+      'http://[2001::1]/',
+      'http://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/',
       'http://[2002:a00:1::]/',
     ]) {
       const error = await failure(safeFetch(url));
       expect(error.kind, url).toBe('blocked_address');
+    }
+  });
+
+  it('refuses IPv6 transition ranges, including a local-use NAT64 and Teredo', () => {
+    for (const address of [
+      '64:ff9b:1:a9fe:a9:fe00::',
+      '64:ff9b:1::',
+      '2001::1',
+      '2001:0:4136:e378:8000:63bf:3fff:fdd2',
+      '2002:a9fe:a9fe::',
+      '64:ff9b::a9fe:a9fe',
+    ]) {
+      expect(isBlockedAddress(address), address).toBe(true);
     }
   });
 
@@ -171,7 +188,7 @@ describe('SSRF guard: redirects', () => {
       resolver: tableResolver({ 'site.test': loopback, 'other.test': loopback }),
       allow: { privateHosts: ['site.test', 'other.test'], ports: [site.port] },
       credentials: {
-        hosts: ['site.test'],
+        origins: [`http://site.test:${site.port}`],
         basicAuth: { username: 'crawler', password: 'hunter2' },
         cookies: 'session=abc',
         headers: { 'x-verified-bot': 'token' },
@@ -303,6 +320,22 @@ describe('SSRF guard: response size and decompression', () => {
       }),
     );
     expect(error.kind).toBe('too_large');
+  });
+
+  it('returns a bounded prefix for any content type when truncation is requested', async () => {
+    const site = await startSite((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('a'.repeat(64 * 1024));
+    });
+    const result = await safeFetch(`http://site.test:${site.port}/`, {
+      resolver: tableResolver({ 'site.test': loopback }),
+      allow: { privateHosts: ['site.test'], ports: [site.port] },
+      maxBytes: 4096,
+      truncate: true,
+    });
+    expect(result.truncated).toBe(true);
+    expect(result.body.length).toBe(4096);
+    expect(result.text).toBe('a'.repeat(4096));
   });
 });
 
