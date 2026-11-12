@@ -22,6 +22,17 @@ export default defineConfig({
           maxWorkers: workers,
         },
       },
+      {
+        extends: true,
+        test: {
+          name: 'web',
+          include: ['apps/web/test/**/*.test.{ts,tsx}', 'apps/web/src/**/*.test.{ts,tsx}'],
+          environment: 'jsdom',
+          setupFiles: ['apps/web/test/setup.ts'],
+          // Its own group: a different worker count from the packages project needs a distinct order.
+          sequence: { groupOrder: 1 },
+        },
+      },
     ],
     testTimeout: 20_000,
     hookTimeout: 60_000,
