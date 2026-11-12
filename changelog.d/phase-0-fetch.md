@@ -1,0 +1,4 @@
+- The new `fetch` package is the only path that reaches arbitrary URLs: DNS-pinned connections checked against private, loopback, link-local and metadata ranges (IPv4, IPv6 and their embedded forms), manual redirects re-validated per hop, ports locked to 80/443 unless a site allows more, and an explicit per-site allow-list for homelab and staging hosts.
+- Responses are streamed with a decoded-byte cap (10 MB HTML, 2 MB other): oversized HTML comes back truncated so an audit can still read the head, and a gzip bomb is stopped on decoded size.
+- robots.txt is fetched through the same guard, parsed with Google precedence and cached per origin (4xx allows, 5xx and unreachable disallow temporarily); an in-memory per-host limiter enforces concurrency, crawl-delay and `Retry-After`.
+- The package also defines the renderer port, with a `none` renderer that reports "Not evaluated" rather than an empty page.
