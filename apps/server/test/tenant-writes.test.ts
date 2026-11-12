@@ -2,7 +2,9 @@ import { agentForCredential, chooseOAuthWorkspace, cleanupExpiredOAuthWorkspaceS
 import { newUuid } from '@agentic-seo/core';
 import type { Db } from '@agentic-seo/db';
 import { sql } from 'drizzle-orm';
+import { parseCrontab } from 'graphile-worker';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { consentWorkspaceId, withConsentRequest } from '../../../packages/auth/src/oauthWorkspace';
 import { CLEANUP_OAUTH_SELECTIONS_TASK, CRONTAB, taskListFor } from '../src/workers';
 import { startTestServer, testPort, type User } from './harness';
 
@@ -41,7 +43,7 @@ function refusingOwnerWrites(db: Db): { db: Db; attempted: string[] } {
       if (prop === 'connect') return () => refuse('a connection');
       if (prop === 'query') {
         return (text: string, values?: unknown[]) => {
-          if (/^\s*(insert|update|delete)\b/i.test(String(text))) return refuse('a tenant write');
+          if (/\b(insert|update|delete)\b/i.test(String(text))) return refuse('a tenant write');
           return target.query(text as never, values as never);
         };
       }
@@ -103,7 +105,33 @@ describe('tenant writes on the auth path', () => {
     expect(remaining).toContain('fresh-c');
   });
 
+  it('consumes a consent choice as the app role, and hands it to exactly one of two concurrent consumers', async () => {
+    const both = await t.signUp(`tenant-two-${Date.now()}@example.com`);
+    await t.workspaceWith([[both, 'owner']]);
+    const second = await t.workspaceWith([[both, 'owner']]);
+    const oauthQuery = 'client_id=race-client&state=race-state&response_type=code';
+    await chooseOAuthWorkspace(t.srv.db, {
+      sessionId: 'session-race',
+      userId: both.id,
+      workspaceId: second,
+      scope: 'sites:read',
+      oauthQuery,
+    });
+
+    const { db, attempted } = refusingOwnerWrites(t.srv.db);
+    const consume = () => withConsentRequest({ query: oauthQuery, mode: 'consent' }, () => consentWorkspaceId(db, both.id, 'session-race'));
+    const results = await Promise.all([consume(), consume()]);
+
+    // The choice is consumed once: one consumer gets it, the other finds nothing (two memberships,
+    // so there is no single-membership fallback).
+    expect(results.filter((r) => r === second)).toHaveLength(1);
+    expect(results.filter((r) => r === undefined)).toHaveLength(1);
+    expect(attempted).toEqual([]);
+  });
+
   it('registers the cleanup as an hourly scheduler task, not in the request path', () => {
+    // Graphile Worker must accept the crontab: an invalid task identifier stops the scheduler from starting.
+    expect(() => parseCrontab(CRONTAB)).not.toThrow();
     expect(CRONTAB).toBe(`0 * * * * ${CLEANUP_OAUTH_SELECTIONS_TASK}`);
     expect(Object.keys(taskListFor(t.srv.db))).toContain(CLEANUP_OAUTH_SELECTIONS_TASK);
   });

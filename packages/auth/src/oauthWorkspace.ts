@@ -148,19 +148,26 @@ export async function consentWorkspaceId(db: Db, userId: string, sessionId: stri
   const membership = (workspaceId: string) => memberships.rows.some((m) => m.workspace_id === workspaceId);
 
   if (key) {
-    // Read the latest choice and consume every row for this request in one statement: the most
-    // recent workspace the person picked wins, and a replay cannot reuse an earlier pick.
-    const { rows } = await db.admin.query<{ workspace_id: string }>(
-      `WITH picked AS (
-         SELECT ctid, workspace_id FROM oauth_workspace_selections
-          WHERE session_id = $1 ORDER BY updated_at DESC LIMIT 1
-       ), removed AS (
-         DELETE FROM oauth_workspace_selections WHERE session_id = $1
-       )
-       SELECT workspace_id FROM picked`,
-      [selectionId(sessionId, key)],
-    );
-    const chosen = rows[0]?.workspace_id;
+    // Consume this request's choices under each member workspace's RLS. The choice is taken only
+    // from rows this call's DELETE actually removed (RETURNING), so two concurrent consumers can
+    // never both receive the same pick, and a replay finds nothing. The most recent pick wins.
+    // Rows in workspaces the person is not a member of are never chosen; the scheduler's cleanup
+    // removes them when they expire.
+    const id = selectionId(sessionId, key);
+    const consumed: { workspace_id: string; updated_at: Date }[] = [];
+    for (const { workspace_id } of memberships.rows) {
+      const removed = await db.withWorkspace(workspace_id, async (tx) => {
+        const { rows } = await tx.execute<{ workspace_id: string; updated_at: Date }>(
+          sql`DELETE FROM oauth_workspace_selections
+               WHERE session_id = ${id} AND workspace_id = ${workspace_id}
+               RETURNING workspace_id, updated_at`,
+        );
+        return rows;
+      });
+      consumed.push(...removed);
+    }
+    consumed.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+    const chosen = consumed[0]?.workspace_id;
     if (chosen && membership(chosen)) return resolve(chosen);
   }
   if (memberships.rows.length === 1) return resolve(memberships.rows[0].workspace_id);

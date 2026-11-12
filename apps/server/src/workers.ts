@@ -14,7 +14,8 @@ import type { Config } from './config';
 // scheduler registers the crontab, so a split deployment does not enqueue every job twice.
 
 /** The cross-tenant sweep of abandoned OAuth consent choices. */
-export const CLEANUP_OAUTH_SELECTIONS_TASK = 'oauth-workspace-selections.cleanup';
+// Graphile Worker task identifiers allow letters, digits, `_`, `-` and `:` only (a dot fails the crontab parse).
+export const CLEANUP_OAUTH_SELECTIONS_TASK = 'oauth_workspace_selections_cleanup';
 
 /**
  * Recurring jobs in Graphile Worker's crontab format (minute hour day-of-month month weekday task).
