@@ -1,0 +1,30 @@
+# The shared test stack for Agentic SEO: one per machine, used by every checkout and delegate.
+#
+#   scripts/test-services.sh up
+#   eval "$(scripts/test-services.sh env)"
+#   corepack pnpm test
+#
+# Only Postgres is required (ADR-0003). Ports are distinct from Agentic Marketing's test stack
+# (25432…) so both can run on one host. Bound to loopback by default: the database has a known
+# password and must never be reachable from the LAN. Everything carries the label as-test=1.
+name: as-test
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    labels: ["as-test=1"]
+    environment:
+      POSTGRES_USER: aseo
+      POSTGRES_PASSWORD: aseo
+      POSTGRES_DB: aseo
+    command: ["postgres", "-c", "max_connections=300", "-c", "fsync=off", "-c", "synchronous_commit=off"]
+    ports: ["${AS_TEST_BIND_IP:-127.0.0.1}:${AS_TEST_PG_PORT:-45432}:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "aseo"]
+      interval: 2s
+      retries: 30
+    volumes: [pgdata:/var/lib/postgresql/data]
+
+volumes:
+  pgdata:
+    labels: ["as-test=1"]
