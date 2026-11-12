@@ -1,0 +1,10 @@
+- Port `db` with one foundation migration (workspaces, audit log, idempotency, data keys, secrets, input warnings) and row-level security for every tenant table.
+- Port `commands` with the SEO permission set, the five workspace roles (`marketer` renamed `editor`), the SEO action classes and a policy engine that keeps levels 0–4 while shipping L0/L1 and workspace ceilings.
+- Port `secrets` (envelope encryption and write-only secret commands) and `client` under the `@agentic-seo` scope.
+- Add a database test harness that creates and drops its own databases from `TEST_DATABASE_URL`, plus tests for the migrator, RLS isolation and the registry's action-class rule.
+- Fail closed on agent principals without an agent identity: reads still run, every other command is refused with "forbidden".
+- Apply the fixed rules and the unknown-reach rule to agents without a mandate too, and put those agents at level 1 (propose) for every write class.
+- Keep one active data key per workspace and purpose, and stop `activeDataKey` from recursing forever when two requests race.
+- Serialise idempotent requests per workspace and key before the lookup, so concurrent retries run the handler once.
+- Strip superuser and BYPASSRLS from an existing app role during migration, and refuse a role that inherits them.
+- Prove row-level security for every table with a `workspace_id` column, and prove the audit log's hash chain links and detects tampering.
