@@ -1,0 +1,16 @@
+{
+  "name": "Agentic SEO",
+  "short_name": "Agentic SEO",
+  "description": "Open-source, agent-first search operations with people in control.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f7f6f2",
+  "theme_color": "#f7f6f2",
+  "icons": [
+    {
+      "src": "/brand/mark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
