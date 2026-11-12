@@ -213,16 +213,19 @@ export class MemoryHostLimiter implements HostLimiter {
   }
 
   #schedule(key: string, state: HostState, delayMs: number): void {
-    if (state.timer) return;
-    state.timer = setTimeout(
-      () => {
-        state.timer = undefined;
-        this.#pump(key);
-      },
-      Math.max(1, delayMs),
-    );
-    // A pending cleanup must never keep the process alive on its own.
-    state.timer.unref?.();
+    if (!state.timer)
+      state.timer = setTimeout(
+        () => {
+          state.timer = undefined;
+          this.#pump(key);
+        },
+        Math.max(1, delayMs),
+      );
+    // A timer that serves queued requests keeps the process alive (they would never run otherwise);
+    // a cleanup-only timer must not. Re-evaluated on every call, so a reused cleanup timer is
+    // referenced again as soon as a waiter queues behind it.
+    if (state.queue.length > 0) state.timer.ref?.();
+    else state.timer.unref?.();
   }
 
   /**

@@ -188,6 +188,16 @@ describe('robots.txt', () => {
     expect(policy.isAllowed('https://example.test/half')).toBe(true);
   });
 
+  it('treats a bare CR as a line end when trimming a truncated robots.txt', async () => {
+    const body = 'User-agent: *\rDisallow: /secret\rDisallow: /hal';
+    const robots = new Robots({ fetch: stubFetch(200, body, [], true) });
+
+    const policy = await robots.policy('https://example.test/');
+
+    expect(policy.isAllowed('https://example.test/secret')).toBe(false);
+    expect(policy.isAllowed('https://example.test/half')).toBe(true);
+  });
+
   it('rejects a URL it cannot parse', async () => {
     const robots = new Robots({ fetch: stubFetch(200, ROBOTS) });
     await expect(robots.policy('not a url')).rejects.toBeInstanceOf(SafeFetchError);

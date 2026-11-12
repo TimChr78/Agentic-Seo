@@ -518,8 +518,11 @@ async function requestHop(hop: HopOptions): Promise<HopResult> {
     let body = wire.body();
     let truncated = wire.truncated;
     let inputTruncated = wire.truncated;
-    for (const encoding of plan) {
-      const stage = await runDecodeStage(body, encoding, limit, inputTruncated, hop.signal, hop.url.href);
+    for (const [index, encoding] of plan.entries()) {
+      // An intermediate stage is still encoded, so it gets the same bounded overhead as the wire;
+      // only the last stage (the decoded body) is held to the caller's limit.
+      const stageLimit = index === plan.length - 1 ? limit : wireLimit;
+      const stage = await runDecodeStage(body, encoding, stageLimit, inputTruncated, hop.signal, hop.url.href);
       if (stage.error !== undefined) throw stage.error;
       body = stage.body;
       truncated = truncated || stage.truncated;

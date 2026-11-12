@@ -75,6 +75,18 @@ describe('MemoryHostLimiter', () => {
     expect(starts[1]! - starts[0]!).toBeGreaterThanOrEqual(250);
   });
 
+  it('keeps the process alive while a request waits for its turn, but not for cleanup alone', async () => {
+    const limiter = new MemoryHostLimiter({ maxConcurrencyPerHost: 1, minDelayMs: 300 });
+    const timers = () => process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length;
+    await limiter.run('alive.test', async () => {});
+    // Only the cleanup timer is pending now: it must not hold the event loop open.
+    const idle = timers();
+    const waiting = limiter.run('alive.test', async () => {});
+    // A queued request: the same timer now serves it, so it must be referenced.
+    expect(timers()).toBe(idle + 1);
+    await waiting;
+  });
+
   it('uses the crawl-delay as the spacing when one is given', async () => {
     const limiter = new MemoryHostLimiter({ maxConcurrencyPerHost: 4, minDelayMs: 0 });
     await limiter.acquire('crawl.test', { minDelayMs: 40 });

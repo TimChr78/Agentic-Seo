@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { brotliCompressSync, deflateSync, gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SafeFetchError, safeFetch } from '../src';
@@ -44,6 +45,20 @@ describe('content-encoding chains', () => {
 
     expect(result.text).toBe(HTML);
     expect(result.truncated).toBe(false);
+  });
+
+  it('accepts a body just under the limit whose intermediate encoding is larger than the limit', async () => {
+    // Incompressible content: gzip adds a little, so the intermediate stage exceeds maxBytes while
+    // the decoded body (4,090 bytes) fits within it.
+    const content = randomBytes(4090);
+    const body = deflateSync(gzipSync(content));
+    expect(gzipSync(content).length).toBeGreaterThan(4096);
+    const site = await siteWithBody(body, 'gzip, deflate', 'application/octet-stream');
+
+    const result = await safeFetch(`http://site.test:${site.port}/`, options(site.port, 4096));
+
+    expect(result.truncated).toBe(false);
+    expect(Buffer.compare(result.body, content)).toBe(0);
   });
 
   it('decodes brotli', async () => {

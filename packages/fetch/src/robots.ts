@@ -126,7 +126,8 @@ function allowsEverything(status: number): boolean {
  */
 function completeLines(text: string, truncated: boolean): string {
   if (!truncated) return text;
-  const end = text.lastIndexOf('\n');
+  // robots.txt lines may end in LF, CRLF or a bare CR; any of them closes a line.
+  const end = Math.max(text.lastIndexOf('\n'), text.lastIndexOf('\r'));
   return end === -1 ? '' : text.slice(0, end + 1);
 }
 
