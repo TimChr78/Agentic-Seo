@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { createDemoApi } from '../src/app/api';
 import { NAV, navFor, SETTINGS_GROUP, SETTINGS_ITEMS, settingsPath, visibleNav, visibleSettings } from '../src/app/nav';
 import { PLANNED } from '../src/app/planned';
 import { redirectTarget } from '../src/app/redirects';
@@ -141,5 +142,31 @@ describe('navigation', () => {
     expect(redirectTarget('/inbox', new URLSearchParams())).toBeNull();
     expect(redirectTarget('/settings/site', new URLSearchParams('tab=domains'))).toBeNull();
     expect(redirectTarget('/not-a-page', new URLSearchParams())).toBeNull();
+  });
+});
+
+// The owner's permissions on the server: every permission in packages/commands/src/principal.ts.
+const OWNER_PERMISSIONS = [
+  'artifacts:read',
+  'artifacts:write',
+  'artifacts:publish',
+  'artifacts:approve',
+  'sites:read',
+  'sites:write',
+  'audits:run',
+  'research:spend',
+  'changes:apply',
+  'audit:read',
+  'secrets:read',
+  'secrets:write',
+  'workspace:admin',
+];
+
+describe('the demo owner', () => {
+  it('holds the canonical owner permissions, so every Settings entry is open', async () => {
+    const workspace = await createDemoApi().getWorkspace();
+    expect([...workspace.permissions].sort()).toEqual([...OWNER_PERMISSIONS].sort());
+    const perms = new Set(workspace.permissions);
+    expect(visibleSettings((p) => perms.has(p))).toHaveLength(SETTINGS_ITEMS.length);
   });
 });

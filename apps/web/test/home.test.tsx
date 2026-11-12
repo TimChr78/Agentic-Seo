@@ -24,14 +24,14 @@ const ORESUND: Site = {
   role: 'owner',
 };
 
-function session(site: Site): SessionValue {
+function session(site: Site, permissions?: string[]): SessionValue {
   return {
     status: 'ready',
     user: { id: 'usr_1', name: 'Alex Rivera', email: 'alex@martechsignal.com' },
     workspace: { id: 'ws_1', name: 'Workspace', timeZone: 'UTC', role: 'owner', permissions: ['sites:read', 'sites:write'] },
     sites: [MARTECH, ORESUND],
     site,
-    can: () => true,
+    can: (p) => (permissions ? permissions.includes(p) : true),
     refresh: async () => {},
     switchSite: async () => {},
     createSite: async () => site,
@@ -48,6 +48,43 @@ beforeEach(() => {
 });
 
 describe('Home', () => {
+  it('only links setup steps a role can open', async () => {
+    const editor = [
+      'artifacts:read',
+      'artifacts:write',
+      'artifacts:publish',
+      'sites:read',
+      'sites:write',
+      'audits:run',
+      'research:spend',
+      'changes:apply',
+      'audit:read',
+    ];
+    const { unmount } = render(
+      <SessionContext.Provider value={session(ORESUND, editor)}>
+        <HomePage />
+      </SessionContext.Provider>,
+    );
+    await screen.findByText('Set up Øresund Live');
+    const hrefs = () => screen.queryAllByRole('link').map((a) => a.getAttribute('href'));
+    // An editor can verify the site but not open Connections or Providers (workspace:admin).
+    expect(hrefs()).toContain('/settings/site');
+    expect(hrefs()).not.toContain('/settings/connections');
+    expect(hrefs()).not.toContain('/settings/providers');
+    expect(screen.getAllByText('Needs an admin').length).toBeGreaterThan(0);
+    unmount();
+
+    render(
+      <SessionContext.Provider value={session(ORESUND, ['artifacts:read', 'sites:read'])}>
+        <HomePage />
+      </SessionContext.Provider>,
+    );
+    await screen.findByText('Set up Øresund Live');
+    // A viewer cannot verify the site either.
+    expect(hrefs()).not.toContain('/settings/site');
+    expect(hrefs()).not.toContain('/settings/connections');
+  });
+
   it('names the site and shows the six-step setup checklist', async () => {
     render(
       <SessionContext.Provider value={session(MARTECH)}>

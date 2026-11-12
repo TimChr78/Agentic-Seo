@@ -1,9 +1,10 @@
 import { ArrowRight, Check, Plus } from 'lucide-react';
 import { api, type ChecklistFacts } from '../app/api';
 import { ButtonLink } from '../app/links';
+import { canOpenPath } from '../app/nav';
 import { useCrumbs } from '../app/page';
 import { Link } from '../app/router';
-import { useSite } from '../app/session';
+import { useSession, useSite } from '../app/session';
 import { useKeyedApi } from '../app/useApi';
 import { Alert, Card, EmptyState, KpiTile, LineChart, LoadingBlock, PageHeader, StatusPill, Tag } from '../ui';
 import { Button } from '../ui/Button';
@@ -20,6 +21,7 @@ import { formatDateTime } from '../ui/time';
 export default function HomePage() {
   useCrumbs([{ label: 'Home' }]);
   const { site } = useSite();
+  const { can } = useSession();
   // Keyed by site: while the new site loads, or if it fails, the previous site's numbers are never
   // shown under the new site's name.
   const home = useKeyedApi(site.id, () => api.getHome(site.id));
@@ -78,11 +80,17 @@ export default function HomePage() {
             zero.
           </p>
           <p className="mt-2 text-[13px] leading-5 text-fg-2">
-            Next:{' '}
-            <Link to="/settings/connections" className="font-medium text-accent hover:underline">
-              verify ownership and connect Search Console
-            </Link>
-            . The first audit follows in Phase 1.
+            {canOpenPath('/settings/connections', can) ? (
+              <>
+                Next:{' '}
+                <Link to="/settings/connections" className="font-medium text-accent hover:underline">
+                  verify ownership and connect Search Console
+                </Link>
+                . The first audit follows in Phase 1.
+              </>
+            ) : (
+              <>Next: an admin verifies ownership and connects Search Console. The first audit follows in Phase 1.</>
+            )}
           </p>
         </section>
 
@@ -198,6 +206,7 @@ interface ChecklistRow {
 }
 
 function SetupChecklist({ data, siteName }: { data: { checklist: ChecklistFacts }; siteName: string }) {
+  const { can } = useSession();
   const facts = data.checklist;
   const rows: ChecklistRow[] = [
     {
@@ -268,10 +277,12 @@ function SetupChecklist({ data, siteName }: { data: { checklist: ChecklistFacts 
                     <Check size={16} strokeWidth={1.75} className="shrink-0 text-good" aria-hidden />
                     <span>{row.label}</span>
                   </>
-                ) : (
+                ) : canOpenPath(row.to, can) ? (
                   <Link to={row.to} className="text-accent hover:underline">
                     {row.label}
                   </Link>
+                ) : (
+                  <span>{row.label}</span>
                 )}
                 {row.optional && (
                   <span className="rounded-sm border border-line px-1.5 text-[11px] leading-4 font-normal text-muted">Optional</span>
@@ -285,14 +296,20 @@ function SetupChecklist({ data, siteName }: { data: { checklist: ChecklistFacts 
               ) : (
                 <>
                   <StatusPill tone="neutral">{row.optional ? 'Optional' : 'To do'}</StatusPill>
-                  <Link
-                    to={row.to}
-                    className={cx('inline-flex min-h-10 items-center gap-1 text-[12px] font-medium text-accent hover:underline md:min-h-0')}
-                    aria-label={`${row.action}: ${row.label}`}
-                  >
-                    {row.action}
-                    <Plus size={12} aria-hidden />
-                  </Link>
+                  {canOpenPath(row.to, can) ? (
+                    <Link
+                      to={row.to}
+                      className={cx(
+                        'inline-flex min-h-10 items-center gap-1 text-[12px] font-medium text-accent hover:underline md:min-h-0',
+                      )}
+                      aria-label={`${row.action}: ${row.label}`}
+                    >
+                      {row.action}
+                      <Plus size={12} aria-hidden />
+                    </Link>
+                  ) : (
+                    <span className="text-[12px] text-muted">Needs an admin</span>
+                  )}
                 </>
               )}
             </div>

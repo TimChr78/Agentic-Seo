@@ -114,7 +114,22 @@ const DEMO_WORKSPACE: Workspace = {
   name: 'Agentic SEO demo',
   timeZone: 'UTC',
   role: 'owner',
-  permissions: ['sites:read', 'sites:write', 'research:spend', 'workspace:admin'],
+  // The canonical owner set (packages/commands/src/principal.ts: owners hold every permission).
+  permissions: [
+    'workspace:admin',
+    'artifacts:read',
+    'artifacts:write',
+    'artifacts:approve',
+    'artifacts:publish',
+    'secrets:read',
+    'secrets:write',
+    'sites:read',
+    'sites:write',
+    'audits:run',
+    'research:spend',
+    'changes:apply',
+    'audit:read',
+  ],
 };
 
 /**

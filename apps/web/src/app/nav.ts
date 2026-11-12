@@ -193,6 +193,15 @@ export function navFor(path: string): { group?: NavGroup; item?: NavItem } {
   return {};
 }
 
+/**
+ * Whether a role may open a destination: the entry's `needs` (any one), or everyone when the path is
+ * not a navigation entry. Links into the app use it so they never lead to "Your role can't open this page".
+ */
+export function canOpenPath(path: string, can: (p: string) => boolean): boolean {
+  const { item } = navFor(path);
+  return !item || item.needs.length === 0 || item.needs.some(can);
+}
+
 /** The first main destination for a role. `/` itself is Home for every signed-in member. */
 export function homePath(_can: (p: string) => boolean): string {
   return '/';
