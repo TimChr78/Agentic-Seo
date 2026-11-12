@@ -1,0 +1,4 @@
+- Port `db` with one foundation migration (workspaces, audit log, idempotency, data keys, secrets, input warnings) and row-level security for every tenant table.
+- Port `commands` with the SEO permission set, the five workspace roles (`marketer` renamed `editor`), the SEO action classes and a policy engine that keeps levels 0–4 while shipping L0/L1 and workspace ceilings.
+- Port `secrets` (envelope encryption and write-only secret commands) and `client` under the `@agentic-seo` scope.
+- Add a database test harness that creates and drops its own databases from `TEST_DATABASE_URL`, plus tests for the migrator, RLS isolation and the registry's action-class rule.
