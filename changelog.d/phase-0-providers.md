@@ -1,0 +1,5 @@
+- Add the `providers` package: typed ports for keyword, SERP, domain, backlink, local, answer-engine, Search Console, Analytics, page-experience, index-submission and webmaster data, each with zod-validated normalised shapes.
+- Add the provider gateway, the only path to paid or rate-limited APIs: cost estimates, atomic monthly budget holds, settlement to actual cost with 50/80/100% threshold hooks, a tenant-scoped response cache, a Postgres token bucket and a durable `pending → submitted → settled | failed | unknown` call lifecycle.
+- A provider call that times out after the provider accepted it is recorded as `unknown` with its hold kept, and is reconciled before any retry; abandoned reservations expire through `reconcileAbandoned()`.
+- Add `provider_calls`, `provider_budgets`, `provider_cache` and `provider_rate_buckets` with row-level security, plus the `usage.budgets`, `usage.setBudget`, `usage.spend` and `usage.estimate` commands.
+- Keep raw provider responses for seven days and add a purge function; a deterministic fake adapter exercises costs, task ids, failures and timeout-after-charge in tests.
