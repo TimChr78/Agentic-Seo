@@ -10,6 +10,12 @@ export interface DbConfig {
   /** Application role `aseo_app`: everything the command layer does, always under RLS. */
   appUrl: string;
   poolSize?: number;
+  /**
+   * Called when an idle pooled connection fails (the server restarted, an admin terminated it).
+   * pg emits these on the pool; without a listener Node treats them as unhandled and the process
+   * exits. The pool already discards the broken client, so the default only reports it.
+   */
+  onIdleError?: (err: Error, pool: 'admin' | 'app') => void;
   /** Give up on a new connection after this many milliseconds (health checks must not hang). */
   connectionTimeoutMillis?: number;
   /** Abort a query that runs longer than this many milliseconds (health checks must not hang). */
@@ -36,6 +42,13 @@ export function createDb(config: DbConfig): Db {
   };
   const admin = new pg.Pool({ connectionString: config.adminUrl, max: 5, ...timeouts });
   const app = new pg.Pool({ connectionString: config.appUrl, max: config.poolSize ?? 20, ...timeouts });
+  const onIdleError =
+    config.onIdleError ??
+    ((err: Error, pool: 'admin' | 'app') => {
+      process.emitWarning(`Postgres ${pool} pool: an idle connection failed (${err.message}); it was removed from the pool.`);
+    });
+  admin.on('error', (err) => onIdleError(err, 'admin'));
+  app.on('error', (err) => onIdleError(err, 'app'));
   return {
     admin,
     app,
