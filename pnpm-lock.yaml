@@ -134,6 +134,24 @@ importers:
         specifier: 8.12.4
         version: 8.12.4
 
+  packages/providers:
+    dependencies:
+      '@agentic-seo/commands':
+        specifier: workspace:*
+        version: link:../commands
+      '@agentic-seo/core':
+        specifier: workspace:*
+        version: link:../core
+      '@agentic-seo/db':
+        specifier: workspace:*
+        version: link:../db
+      drizzle-orm:
+        specifier: 0.45.4
+        version: 0.45.4(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(pg@8.23.1)
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
+
   packages/secrets:
     dependencies:
       '@agentic-seo/commands':
