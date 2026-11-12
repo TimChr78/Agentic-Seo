@@ -1,0 +1,250 @@
+import { createHash, randomBytes } from 'node:crypto';
+import { agentPrincipal, PERMISSIONS, type Principal, userPrincipal } from '@agentic-seo/commands';
+import { AppError } from '@agentic-seo/core';
+import type { Db, Role } from '@agentic-seo/db';
+import { type CimdOptions, cimd } from '@better-auth/cimd';
+import { fetchClientMetadataResource } from '@better-auth/cimd/node';
+import { mcp } from '@better-auth/mcp';
+import { type BetterAuthOptions, betterAuth } from 'better-auth';
+import { getMigrations } from 'better-auth/db/migration';
+import { jwt } from 'better-auth/plugins';
+import type { JWTPayload } from 'jose';
+import { agentForCredential, oauthClientName } from './agents';
+import { boundMembership, consentWorkspaceId, isWorkspaceReference } from './oauthWorkspace';
+
+/** Better Auth stores reset tokens under this prefix in its `verification` table. */
+const RESET_PREFIX = 'reset-password:';
+
+/** Minutes a reset link stays valid. Long enough to find the mail, short enough to matter. */
+export const RESET_PASSWORD_TTL_SECONDS = 45 * 60;
+
+/** The identifier Better Auth stores a reset token under (before hashing). */
+export const resetTokenIdentifier = (token: string) => `${RESET_PREFIX}${token}`;
+
+/**
+ * The identifier as stored: reset-password identifiers are hashed, so a database dump or a log of
+ * the table never yields a usable link. Other verification values keep Better Auth's plain default.
+ */
+export const hashedResetTokenIdentifier = (token: string) => createHash('sha256').update(resetTokenIdentifier(token)).digest('base64url');
+
+/**
+ * Mints a 192-bit random reset verification token, never a user-chosen password. The row is
+ * written through the auth context's internal adapter, so the configured identifier hashing,
+ * expiry and single-use consumption are identical to a token minted by Better Auth's request
+ * endpoint. A delivery path calls this after it has decided the address may receive a link; the
+ * public request path never does.
+ */
+export async function mintResetVerification(auth: Auth, userId: string, ttlSeconds: number = RESET_PASSWORD_TTL_SECONDS): Promise<string> {
+  const token = randomBytes(24).toString('base64url');
+  const ctx = await auth.$context;
+  await ctx.internalAdapter.createVerificationValue({
+    value: userId,
+    identifier: resetTokenIdentifier(token),
+    expiresAt: new Date(Date.now() + ttlSeconds * 1000),
+  });
+  return token;
+}
+
+/** Sends the installation-level reset link. Only accounts with a password are eligible. */
+export interface PasswordResetDelivery {
+  /** Seconds a link stays valid; Better Auth's `resetPasswordTokenExpiresIn`. */
+  ttlSeconds?: number;
+  send: (input: { user: { id: string; email: string; name: string }; token: string; request?: Request }) => Promise<void>;
+}
+
+export interface AuthConfig {
+  /** Public URL of the server, e.g. https://seo.example.com */
+  baseUrl: string;
+  secret: string;
+  db: Db;
+  trustedOrigins?: string[];
+  /** Headers with the client IP, in trust order (sign-in rate limits are per IP). */
+  clientIpHeaders?: string[];
+  /** Overrides for Client ID Metadata Document discovery (tests use a stub transport). */
+  cimd?: Partial<CimdOptions>;
+  /**
+   * Self-service password reset. Installation-level: the link goes to `PUBLIC_URL`, not a site
+   * domain. Without it Better Auth refuses reset requests, so a host that does not wire it simply
+   * has no self-service reset (the CLI stays the break-glass path).
+   */
+  passwordReset?: PasswordResetDelivery;
+}
+
+/** Scopes an MCP client can be granted; permissions double as scopes. Agents get read-only unless the person grants more. */
+export const AGENT_DEFAULT_SCOPES = ['openid', 'offline_access', 'sites:read', 'artifacts:read'];
+
+/**
+ * MCP OAuth requires an HTTPS resource URL; only loopback hosts may use plain HTTP for local
+ * development. Anything else (e.g. a LAN address such as http://192.168.1.20:3210) is rejected by
+ * the MCP plugin, so callers disable the MCP/OAuth client endpoints instead of weakening the check.
+ */
+export function isMcpResourceUrlAllowed(baseUrl: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return false;
+  }
+  if (url.protocol === 'https:') return true;
+  if (url.protocol !== 'http:') return false;
+  const hostname = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === '::1') return true;
+  const octets = hostname.split('.');
+  return octets.length === 4 && octets[0] === '127' && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+}
+
+export function authOptions(config: AuthConfig) {
+  const mcpEnabled = isMcpResourceUrlAllowed(config.baseUrl);
+  return {
+    baseURL: config.baseUrl,
+    secret: config.secret,
+    database: config.db.admin,
+    trustedOrigins: config.trustedOrigins,
+    emailAndPassword: {
+      enabled: true,
+      minPasswordLength: 10,
+      ...(config.passwordReset
+        ? {
+            // A reset revokes every session of that person, so a stolen cookie stops working.
+            revokeSessionsOnPasswordReset: true,
+            resetPasswordTokenExpiresIn: config.passwordReset.ttlSeconds ?? RESET_PASSWORD_TTL_SECONDS,
+            // Better Auth only calls this for an existing account and never puts the token in a
+            // log line; the delivery decides who gets mail (password accounts only) and from where.
+            sendResetPassword: async (
+              { user, token }: { user: { id: string; email: string; name: string }; token: string },
+              request?: Request,
+            ) => {
+              try {
+                await config.passwordReset?.send({
+                  user: { id: user.id, email: user.email, name: user.name },
+                  token,
+                  request,
+                });
+              } catch {
+                // Delivery is logged by the host; a provider outage must not turn the neutral
+                // "if an account exists, we sent a link" answer into a 500 that reveals it did.
+              }
+            },
+          }
+        : {}),
+    },
+    verification: {
+      // Hash reset tokens at rest. Other verification values stay plain, as Better Auth expects.
+      storeIdentifier: { default: 'plain', overrides: { [RESET_PREFIX]: 'hashed' } },
+    },
+    advanced: {
+      ipAddress: { ipAddressHeaders: config.clientIpHeaders ?? ['x-forwarded-for'] },
+    },
+    plugins: [
+      jwt(),
+      // OAuth 2.1 authorization server for MCP clients. The plugin rejects plain-HTTP resource
+      // URLs outside loopback, so it is only registered when that is allowed.
+      ...(mcpEnabled
+        ? [
+            mcp({
+              loginPage: '/login',
+              consentPage: '/consent',
+              resource: `${config.baseUrl}/mcp`,
+              scopes: ['openid', 'profile', 'email', 'offline_access', ...PERMISSIONS],
+              allowDynamicClientRegistration: true,
+              allowUnauthenticatedClientRegistration: true,
+              clientRegistrationDefaultScopes: AGENT_DEFAULT_SCOPES,
+              clientRegistrationAllowedScopes: ['openid', 'profile', 'email', 'offline_access', ...PERMISSIONS],
+              postLogin: {
+                // The consent page itself asks which workspace, so this hook never redirects. The
+                // reference id is the workspace the grant acts in; the consent page writes the
+                // choice for the session, and a single-membership person needs no choice.
+                page: '/consent',
+                shouldRedirect: async () => false,
+                consentReferenceId: async ({ user, session }) => consentWorkspaceId(config.db, user.id, session.id),
+              },
+              // The access token carries the workspace, so a later request cannot change it with a
+              // header. Refresh tokens keep the reference id and issue the same claim again. An
+              // unbound sentinel (no workspace chosen for this request) carries no claim, so the
+              // credential is refused rather than acting in a workspace nobody chose.
+              customAccessTokenClaims: ({ referenceId }) => {
+                return isWorkspaceReference(referenceId) ? { workspace_id: referenceId } : {};
+              },
+            }),
+            // Client ID Metadata Documents: clients that identify themselves with an HTTPS URL instead
+            // of registering. The Node transport pins DNS to public addresses.
+            cimd({ fetchClientMetadataResource, metadataProfile: 'mcp-2026-07-28', ...config.cimd }),
+          ]
+        : []),
+    ],
+  } satisfies BetterAuthOptions;
+}
+
+export function createAuth(config: AuthConfig) {
+  return betterAuth(authOptions(config));
+}
+export type Auth = ReturnType<typeof createAuth>;
+
+/** Applies Better Auth's own tables. Phase 0 ships them in the SQL migration; this is the upgrade path. */
+export async function migrateAuth(config: AuthConfig) {
+  const { runMigrations } = await getMigrations(authOptions(config));
+  await runMigrations();
+}
+
+async function membership(db: Db, userId: string, workspaceId?: string | null) {
+  const { rows } = await db.admin.query<{ workspace_id: string; role: Role }>(
+    `SELECT workspace_id, role FROM workspace_members WHERE user_id = $1 ${workspaceId ? 'AND workspace_id = $2' : ''} ORDER BY created_at LIMIT 1`,
+    workspaceId ? [userId, workspaceId] : [userId],
+  );
+  return rows[0];
+}
+
+/** A person using the UI or REST API with a session cookie. `X-Workspace-Id` picks a workspace when they have several. */
+export async function principalFromSession(auth: Auth, db: Db, headers: Headers): Promise<Principal | null> {
+  const session = await auth.api.getSession({ headers });
+  if (!session) return null;
+  const m = await membership(db, session.user.id, headers.get('x-workspace-id'));
+  return m ? userPrincipal(session.user.id, m.workspace_id, m.role) : null;
+}
+
+/** An MCP client acting for a person: role permissions ∩ scopes the person granted to the client. */
+export async function principalFromAccessToken(db: Db, claims: JWTPayload): Promise<Principal | null> {
+  if (!claims.sub) return null;
+  const bound = typeof claims.workspace_id === 'string' ? claims.workspace_id : undefined;
+  // A connection issued before the workspace claim existed has none: it stays usable only for a
+  // person with one membership, so a multi-workspace person must reconnect and choose.
+  const m = bound ? await boundMembership(db, claims.sub, bound) : await singleMembership(db, claims.sub);
+  if (!m) return null;
+  const scopes = String(claims.scope ?? '')
+    .split(' ')
+    .filter(Boolean);
+  const clientId = String(claims.azp ?? claims.client_id ?? 'unknown-client');
+  const agent = await agentForCredential(db, m.workspace_id, 'oauth_client', clientId, claims.sub, () => oauthClientName(db, clientId));
+  return agentPrincipal(agent, claims.sub, clientId, m.workspace_id, m.role, scopes);
+}
+
+async function singleMembership(db: Db, userId: string): Promise<{ workspace_id: string; role: Role } | undefined> {
+  const { rows } = await db.admin.query<{ workspace_id: string; role: Role }>(
+    'SELECT workspace_id, role FROM workspace_members WHERE user_id = $1 ORDER BY created_at LIMIT 2',
+    [userId],
+  );
+  return rows.length === 1 ? rows[0] : undefined;
+}
+
+/**
+ * A token or OAuth connection is bound to one workspace: `X-Workspace-Id` cannot move it. Sessions
+ * are the only principals that may use the header, so a mismatch here is a clear refusal rather
+ * than a silently ignored header.
+ */
+export function workspaceHeaderConflict(principal: Principal, headers: Headers): string | null {
+  if (principal.type !== 'agent') return null;
+  const requested = headers.get('x-workspace-id');
+  if (!requested || requested === principal.workspaceId) return null;
+  return 'This credential is bound to one workspace. X-Workspace-Id cannot switch it; create a separate token or connection for the other workspace.';
+}
+
+/** Throws the refusal above, for surfaces that already turn AppErrors into responses. */
+export function assertWorkspaceHeader(principal: Principal, headers: Headers): void {
+  const conflict = workspaceHeaderConflict(principal, headers);
+  if (conflict) throw new AppError('forbidden', conflict);
+}
+
+export * from './agents';
+export * from './members';
+export * from './oauthWorkspace';
+export * from './tokens';

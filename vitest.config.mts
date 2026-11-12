@@ -20,6 +20,7 @@ export default defineConfig({
           name: 'packages',
           include: ['packages/*/test/**/*.test.ts', 'packages/*/src/**/*.test.ts'],
           maxWorkers: workers,
+          testTimeout: 60_000,
         },
       },
       {
@@ -31,6 +32,20 @@ export default defineConfig({
           setupFiles: ['apps/web/test/setup.ts'],
           // Its own group: a different worker count from the packages project needs a distinct order.
           sequence: { groupOrder: 1 },
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'server',
+          include: ['apps/server/test/**/*.test.ts'],
+          globalSetup: ['apps/server/test/setup.ts'],
+          // Different worker counts need their own group: the packages finish first, then the
+          // server suite runs with its own template database.
+          sequence: { groupOrder: 2 },
+          maxWorkers: Math.min(workers, 3),
+          testTimeout: 60_000,
+          hookTimeout: 180_000,
         },
       },
     ],

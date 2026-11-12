@@ -1,0 +1,26 @@
+{
+  "name": "@agentic-seo/auth",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@agentic-seo/commands": "workspace:*",
+    "@agentic-seo/core": "workspace:*",
+    "@agentic-seo/db": "workspace:*",
+    "@better-auth/cimd": "1.7.7",
+    "@better-auth/core": "1.7.7",
+    "@better-auth/mcp": "1.7.7",
+    "@better-auth/oauth-provider": "1.7.7",
+    "@better-auth/utils": "0.4.2",
+    "better-auth": "1.7.7",
+    "drizzle-orm": "0.45.4",
+    "jose": "6.2.13",
+    "zod": "4.6.7"
+  }
+}

@@ -672,7 +672,7 @@ export async function safeFetch(target: string | URL, options: SafeFetchOptions 
         throw toFetchError(error, { url: current.href, timedOut, aborted });
       }
 
-      const location = hop.headers['location'];
+      const location = hop.headers.location;
       if (location && REDIRECT_STATUS.has(hop.status)) {
         redirects.push({ url: current.href, status: hop.status, location });
         if (redirects.length > maxRedirects) {
