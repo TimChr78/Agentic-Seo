@@ -1,11 +1,12 @@
 import { type Auth, assertWorkspaceHeader, principalFromApiToken, principalFromSession, TOKEN_PREFIX } from '@agentic-seo/auth';
-import type { Executor } from '@agentic-seo/commands';
+import type { Executor, Principal } from '@agentic-seo/commands';
 import { AppError } from '@agentic-seo/core';
 import type { Db } from '@agentic-seo/db';
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import { commands } from '../registry';
 import { VERSION } from '../version';
 import { bodyLimit } from './body-limit';
+import { type BrowserRequestPolicy, csrfRefusal } from './csrf';
 
 const ErrorBody = z.object({ error: z.string(), message: z.string(), details: z.unknown().optional() });
 
@@ -52,7 +53,7 @@ function jsonSchema(api: OpenAPIHono, schema: unknown, name: string, io: 'input'
 }
 
 /** One RPC-style POST route per command, documented as OpenAPI 3.1. Validation happens in the executor. */
-export function restApi(deps: { auth: Auth; db: Db; executor: Executor }) {
+export function restApi(deps: { auth: Auth; db: Db; executor: Executor; origin: BrowserRequestPolicy }) {
   const api = new OpenAPIHono();
   const bearerPattern = new RegExp(`^Bearer (${TOKEN_PREFIX}\\S+)$`);
   for (const cmd of commands) {
@@ -84,16 +85,18 @@ export function restApi(deps: { auth: Auth; db: Db; executor: Executor }) {
     );
     api.post(route.path, async (c) => {
       const bearer = c.req.header('authorization')?.match(bearerPattern)?.[1];
-      const principal = bearer
-        ? await principalFromApiToken(deps.db, bearer)
-        : await principalFromSession(deps.auth, deps.db, c.req.raw.headers);
-      if (!principal)
-        throw new AppError(
-          'unauthorized',
-          bearer
-            ? 'This API token is unknown, revoked or expired.'
-            : 'Sign in first, or pick a workspace you are a member of with X-Workspace-Id.',
-        );
+      let principal: Principal | null;
+      if (bearer) {
+        principal = await principalFromApiToken(deps.db, bearer);
+        if (!principal) throw new AppError('unauthorized', 'This API token is unknown, revoked or expired.');
+      } else {
+        principal = await principalFromSession(deps.auth, deps.db, c.req.raw.headers);
+        if (!principal) throw new AppError('unauthorized', 'Sign in first, or pick a workspace you are a member of with X-Workspace-Id.');
+        // A cookie is attached to a cross-site request by the browser; only JSON from this origin
+        // may write. Bearer tokens are not attached by a page and skip this.
+        const refused = csrfRefusal(c.req.raw, deps.origin);
+        if (refused) return refused;
+      }
       // Tokens and OAuth connections act in the workspace they were created for; the header may
       // pick a workspace only for a session.
       assertWorkspaceHeader(principal, c.req.raw.headers);

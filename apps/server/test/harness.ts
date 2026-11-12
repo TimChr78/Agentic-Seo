@@ -293,7 +293,11 @@ export async function startTestServer(name: string, port: number, env: Record<st
     signUp,
     workspaceWith,
     api: (u: User, workspaceId?: string) =>
-      createClient<Commands>({ baseUrl: base, headers: { cookie: u.cookie, ...(workspaceId ? { 'x-workspace-id': workspaceId } : {}) } }),
+      createClient<Commands>({
+        baseUrl: base,
+        // A browser sends Origin on every POST; the cookie-authenticated REST surface requires it.
+        headers: { cookie: u.cookie, origin: base, ...(workspaceId ? { 'x-workspace-id': workspaceId } : {}) },
+      }),
     async close() {
       http?.close();
       await srv.db.close();

@@ -165,11 +165,14 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON api_token_changes TO aseo_app;
 -- workspace. The consent page writes the pending choice here first; the OAuth provider reads it in
 -- `consentReferenceId` and stores it on the grant. The table is a short-lived hand-off keyed by the
 -- Better Auth session, not a second membership model: nothing here grants access on its own.
+-- A re-pick for the same request is a second row (one workspace per row, so the app role can write
+-- it under RLS); the consumer takes the latest and the scheduler drops abandoned rows.
 CREATE TABLE oauth_workspace_selections (
-  session_id text PRIMARY KEY,
+  session_id text NOT NULL,
   workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
   created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now()
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (session_id, workspace_id)
 );
 CREATE INDEX oauth_workspace_selections_workspace ON oauth_workspace_selections (workspace_id);
 

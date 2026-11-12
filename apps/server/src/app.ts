@@ -18,6 +18,7 @@ import { type Context, Hono } from 'hono';
 import { agentLedgerServices } from './agents/ledger';
 import type { Config } from './config';
 import { bodyLimit } from './http/body-limit';
+import { type BrowserRequestPolicy, browserBody, formCsrfRefusal } from './http/csrf';
 import { MCP_MAX_BODY, mcpEndpoint } from './http/mcp';
 import { metricsHandler } from './http/metrics';
 import { consentPage, invitePage, loginPage, pageNonce, pagesCsp } from './http/pages';
@@ -95,6 +96,9 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   const metricsPath = new WeakMap<Request, string>();
 
   const app = new Hono();
+  // What a cookie-authenticated browser write must prove: the app's own origin, or one the
+  // operator trusts (TRUSTED_ORIGINS). Shared by the REST surface and the two form endpoints.
+  const origin: BrowserRequestPolicy = { publicUrl: config.publicUrl, trustedOrigins: config.trustedOrigins };
   // Prometheus counters and durations for every request except the scrape itself. The labels are
   // the route group and status class, so the series count is fixed whatever clients request.
   app.use('*', async (c, next) => {
@@ -210,7 +214,9 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     async (c) => {
       const session = await auth.api.getSession({ headers: c.req.raw.headers });
       if (!session) throw new AppError('unauthorized', 'Sign in first, then choose the workspace this connection acts in.');
-      const body = (await c.req.json().catch(() => ({}))) as { workspaceId?: unknown; scope?: unknown; oauthQuery?: unknown };
+      const refused = formCsrfRefusal(c, origin);
+      if (refused) return refused;
+      const body = (await browserBody(c)) as { workspaceId?: unknown; scope?: unknown; oauthQuery?: unknown };
       if (typeof body.workspaceId !== 'string')
         throw new AppError('invalid_input', 'Choose the workspace (workspaceId) this connection acts in.');
       const choice = await chooseOAuthWorkspace(db, {
@@ -234,7 +240,9 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     async (c) => {
       const session = await auth.api.getSession({ headers: c.req.raw.headers });
       if (!session) throw new AppError('unauthorized', 'Sign in (or create an account) with the invited e-mail address first.');
-      const { token } = (await c.req.json().catch(() => ({}))) as { token?: unknown };
+      const refused = formCsrfRefusal(c, origin);
+      if (refused) return refused;
+      const { token } = (await browserBody(c)) as { token?: unknown };
       const inv = typeof token === 'string' ? await invitationWorkspace(db, token) : null;
       if (!inv) throw new AppError('not_found', 'This invitation link is not valid any more. Ask for a new one.');
       // Accepting needs no permission; the principal carries none until the membership exists.
@@ -261,7 +269,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
       (c) => mcp(c.req.raw),
     );
   }
-  app.route('/', restApi({ auth, db, executor }));
+  app.route('/', restApi({ auth, db, executor, origin }));
 
   // Last, so every API route above wins. Without a build (packages/tests, server-only install) the
   // middleware is a no-op and the server behaves exactly as before.

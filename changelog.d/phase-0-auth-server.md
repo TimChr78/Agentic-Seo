@@ -3,3 +3,6 @@
 - Add the `aseo` admin CLI: `migrate`, `bootstrap`, `reset-password`, `rotate-keys`, `init`, `doctor` and `version`.
 - Add migration `0002_auth.sql` with Better Auth's tables, members, invitations, API tokens, OAuth workspace choices, agents, credentials and the action ledger, all under row-level security where they are tenant data.
 - Add a `.env.example` documenting every server variable, and the server test harness that copies a migrated template database per test file.
+- Security: a write authenticated by the session cookie now has to send JSON from the app's own origin (or a `TRUSTED_ORIGINS` origin, with `Sec-Fetch-Site: same-origin` as the fallback when `Origin` is absent), so a page on another site can no longer forge a privileged command such as `members.setRole`. The invitation and consent-workspace form endpoints accept urlencoded forms but run the same origin check; bearer tokens are unaffected.
+- Security: `aseo reset-password` deletes every existing session of that person in the same operation (and nobody else's), so a cookie stolen before the reset stops working.
+- Security: agent auto-creation and the OAuth consent workspace choice now write as the app role under row-level security; abandoned consent choices are deleted by an hourly scheduler job instead of across all tenants during a request.

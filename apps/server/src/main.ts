@@ -50,7 +50,7 @@ const running: Promise<void>[] = [];
 // One Graphile Worker runner serves both roles when a process holds both, so ROLE=all does not
 // start two runners on the same queue.
 if (config.roles.has('worker') || config.roles.has('scheduler')) {
-  running.push((await startWorkers(config, stopWorkers.signal)).done);
+  running.push((await startWorkers(config, stopWorkers.signal, db)).done);
 }
 if (config.roles.has('scheduler')) running.push(startScheduler(config, stopWorkers.signal).done);
 
