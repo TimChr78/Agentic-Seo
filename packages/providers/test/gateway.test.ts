@@ -734,6 +734,55 @@ describe.skipIf(!hasTestDatabase())('provider gateway', () => {
     expect(fake.callCount).toBe(1);
   });
 
+  it.each([
+    ['still pending', { state: 'unknown' as const, reason: 'the provider has no outcome yet' }],
+    ['a currency mismatch', { state: 'settled' as const, actualCostMicros: 100, currency: 'EUR' }],
+  ])('returns the persisted outcome when a reconciler that reports %s loses to a settlement', async (label, loserOutcome) => {
+    const id = providerId(`reconcile-loser-${label.replaceAll(' ', '-')}`);
+    const seeded = fakeAdapter({ id, ports: ['KeywordData'], estimateMicros: 1_000, actualMicros: 1_000, timeoutAfterCharge: 1 });
+    const seed = gateway([seeded]);
+    await seed.setBudget({ workspaceId: workspace, providerId: id, currency: 'USD', budgetMicros: 10_000 });
+    const failure = await call(seed, id, { keywords: ['loser'], market: 'us' }, { idempotencyKey: `loser-${label}` }).catch((err) => err);
+    expect(failure).toBeInstanceOf(ProviderCallUnknownError);
+    const callId = (failure as ProviderCallUnknownError).callId;
+
+    const bothInFlight = deferred();
+    const winnerDone = deferred();
+    let reconciles = 0;
+    const reconciler = (role: 'winner' | 'loser') =>
+      defineAdapter({
+        id,
+        ports: ['KeywordData'] as const,
+        estimate: () => ({ maxCostMicros: 1_000, currency: 'USD', basis: 'one bounded request' }),
+        call: async () => {
+          throw new ProviderTimeoutError('reconciliation does not call the provider');
+        },
+        reconcile: async () => {
+          reconciles += 1;
+          if (reconciles === 2) bothInFlight.resolve();
+          await bothInFlight.promise;
+          if (role === 'loser') {
+            await winnerDone.promise;
+            return loserOutcome;
+          }
+          return { state: 'settled' as const, actualCostMicros: 100, currency: 'USD' };
+        },
+      });
+    const winner = createProviderGateway({ db, adapters: [reconciler('winner')] });
+    const loser = createProviderGateway({ db, adapters: [reconciler('loser')] });
+
+    const winning = winner.reconcileUnknown(callId);
+    const losing = loser.reconcileUnknown(callId);
+    const winnerResult = await winning;
+    winnerDone.resolve();
+    const loserResult = await losing;
+
+    expect(winnerResult).toMatchObject({ callId, state: 'settled', actualCostMicros: 100 });
+    // The loser's guarded update did not apply, so it reports what was persisted, not "unknown".
+    expect(loserResult).toMatchObject({ callId, state: 'settled', actualCostMicros: 100 });
+    expect(await budgetOf(seed, id)).toMatchObject({ spentMicros: 100, heldMicros: 0 });
+  });
+
   it('returns the persisted outcome from a reconciler that loses the settle transition', async () => {
     const id = providerId('reconcile-race');
     const seeded = fakeAdapter({ id, ports: ['KeywordData'], estimateMicros: 1_000, actualMicros: 1_000, timeoutAfterCharge: 1 });

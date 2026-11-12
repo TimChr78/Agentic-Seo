@@ -716,14 +716,17 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
     });
   }
 
-  async function markUnknown(workspaceId: string, callId: string, message: string, providerTaskId?: string): Promise<void> {
-    await db.withWorkspace(workspaceId, async (tx) => {
-      await tx.execute(
+  /** Moves a live call to unknown. Returns false when the call had already reached a terminal state. */
+  async function markUnknown(workspaceId: string, callId: string, message: string, providerTaskId?: string): Promise<boolean> {
+    return db.withWorkspace(workspaceId, async (tx) => {
+      const { rows } = await tx.execute<{ id: string }>(
         sql`UPDATE provider_calls
                SET state = 'unknown', provider_task_id = COALESCE(${providerTaskId ?? null}, provider_task_id),
                    error = ${message.slice(0, 1_000)}, updated_at = now()
-             WHERE id = ${callId} AND state IN ('pending', 'dispatching', 'submitted', 'unknown')`,
+             WHERE id = ${callId} AND state IN ('pending', 'dispatching', 'submitted', 'unknown')
+             RETURNING id`,
       );
+      return rows.length > 0;
     });
   }
 
@@ -803,10 +806,30 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
       const budget = await lockBudget(tx, workspaceId, call.provider_id, call.budget_period);
       if (budget && budget.currency !== call.currency) {
         const message = `The ${call.provider_id} budget for ${call.budget_period} is in ${budget.currency}, but provider call ${callId} was reserved in ${call.currency}. The call is recorded as unknown and its hold is kept; set the budget back to ${call.currency} before it can settle.`;
-        await tx.execute(
+        const marked = await tx.execute<{ id: string }>(
           sql`UPDATE provider_calls SET state = 'unknown', error = ${message.slice(0, 1_000)}, updated_at = now()
-               WHERE id = ${callId} AND state IN ('dispatching', 'submitted', 'unknown')`,
+               WHERE id = ${callId} AND state IN ('dispatching', 'submitted', 'unknown')
+               RETURNING id`,
         );
+        if (marked.rows.length === 0) {
+          // The call already reached a terminal state (another settlement won): report what is persisted.
+          const { rows } = await tx.execute<{ state: CallState; actual_cost_micros: string | null; overrun: boolean }>(
+            sql`SELECT state, actual_cost_micros::text AS actual_cost_micros, overrun FROM provider_calls WHERE id = ${callId}`,
+          );
+          const row = rows[0];
+          return {
+            applied: false,
+            overrun: false,
+            events: [],
+            overrunEvent: null,
+            fetchedAt: fetchedAt.toISOString(),
+            persisted: {
+              state: row?.state ?? 'unknown',
+              actualCostMicros: row?.actual_cost_micros == null ? null : Number(row.actual_cost_micros),
+              overrun: row?.overrun ?? false,
+            },
+          };
+        }
         return {
           applied: false,
           overrun: false,
@@ -1191,7 +1214,8 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
       const currency = result.currency ?? call.currency;
       if (currency !== call.currency) {
         const message = `Reconciliation reported ${currency} for a call reserved in ${call.currency}. The call stays unknown and its hold is kept.`;
-        await markUnknown(call.workspace_id, call.id, message, result.providerTaskId);
+        // Another reconciler may have settled the call meanwhile: then its persisted outcome is the truth.
+        if (!(await markUnknown(call.workspace_id, call.id, message, result.providerTaskId))) return persistedOutcome(call.id);
         return { state: 'unknown', actualCostMicros: null, reason: message };
       }
       const actual = Math.max(0, Math.ceil(result.actualCostMicros ?? micros(call.max_cost_micros)));
@@ -1243,11 +1267,15 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
     }
 
     const reason = result.reason ?? 'The provider has no outcome for this call yet. Its hold is kept.';
-    await db.withWorkspace(call.workspace_id, (tx) =>
-      tx.execute(
-        sql`UPDATE provider_calls SET error = ${reason.slice(0, 1_000)}, updated_at = now() WHERE id = ${call.id} AND state = 'unknown'`,
-      ),
-    );
+    const stillUnknown = await db.withWorkspace(call.workspace_id, async (tx) => {
+      const { rows } = await tx.execute<{ id: string }>(
+        sql`UPDATE provider_calls SET error = ${reason.slice(0, 1_000)}, updated_at = now()
+             WHERE id = ${call.id} AND state = 'unknown' RETURNING id`,
+      );
+      return rows.length > 0;
+    });
+    // Another reconciler resolved the call while this one waited: report the persisted outcome.
+    if (!stillUnknown) return persistedOutcome(call.id);
     return { state: 'unknown', actualCostMicros: null, reason };
   }
 
