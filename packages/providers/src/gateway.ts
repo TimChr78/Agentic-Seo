@@ -260,6 +260,26 @@ interface CacheRow extends Record<string, unknown> {
   fetched_at: Date | string;
 }
 
+/** The state a call row holds in Postgres. Callers report this, never their own computation. */
+interface PersistedCallOutcome {
+  state: CallState;
+  actualCostMicros: number | null;
+  overrun: boolean;
+}
+
+interface SettleOutcome {
+  /** True when this transaction recorded the settlement. */
+  applied: boolean;
+  overrun: boolean;
+  events: BudgetThresholdEvent[];
+  overrunEvent: CallOverrunEvent | null;
+  fetchedAt: string;
+  /** What the row holds after this transaction; a caller that lost the transition reports it. */
+  persisted: PersistedCallOutcome;
+  /** Set when the call could not settle and was moved to `unknown` with this reason. */
+  unknownReason?: string;
+}
+
 const THRESHOLDS = [50, 80, 100] as const;
 
 export class ProviderUnavailableError extends AppError {
@@ -313,6 +333,12 @@ const micros = (value: string | number | null | undefined): number => {
   if (value === null || value === undefined) return 0;
   return typeof value === 'number' ? value : Number(value);
 };
+
+const persistedOf = (call: Pick<CallRow, 'state' | 'actual_cost_micros' | 'overrun'>): PersistedCallOutcome => ({
+  state: call.state,
+  actualCostMicros: call.actual_cost_micros === null ? null : micros(call.actual_cost_micros),
+  overrun: call.overrun,
+});
 
 const money = (value: number, currency: string): string => `${currency} ${(value / 1_000_000).toFixed(4)}`;
 const iso = (value: Date | string): string => (value instanceof Date ? value.toISOString() : new Date(value).toISOString());
@@ -481,33 +507,42 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
   }
 
   async function holdBudget(tx: Tx, workspaceId: string, providerId: string, period: string, currency: string, hold: number) {
-    if (hold <= 0) return;
-    const { rows } = await tx.execute<BudgetRow>(
-      sql`UPDATE provider_budgets
-             SET held_micros = held_micros + ${hold}, updated_at = now()
-           WHERE workspace_id = ${workspaceId} AND provider_id = ${providerId} AND period = ${period}
-             AND currency = ${currency}
-             AND budget_micros - spent_micros - held_micros >= ${hold}
-           RETURNING budget_micros::text, spent_micros::text, held_micros::text, currency, notified_thresholds`,
-    );
-    if (rows.length) return;
+    if (hold > 0) {
+      const { rows } = await tx.execute<BudgetRow>(
+        sql`UPDATE provider_budgets
+               SET held_micros = held_micros + ${hold}, updated_at = now()
+             WHERE workspace_id = ${workspaceId} AND provider_id = ${providerId} AND period = ${period}
+               AND currency = ${currency}
+               AND budget_micros - spent_micros - held_micros >= ${hold}
+             RETURNING budget_micros::text, spent_micros::text, held_micros::text, currency, notified_thresholds`,
+      );
+      if (rows.length) return;
+    }
 
+    // Every paid-capable call checks the budget, including one whose hold is zero: a zero estimate
+    // must never let a settlement add money to a budget in another currency. The row is locked so
+    // the currency cannot change between this check and the settlement.
     const existing = await tx.execute<BudgetRow>(
       sql`SELECT budget_micros::text, spent_micros::text, held_micros::text, currency, notified_thresholds
             FROM provider_budgets
-           WHERE workspace_id = ${workspaceId} AND provider_id = ${providerId} AND period = ${period}`,
+           WHERE workspace_id = ${workspaceId} AND provider_id = ${providerId} AND period = ${period}
+           FOR UPDATE`,
     );
     const budget = existing.rows[0];
-    if (!budget)
+    if (!budget) {
+      // A free call needs no budget; a paid one cannot run without one.
+      if (hold <= 0) return;
       throw new ProviderBudgetError(
         `No monthly budget is set for ${providerId} in ${period}. A workspace admin can set one in Settings → Usage → Budgets.`,
         { providerId, period, currency },
       );
+    }
     if (budget.currency !== currency)
       throw new ProviderBudgetError(
         `The ${providerId} budget for ${period} is in ${budget.currency}, but this call estimates in ${currency}. Set the budget in ${currency}, or route the port to an adapter that bills in ${budget.currency}.`,
         { providerId, period, currency, budgetCurrency: budget.currency },
       );
+    if (hold <= 0) return;
     const budgetMicros = micros(budget.budget_micros);
     const spentMicros = micros(budget.spent_micros);
     const heldMicros = micros(budget.held_micros);
@@ -526,8 +561,20 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
     );
   }
 
+  /** Lock one budget row for the rest of the transaction; the caller re-checks its currency. */
+  async function lockBudget(tx: Tx, workspaceId: string, providerId: string, period: string): Promise<BudgetRow | null> {
+    const { rows } = await tx.execute<BudgetRow>(
+      sql`SELECT budget_micros::text, spent_micros::text, held_micros::text, currency, notified_thresholds
+            FROM provider_budgets
+           WHERE workspace_id = ${workspaceId} AND provider_id = ${providerId} AND period = ${period}
+           FOR UPDATE`,
+    );
+    return rows[0] ?? null;
+  }
+
   async function settleBudget(
     tx: Tx,
+    budget: BudgetRow | null,
     workspaceId: string,
     providerId: string,
     period: string,
@@ -535,13 +582,6 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
     actual: number,
   ): Promise<BudgetThresholdEvent[]> {
     if (reserved <= 0 && actual <= 0) return [];
-    const { rows } = await tx.execute<BudgetRow>(
-      sql`SELECT budget_micros::text, spent_micros::text, held_micros::text, currency, notified_thresholds
-            FROM provider_budgets
-           WHERE workspace_id = ${workspaceId} AND provider_id = ${providerId} AND period = ${period}
-           FOR UPDATE`,
-    );
-    const budget = rows[0];
     if (!budget) return [];
 
     const budgetMicros = micros(budget.budget_micros);
@@ -717,13 +757,7 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
       ttlSeconds: number;
       currency?: string;
     },
-  ): Promise<{
-    applied: boolean;
-    overrun: boolean;
-    events: BudgetThresholdEvent[];
-    overrunEvent: CallOverrunEvent | null;
-    fetchedAt: string;
-  }> {
+  ): Promise<SettleOutcome> {
     const fetchedAt = now();
     return db.withWorkspace(workspaceId, async (tx) => {
       const { rows } = await tx.execute<CallRow>(sql`SELECT * FROM provider_calls WHERE id = ${callId} FOR UPDATE`);
@@ -731,13 +765,16 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
       if (!call) throw new AppError('not_found', `Provider call ${callId} does not exist.`);
       if (TERMINAL_STATES.includes(call.state)) {
         // A failed or released call already returned its hold; settling it would release it twice.
-        // A settled call is idempotent: its cost and response are already recorded.
-        if (call.state === 'settled')
-          return { applied: false, overrun: false, events: [], overrunEvent: null, fetchedAt: fetchedAt.toISOString() };
-        throw new AppError('conflict', `Provider call ${callId} is already ${call.state}; its cost cannot be recorded a second time.`, {
-          callId,
-          state: call.state,
-        });
+        // A settled call is idempotent: its cost and response are already recorded. Either way the
+        // caller must report what is persisted, not what it came here to write.
+        return {
+          applied: false,
+          overrun: false,
+          events: [],
+          overrunEvent: null,
+          fetchedAt: fetchedAt.toISOString(),
+          persisted: persistedOf(call),
+        };
       }
       if (args.currency !== undefined && args.currency !== call.currency)
         throw new AppError(
@@ -760,6 +797,26 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
         optionsHash: call.options_hash,
         cacheKey: call.cache_key,
       };
+      // Re-check the budget's currency at settlement, not just at reservation: a zero hold leaves
+      // the period free to change currency, and a charge in the reservation's currency must never
+      // be added to a budget in another one. The call stays unknown with its hold kept.
+      const budget = await lockBudget(tx, workspaceId, call.provider_id, call.budget_period);
+      if (budget && budget.currency !== call.currency) {
+        const message = `The ${call.provider_id} budget for ${call.budget_period} is in ${budget.currency}, but provider call ${callId} was reserved in ${call.currency}. The call is recorded as unknown and its hold is kept; set the budget back to ${call.currency} before it can settle.`;
+        await tx.execute(
+          sql`UPDATE provider_calls SET state = 'unknown', error = ${message.slice(0, 1_000)}, updated_at = now()
+               WHERE id = ${callId} AND state IN ('dispatching', 'submitted', 'unknown')`,
+        );
+        return {
+          applied: false,
+          overrun: false,
+          events: [],
+          overrunEvent: null,
+          fetchedAt: fetchedAt.toISOString(),
+          persisted: { state: 'unknown', actualCostMicros: null, overrun: false },
+          unknownReason: message,
+        };
+      }
       // The guarded transition is the settlement: a row already moved to a terminal state returns
       // nothing, so no hold is released and no cost is counted twice.
       const settled = await tx.execute<{ id: string }>(
@@ -771,9 +828,18 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
              WHERE id = ${callId} AND state IN ('dispatching', 'submitted', 'unknown')
              RETURNING id`,
       );
-      if (!settled.rows.length)
-        return { applied: false, overrun: false, events: [], overrunEvent: null, fetchedAt: fetchedAt.toISOString() };
-      const events = await settleBudget(tx, workspaceId, call.provider_id, call.budget_period, reserved, actual);
+      if (!settled.rows.length) {
+        const { rows: current } = await tx.execute<CallRow>(sql`SELECT * FROM provider_calls WHERE id = ${callId}`);
+        return {
+          applied: false,
+          overrun: false,
+          events: [],
+          overrunEvent: null,
+          fetchedAt: fetchedAt.toISOString(),
+          persisted: persistedOf(current[0] ?? call),
+        };
+      }
+      const events = await settleBudget(tx, budget, workspaceId, call.provider_id, call.budget_period, reserved, actual);
       if (args.data !== undefined) await writeCache(tx, parts, args.data, args.ttlSeconds, fetchedAt);
       return {
         applied: true,
@@ -792,6 +858,7 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
             }
           : null,
         fetchedAt: fetchedAt.toISOString(),
+        persisted: { state: 'settled', actualCostMicros: actual, overrun },
       };
     });
   }
@@ -1043,6 +1110,12 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
       ttlSeconds: op.ttlSeconds,
       currency: resultCurrency,
     });
+    if (settled.unknownReason) {
+      throw new ProviderCallUnknownError(settled.unknownReason, callId, {
+        providerId: adapter.id,
+        currency: estimate.currency,
+      });
+    }
     await fireThresholds(settled.events);
     await fireOverrun(settled.overrunEvent);
 
@@ -1052,9 +1125,9 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
       callId,
       cache: 'miss',
       fetchedAt: settled.fetchedAt,
-      actualCostMicros,
+      actualCostMicros: settled.persisted.actualCostMicros ?? actualCostMicros,
       currency: resultCurrency,
-      overrun: actualCostMicros > maxCostMicros,
+      overrun: settled.persisted.overrun,
       ...(result.providerTaskId === undefined ? {} : { providerTaskId: result.providerTaskId }),
     };
   }
@@ -1062,6 +1135,17 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
   async function loadCall(callId: string): Promise<CallRow | null> {
     const { rows } = await db.admin.query<CallRow>('SELECT * FROM provider_calls WHERE id = $1', [callId]);
     return rows[0] ?? null;
+  }
+
+  /** Re-read a call after a guarded transition lost, and report what is persisted. */
+  async function persistedOutcome(callId: string): Promise<{ state: CallState; actualCostMicros: number | null; overrun?: boolean }> {
+    const row = await loadCall(callId);
+    if (!row) throw new AppError('not_found', `Provider call ${callId} does not exist.`);
+    return {
+      state: row.state,
+      actualCostMicros: row.actual_cost_micros === null ? null : micros(row.actual_cost_micros),
+      ...(row.overrun ? { overrun: true } : {}),
+    };
   }
 
   async function reconcileCall(
@@ -1124,17 +1208,37 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
         ttlSeconds: operationDefinition(call.port, call.operation).ttlSeconds,
         currency,
       });
+      if (settled.unknownReason) return { state: 'unknown', actualCostMicros: null, reason: settled.unknownReason };
       await fireThresholds(settled.events);
       await fireOverrun(settled.overrunEvent);
+      if (!settled.applied) {
+        // Another reconciler settled this call first. Its persisted cost is the truth, not this
+        // attempt's: the charge happened once and the row already holds what was charged.
+        const cached =
+          settled.persisted.state === 'settled' ? await db.withWorkspace(call.workspace_id, (tx) => readCacheByCall(tx, call)) : null;
+        return {
+          state: settled.persisted.state,
+          actualCostMicros: settled.persisted.actualCostMicros,
+          ...(settled.persisted.overrun ? { overrun: true } : {}),
+          ...(cached === null ? {} : { data: cached.response }),
+        };
+      }
       return {
         state: 'settled',
-        actualCostMicros: actual,
-        ...(settled.overrun ? { overrun: true } : {}),
+        actualCostMicros: settled.persisted.actualCostMicros,
+        ...(settled.persisted.overrun ? { overrun: true } : {}),
         ...(data === undefined ? {} : { data }),
       };
     }
     if (result.state === 'failed') {
-      await failCall(call.workspace_id, call.id, result.error ?? 'The provider reported that the call failed.', result.providerTaskId);
+      const failed = await failCall(
+        call.workspace_id,
+        call.id,
+        result.error ?? 'The provider reported that the call failed.',
+        result.providerTaskId,
+      );
+      // A transition that lost the race must report the persisted outcome, never its own.
+      if (!failed) return persistedOutcome(call.id);
       return { state: 'failed', actualCostMicros: 0 };
     }
 
@@ -1311,16 +1415,15 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
     if (!/^[A-Z]{3}$/.test(input.currency)) throw new AppError('invalid_input', 'A budget currency must be a three-letter uppercase code.');
     const run = async (tx: Tx) => {
       // The currency is immutable once the period has activity: spent and held amounts are only
-      // meaningful in the currency they were reserved in.
+      // meaningful in the currency they were reserved in. This read only shapes the error message;
+      // the upsert below is the guard, because a row that does not exist yet cannot be locked.
       const existing = await tx.execute<{ currency: string; spent_micros: string; held_micros: string }>(
         sql`SELECT currency, spent_micros::text AS spent_micros, held_micros::text AS held_micros
               FROM provider_budgets
-             WHERE workspace_id = ${input.workspaceId} AND provider_id = ${input.providerId} AND period = ${period}
-             FOR UPDATE`,
+             WHERE workspace_id = ${input.workspaceId} AND provider_id = ${input.providerId} AND period = ${period}`,
       );
-      const current = existing.rows[0];
-      if (current && current.currency !== input.currency && (micros(current.spent_micros) > 0 || micros(current.held_micros) > 0))
-        throw new AppError(
+      const refuseChange = (current: { currency: string; spent_micros: string; held_micros: string }) =>
+        new AppError(
           'precondition_failed',
           `The ${input.providerId} budget for ${period} already has ${money(micros(current.spent_micros), current.currency)} spent and ${money(micros(current.held_micros), current.currency)} held in ${current.currency}, so its currency cannot change to ${input.currency} in this period. Set a ${input.currency} budget for a period with no activity, or keep ${current.currency}.`,
           {
@@ -1332,13 +1435,14 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
             heldMicros: micros(current.held_micros),
           },
         );
-      await tx.execute(
-        sql`INSERT INTO provider_budgets (workspace_id, provider_id, period, currency, budget_micros)
-              VALUES (${input.workspaceId}, ${input.providerId}, ${period}, ${input.currency}, ${input.budgetMicros})
-            ON CONFLICT (workspace_id, provider_id, period) DO UPDATE
-              SET currency = EXCLUDED.currency, budget_micros = EXCLUDED.budget_micros, updated_at = now()`,
-      );
-      const { rows } = await tx.execute<{
+      const current = existing.rows[0];
+      if (current && current.currency !== input.currency && (micros(current.spent_micros) > 0 || micros(current.held_micros) > 0))
+        throw refuseChange(current);
+
+      // One statement decides: the row is written only when its currency already matches or the
+      // period has no activity. A concurrent creation or hold that lands first wins, and this
+      // attempt is refused instead of relabelling money that is already spent.
+      const written = await tx.execute<{
         provider_id: string;
         period: string;
         currency: string;
@@ -1346,11 +1450,32 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
         spent_micros: string;
         held_micros: string;
       }>(
-        sql`SELECT provider_id, period, currency, budget_micros::text AS budget_micros, spent_micros::text AS spent_micros, held_micros::text AS held_micros
-              FROM provider_budgets WHERE workspace_id = ${input.workspaceId} AND provider_id = ${input.providerId} AND period = ${period}`,
+        sql`INSERT INTO provider_budgets (workspace_id, provider_id, period, currency, budget_micros)
+              VALUES (${input.workspaceId}, ${input.providerId}, ${period}, ${input.currency}, ${input.budgetMicros})
+            ON CONFLICT (workspace_id, provider_id, period) DO UPDATE
+              SET currency = EXCLUDED.currency, budget_micros = EXCLUDED.budget_micros, updated_at = now()
+              WHERE provider_budgets.currency = EXCLUDED.currency
+                 OR (provider_budgets.spent_micros = 0 AND provider_budgets.held_micros = 0)
+            RETURNING provider_id, period, currency, budget_micros::text AS budget_micros,
+                      spent_micros::text AS spent_micros, held_micros::text AS held_micros`,
       );
-      const row = rows[0];
-      if (!row) throw new AppError('precondition_failed', 'The budget was written but could not be read back.');
+      const row = written.rows[0];
+      if (!row) {
+        // The upsert lost: the period gained activity, or a currency, between the read and the
+        // write. Report what is persisted instead of pretending the change was applied.
+        const persisted = await tx.execute<{ currency: string; spent_micros: string; held_micros: string }>(
+          sql`SELECT currency, spent_micros::text AS spent_micros, held_micros::text AS held_micros
+                FROM provider_budgets
+               WHERE workspace_id = ${input.workspaceId} AND provider_id = ${input.providerId} AND period = ${period}`,
+        );
+        const raced = persisted.rows[0];
+        if (raced) throw refuseChange(raced);
+        throw new AppError(
+          'conflict',
+          `The ${input.providerId} budget for ${period} could not be written because it changed concurrently. Try again.`,
+          { providerId: input.providerId, period, currency: input.currency },
+        );
+      }
       const budgetMicros = micros(row.budget_micros);
       const spentMicros = micros(row.spent_micros);
       const heldMicros = micros(row.held_micros);

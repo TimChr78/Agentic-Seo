@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { createDb, type Db } from '@agentic-seo/db';
+import { createDb, type Db, type Tx } from '@agentic-seo/db';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { APP_ROLE, createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
@@ -634,6 +634,233 @@ describe.skipIf(!hasTestDatabase())('provider gateway', () => {
     );
     expect(row.rows[0]?.state).toBe('unknown');
     expect(row.rows[0]?.error).toMatch(/EUR/);
+  });
+
+  it('refuses a concurrent budget creation that would relabel a period with activity', async () => {
+    const id = providerId('currency-race');
+    const fake = fakeAdapter({ id, ports: ['KeywordData'], estimateMicros: 100, actualMicros: 100 });
+    const gw = gateway([fake]);
+
+    // B reads "no budget", then stops between that read and its write. A whole budget is created
+    // and spent in that window, so B's EUR upsert lands on a period holding USD.
+    const read = deferred();
+    const resume = deferred();
+    const racer = db.withWorkspace(workspace, async (tx) => {
+      let statements = 0;
+      const paused = {
+        execute: async (query: Parameters<Tx['execute']>[0]) => {
+          const result = await tx.execute(query);
+          statements += 1;
+          if (statements === 1) {
+            read.resolve();
+            await resume.promise;
+          }
+          return result;
+        },
+      } as unknown as Tx;
+      return gw.setBudget({ workspaceId: workspace, providerId: id, currency: 'EUR', budgetMicros: 10_000, tx: paused });
+    });
+    await read.promise;
+
+    await gw.setBudget({ workspaceId: workspace, providerId: id, currency: 'USD', budgetMicros: 10_000 });
+    await call(gw, id, { keywords: ['relabel'], market: 'us' });
+    expect(await budgetOf(gw, id)).toMatchObject({ currency: 'USD', spentMicros: 100 });
+
+    resume.resolve();
+    const error = await racer.then(
+      () => null,
+      (err) => err,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/cannot change/i);
+    expect((error as Error).message).toMatch(/EUR/);
+    expect(await budgetOf(gw, id)).toMatchObject({ currency: 'USD', budgetMicros: 10_000, spentMicros: 100 });
+  });
+
+  it('validates the budget currency even when the estimate holds nothing', async () => {
+    const id = providerId('zero-hold-currency');
+    // A zero estimate used to skip the budget check entirely, so a later 100 settle was added to
+    // whatever currency the budget happened to be in.
+    const fake = fakeAdapter({ id, ports: ['KeywordData'], estimateMicros: 0, actualMicros: 100 });
+    const gw = gateway([fake]);
+    await gw.setBudget({ workspaceId: workspace, providerId: id, currency: 'EUR', budgetMicros: 10_000 });
+
+    const error = await call(gw, id, { keywords: ['free-looking'], market: 'us' }, { idempotencyKey: 'zero-hold-key' }).catch((err) => err);
+    expect(error).toBeInstanceOf(ProviderBudgetError);
+    expect((error as Error).message).toMatch(/EUR/);
+    expect((error as Error).message).toMatch(/USD/);
+    expect(fake.callCount).toBe(0);
+    expect(await budgetOf(gw, id)).toMatchObject({ currency: 'EUR', spentMicros: 0, heldMicros: 0 });
+    const calls = await db.admin.query<{ count: string }>('SELECT count(*)::text AS count FROM provider_calls WHERE provider_id = $1', [
+      id,
+    ]);
+    expect(Number(calls.rows[0]?.count)).toBe(0);
+  });
+
+  it('keeps a zero-hold call unknown when the budget switches currency before settlement', async () => {
+    const id = providerId('zero-hold-settlement');
+    const started = deferred();
+    const resume = deferred();
+    const fake = fakeAdapter({
+      id,
+      ports: ['KeywordData'],
+      estimateMicros: 0,
+      actualMicros: 100,
+      holdBeforeSubmit: async () => {
+        started.resolve();
+        await resume.promise;
+      },
+    });
+    const gw = gateway([fake]);
+    await gw.setBudget({ workspaceId: workspace, providerId: id, currency: 'USD', budgetMicros: 10_000 });
+
+    const inFlight = call(gw, id, { keywords: ['late-currency'], market: 'us' }, { idempotencyKey: 'late-currency-key' });
+    await started.promise;
+
+    // With a zero hold the period has no activity, so its currency is still free to change.
+    await gw.setBudget({ workspaceId: workspace, providerId: id, currency: 'EUR', budgetMicros: 10_000 });
+    resume.resolve();
+
+    const failure = await inFlight.catch((err) => err);
+    expect(failure).toBeInstanceOf(ProviderCallUnknownError);
+    expect((failure as Error).message).toMatch(/EUR/);
+    const row = await db.admin.query<{ state: string; error: string | null }>(
+      'SELECT state, error FROM provider_calls WHERE idempotency_key = $1',
+      ['late-currency-key'],
+    );
+    expect(row.rows[0]?.state).toBe('unknown');
+    expect(row.rows[0]?.error).toMatch(/EUR/);
+    expect(await budgetOf(gw, id)).toMatchObject({ currency: 'EUR', spentMicros: 0, heldMicros: 0 });
+    expect(fake.callCount).toBe(1);
+  });
+
+  it('returns the persisted outcome from a reconciler that loses the settle transition', async () => {
+    const id = providerId('reconcile-race');
+    const seeded = fakeAdapter({ id, ports: ['KeywordData'], estimateMicros: 1_000, actualMicros: 1_000, timeoutAfterCharge: 1 });
+    const seed = gateway([seeded]);
+    await seed.setBudget({ workspaceId: workspace, providerId: id, currency: 'USD', budgetMicros: 10_000 });
+    const failure = await call(seed, id, { keywords: ['race'], market: 'us' }, { idempotencyKey: 'race-key' }).catch((err) => err);
+    expect(failure).toBeInstanceOf(ProviderCallUnknownError);
+    const callId = (failure as ProviderCallUnknownError).callId;
+
+    const metrics = {
+      keywords: [
+        {
+          keyword: 'race',
+          searchVolume: 1_000,
+          cpcMicros: 120_000,
+          difficulty: 35,
+          intent: 'informational',
+          trend: Array.from({ length: 12 }, (_, i) => 500 + i * 10),
+          competition: 0.4,
+        },
+      ],
+    };
+    const bothInFlight = deferred();
+    const settled = deferred();
+    let reconciles = 0;
+    const reachTransition = async () => {
+      reconciles += 1;
+      if (reconciles === 2) bothInFlight.resolve();
+      await bothInFlight.promise;
+    };
+    const reconciler = (outcome: 'settled' | 'failed') =>
+      defineAdapter({
+        id,
+        ports: ['KeywordData'] as const,
+        estimate: () => ({ maxCostMicros: 1_000, currency: 'USD', basis: 'one bounded request' }),
+        call: async () => {
+          throw new ProviderTimeoutError('reconciliation does not call the provider');
+        },
+        reconcile: async () => {
+          await reachTransition();
+          if (outcome === 'failed') await settled.promise;
+          return outcome === 'settled'
+            ? { state: 'settled' as const, actualCostMicros: 100, data: metrics, currency: 'USD' }
+            : { state: 'failed' as const, error: 'the provider reports that the task failed' };
+        },
+      });
+    const settledSide = createProviderGateway({ db, adapters: [reconciler('settled')] });
+    const failedSide = createProviderGateway({ db, adapters: [reconciler('failed')] });
+
+    const settling = settledSide.reconcileUnknown(callId);
+    const failing = failedSide.reconcileUnknown(callId);
+    await bothInFlight.promise;
+    const settledResult = await settling;
+    settled.resolve();
+    const failedResult = await failing;
+
+    // The failed transition lost the race, so it reports what was persisted, not its own outcome.
+    expect(settledResult).toMatchObject({ callId, state: 'settled', actualCostMicros: 100 });
+    expect(failedResult).toMatchObject({ callId, state: 'settled', actualCostMicros: 100 });
+    expect(failedResult.overrun).toBeFalsy();
+    expect(await budgetOf(seed, id)).toMatchObject({ spentMicros: 100, heldMicros: 0 });
+    const row = await db.admin.query<{ state: string; actual_cost_micros: string }>(
+      'SELECT state, actual_cost_micros::text AS actual_cost_micros FROM provider_calls WHERE id = $1',
+      [callId],
+    );
+    expect(row.rows[0]).toMatchObject({ state: 'settled', actual_cost_micros: '100' });
+  });
+
+  it('reports the persisted cost, not its own, when a reconciler loses the settlement', async () => {
+    const id = providerId('reconcile-cost-race');
+    const seeded = fakeAdapter({ id, ports: ['KeywordData'], estimateMicros: 1_000, actualMicros: 1_000, timeoutAfterCharge: 1 });
+    const seed = gateway([seeded]);
+    await seed.setBudget({ workspaceId: workspace, providerId: id, currency: 'USD', budgetMicros: 10_000 });
+    const failure = await call(seed, id, { keywords: ['cost-race'], market: 'us' }, { idempotencyKey: 'cost-race-key' }).catch(
+      (err) => err,
+    );
+    expect(failure).toBeInstanceOf(ProviderCallUnknownError);
+    const callId = (failure as ProviderCallUnknownError).callId;
+
+    const metrics = (keyword: string) => ({
+      keywords: [
+        {
+          keyword,
+          searchVolume: 1_000,
+          cpcMicros: 120_000,
+          difficulty: 35,
+          intent: 'informational',
+          trend: Array.from({ length: 12 }, (_, i) => 500 + i * 10),
+          competition: 0.4,
+        },
+      ],
+    });
+    const bothInFlight = deferred();
+    const settled = deferred();
+    let reconciles = 0;
+    const reachTransition = async () => {
+      reconciles += 1;
+      if (reconciles === 2) bothInFlight.resolve();
+      await bothInFlight.promise;
+    };
+    const reconciler = (actualCostMicros: number, waitForSettlement: boolean) =>
+      defineAdapter({
+        id,
+        ports: ['KeywordData'] as const,
+        estimate: () => ({ maxCostMicros: 1_000, currency: 'USD', basis: 'one bounded request' }),
+        call: async () => {
+          throw new ProviderTimeoutError('reconciliation does not call the provider');
+        },
+        reconcile: async () => {
+          await reachTransition();
+          if (waitForSettlement) await settled.promise;
+          return { state: 'settled' as const, actualCostMicros, data: metrics(`cost-${actualCostMicros}`), currency: 'USD' };
+        },
+      });
+    const first = createProviderGateway({ db, adapters: [reconciler(100, false)] });
+    const second = createProviderGateway({ db, adapters: [reconciler(200, true)] });
+
+    const winning = first.reconcileUnknown(callId);
+    const losing = second.reconcileUnknown(callId);
+    await bothInFlight.promise;
+    const winningResult = await winning;
+    settled.resolve();
+    const losingResult = await losing;
+
+    expect(winningResult).toMatchObject({ callId, state: 'settled', actualCostMicros: 100 });
+    expect(losingResult).toMatchObject({ callId, state: 'settled', actualCostMicros: 100 });
+    expect(await budgetOf(seed, id)).toMatchObject({ spentMicros: 100, heldMicros: 0 });
   });
 
   it('purges raw responses per workspace through row-level-security-scoped transactions', async () => {
