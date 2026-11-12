@@ -1,6 +1,6 @@
 name: CI
 
-# Static checks and the test suite. Grows with the phases (image build, browser tests, Helm).
+# Static checks, the test suite and the Docker image. Grows with the phases (browser tests, Helm).
 
 on:
   push:
@@ -56,3 +56,14 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:ci
+
+  # The Docker image as a self-hoster runs it. Building the image here and reusing it in the smoke
+  # script keeps one build per run; the script uses Compose, which GitHub's runners have.
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - run: docker buildx build --build-arg GIT_SHA="${GITHUB_SHA::7}" --load -t aseo-smoke-app .
+      - run: SMOKE_NO_BUILD=1 SMOKE_IMAGE=aseo-smoke-app scripts/smoke.sh
