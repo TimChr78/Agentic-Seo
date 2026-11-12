@@ -1,0 +1,5 @@
+- Add the `auth` package: Better Auth password sign-in and sessions, members and invitations with owner rules and last-owner protection, API tokens that narrow at once and widen only with a password, the MCP OAuth 2.1 provider with per-permission consent and one workspace per connection, and agents as principals with pause, resume, revoke and the action ledger.
+- Add `apps/server`: REST `/v1/<command>` and `/openapi.json`, stateless MCP at `/mcp`, server-rendered sign-in/consent/invite pages, `/healthz`, `/readyz`, optional token-protected `/metrics`, static UI serving and the `api`, `worker` and `scheduler` roles.
+- Add the `aseo` admin CLI: `migrate`, `bootstrap`, `reset-password`, `rotate-keys`, `init`, `doctor` and `version`.
+- Add migration `0002_auth.sql` with Better Auth's tables, members, invitations, API tokens, OAuth workspace choices, agents, credentials and the action ledger, all under row-level security where they are tenant data.
+- Add a `.env.example` documenting every server variable, and the server test harness that copies a migrated template database per test file.
