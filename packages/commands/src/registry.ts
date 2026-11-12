@@ -317,6 +317,18 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       }
 
       const agent = principal.type === 'agent' ? principal.agent : undefined;
+      // Fail closed. The type requires an identity, but a token or OAuth client is built from stored
+      // data, so a principal that lost its agent row must not slip past the policy engine: reads
+      // stay available, anything that changes something needs the identity the policy judges.
+      if (principal.type === 'agent' && !agent) {
+        if (cmd.effect !== 'read')
+          return fail(
+            new AppError(
+              'forbidden',
+              `${cmd.name} needs an agent identity: this credential is an agent without one, so it may only run read commands. Reconnect the agent.`,
+            ),
+          );
+      }
       if (agent && agent.status !== 'active')
         return fail(
           new AppError(
@@ -354,6 +366,12 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                 if (policy.decision === 'deny') throw new PolicyDeniedError(policy);
               }
               if (opts.idempotencyKey) {
+                // Serialise retries of one (workspace, key) before the lookup. Two concurrent
+                // requests must not both miss and both run the handler: the second waits here,
+                // then sees the response the first committed.
+                await tx.execute(
+                  sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${principal.workspaceId}:${opts.idempotencyKey}`}, 0))`,
+                );
                 const [hit] = await tx
                   .select()
                   .from(schema.idempotencyKeys)

@@ -167,7 +167,7 @@ const fmt = (n: number) => n.toLocaleString('en-US');
 const LEVEL_NAMES = ['observe', 'propose', 'act with veto', 'act within limits', 'run the loop'];
 
 export function decide(input: PolicyInput): PolicyOutcome {
-  const { actionClass, impact, settings, counters, mandate } = input;
+  const { actionClass, impact, settings, mandate } = input;
   const out = (decision: PolicyDecision, reasons: string[], extra: Partial<PolicyOutcome> = {}): PolicyOutcome => ({
     decision,
     actionClass,
@@ -185,19 +185,35 @@ export function decide(input: PolicyInput): PolicyOutcome {
     return out('deny', ['This agent’s mandate is observe-only (level 0): it may read but not draft.'], { level: 0 });
   if (actionClass === 'draft') return out('allow', []);
   if (mandate) return decideWithMandate(input, mandate, out);
+  return decideWithoutMandate(input, out);
+}
 
-  const ask: string[] = [];
+/**
+ * The path for an agent with no mandate. The design puts such an agent at level 1 (propose) for
+ * every write class, and applies the fixed rules and unknown reach here too: a rule that only
+ * exists on the mandate path would be skipped by the very agents that have no mandate to judge.
+ */
+function decideWithoutMandate(
+  input: PolicyInput,
+  out: (decision: PolicyDecision, reasons: string[], extra?: Partial<PolicyOutcome>) => PolicyOutcome,
+): PolicyOutcome {
+  const { actionClass, impact, settings, counters } = input;
+  const reasons: string[] = [];
+  if (ALWAYS_A_PERSON.includes(actionClass)) reasons.push(`A ${actionClass} change always needs a person, whatever the agent was granted.`);
+  if (impact.needsPerson) reasons.push(impact.needsPerson);
+  // Unknown reach always requires approval, never a one-level drop (design §3).
+  if (REACH_CLASSES.includes(actionClass) && impact.reach?.kind !== 'known')
+    reasons.push(`The traffic at risk is unknown, so this change needs a person. ${impact.reach?.reason ?? ''}`.trim());
   if (settings.switch === 'propose_only')
-    ask.push('This workspace is set to propose-only: every agent change beyond a draft needs a person.');
+    reasons.push('This workspace is set to propose-only: every agent change beyond a draft needs a person.');
   if (counters.changes >= settings.limits.changesPerDay)
-    ask.push(`This agent made ${fmt(counters.changes)} changes in the last 24 hours, its limit is ${fmt(settings.limits.changesPerDay)}.`);
+    reasons.push(
+      `This agent made ${fmt(counters.changes)} changes in the last 24 hours, its limit is ${fmt(settings.limits.changesPerDay)}.`,
+    );
 
-  if (!ask.length) return out('allow', []);
-  if (input.approvable) return out('ask', ask);
-  return out('deny', [
-    ...ask,
-    `${input.command} cannot wait for an approval, so a person has to do it, or raise the limit in Settings → Agents.`,
-  ]);
+  reasons.push(`This agent has no mandate, so ${actionClass} changes are level 1 (propose) and need a person.`);
+  if (input.approvable) return out('ask', reasons);
+  return out('deny', [...reasons, `${input.command} cannot wait for an approval, so a person has to do it.`]);
 }
 
 function decideWithMandate(

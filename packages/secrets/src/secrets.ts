@@ -21,20 +21,32 @@ export async function activeDataKey(
   kp: KeyProvider,
   purpose: DataKeyPurpose = 'secrets',
 ): Promise<{ id: string; key: Buffer }> {
-  const [k] = await tx
-    .select()
-    .from(schema.dataKeys)
-    .where(and(eq(schema.dataKeys.workspaceId, workspaceId), eq(schema.dataKeys.active, true), eq(schema.dataKeys.purpose, purpose)));
-  if (k) return { id: k.id, key: await kp.unwrap(k.wrappedKey, k.kekId) };
+  const readActive = async () => {
+    const [k] = await tx
+      .select()
+      .from(schema.dataKeys)
+      .where(and(eq(schema.dataKeys.workspaceId, workspaceId), eq(schema.dataKeys.active, true), eq(schema.dataKeys.purpose, purpose)));
+    return k;
+  };
+  const existing = await readActive();
+  if (existing) return { id: existing.id, key: await kp.unwrap(existing.wrappedKey, existing.kekId) };
+
   const key = newDataKey();
   const id = newId('dk');
-  // Two first uses at once: the unique index lets one insert win; the other reads the winner.
+  // Two first uses at once: the partial unique index lets one insert win. The loser waits for the
+  // winner's transaction, reads it once more, and otherwise gives up instead of recursing forever.
   const inserted = await tx
     .insert(schema.dataKeys)
     .values({ workspaceId, id, kekId: kp.id, wrappedKey: await kp.wrap(key), purpose })
     .onConflictDoNothing()
     .returning({ id: schema.dataKeys.id });
-  return inserted.length ? { id, key } : activeDataKey(tx, workspaceId, kp, purpose);
+  if (inserted.length) return { id, key };
+
+  const winner = await readActive();
+  if (winner) return { id: winner.id, key: await kp.unwrap(winner.wrappedKey, winner.kekId) };
+  throw new Error(
+    `Could not create a "${purpose}" data key for workspace ${workspaceId}: the insert conflicts but no active key is visible. Check the data_keys table.`,
+  );
 }
 
 /** A data key by id (for data sealed with an older key). */

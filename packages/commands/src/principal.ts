@@ -59,8 +59,15 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
   viewer: ['artifacts:read', 'sites:read'],
 };
 
-export interface Principal {
-  type: 'user' | 'agent';
+/** The agent behind an agent principal: the row the action ledger and policy refer to. */
+export interface AgentIdentity {
+  id: string;
+  name: string;
+  status: 'active' | 'paused' | 'revoked';
+  statusReason: string | null;
+}
+
+interface BasePrincipal {
   /** The person; for agents, the person the agent acts for. */
   userId: string;
   /** OAuth client id when the principal is an agent. */
@@ -69,21 +76,39 @@ export interface Principal {
   role: Role;
   /** Effective permissions: the role's permissions, intersected with granted scopes for agents. */
   permissions: ReadonlySet<Permission>;
-  /** The agent this principal acts as (ADR-0006); set for API tokens and OAuth clients. */
-  agent?: { id: string; name: string; status: 'active' | 'paused' | 'revoked'; statusReason: string | null };
 }
 
-export function userPrincipal(userId: string, workspaceId: string, role: Role): Principal {
+/** A person. `agent` is present-but-undefined so code can read it without narrowing first. */
+export interface UserPrincipal extends BasePrincipal {
+  type: 'user';
+  agent?: undefined;
+}
+
+/**
+ * An agent. The identity is required, not optional: without it the policy engine cannot run, so
+ * `agentPrincipal` always supplies it and the compiler refuses a principal that leaves it out.
+ * The executor still guards at runtime, because a token or OAuth client is built from stored data.
+ */
+export interface AgentPrincipal extends BasePrincipal {
+  type: 'agent';
+  clientId: string;
+  agent: AgentIdentity;
+}
+
+export type Principal = UserPrincipal | AgentPrincipal;
+
+export function userPrincipal(userId: string, workspaceId: string, role: Role): UserPrincipal {
   return { type: 'user', userId, workspaceId, role, permissions: new Set(ROLE_PERMISSIONS[role]) };
 }
 
 export function agentPrincipal(
+  agent: AgentIdentity,
   userId: string,
   clientId: string,
   workspaceId: string,
   role: Role,
   grantedScopes: Iterable<string>,
-): Principal {
+): AgentPrincipal {
   const granted = new Set(grantedScopes);
   return {
     type: 'agent',
@@ -92,5 +117,6 @@ export function agentPrincipal(
     workspaceId,
     role,
     permissions: new Set(ROLE_PERMISSIONS[role].filter((p) => granted.has(p))),
+    agent,
   };
 }

@@ -60,6 +60,31 @@ export function listWorkspaceIds(databaseUrl: string): Promise<string[]> {
 type RoleClient = Pick<pg.Client, 'query' | 'escapeLiteral'>;
 
 /**
+ * Refuse to continue when the app role can bypass row-level security, directly or through a role
+ * it is a member of. `ALTER ROLE` clears the attributes on the role itself but cannot touch a
+ * membership granted elsewhere, so both are checked after the role is written.
+ */
+async function assertCannotBypassRls(client: RoleClient, role: string): Promise<void> {
+  const { rows } = await client.query<{ rolsuper: boolean; rolbypassrls: boolean; inherits: boolean }>(
+    `SELECT r.rolsuper, r.rolbypassrls,
+            EXISTS (
+              SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
+               WHERE m.member = r.oid AND (g.rolsuper OR g.rolbypassrls)
+            ) AS inherits
+       FROM pg_roles r
+      WHERE r.rolname = $1`,
+    [role],
+  );
+  const privileges = rows[0];
+  if (!privileges) throw new Error(`The app role ${role} is missing after it was created.`);
+  if (privileges.rolsuper || privileges.rolbypassrls || privileges.inherits)
+    throw new Error(
+      `The app role ${role} can bypass row-level security (superuser or BYPASSRLS, directly or through a role it is a member of). ` +
+        'Refusing to migrate: every command would see and change other workspaces. Revoke the privilege or the role membership, then retry.',
+    );
+}
+
+/**
  * Create or update the app role. Migrations and a restore both need it: the GRANTs in the
  * migrations name it, and it must exist before they run.
  */
@@ -75,8 +100,11 @@ export async function ensureAppRole(client: RoleClient, opts: { appRolePassword:
     const { rowCount } = await client.query('SELECT 1 FROM pg_roles WHERE rolname = $1', [role]);
     try {
       await client.query(
-        rowCount ? `ALTER ROLE ${role} WITH LOGIN PASSWORD ${pwd}` : `CREATE ROLE ${role} LOGIN PASSWORD ${pwd} NOSUPERUSER NOBYPASSRLS`,
+        rowCount
+          ? `ALTER ROLE ${role} WITH LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD ${pwd}`
+          : `CREATE ROLE ${role} LOGIN PASSWORD ${pwd} NOSUPERUSER NOBYPASSRLS`,
       );
+      await assertCannotBypassRls(client, role);
       return role;
     } catch (err) {
       const e = err as { code?: string; message?: string };

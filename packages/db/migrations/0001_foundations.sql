@@ -64,7 +64,8 @@ CREATE TABLE data_keys (
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (workspace_id, id)
 );
-CREATE UNIQUE INDEX data_keys_one_active ON data_keys (workspace_id) WHERE active;
+-- One active key per workspace and purpose: secrets, identity and matching each keep their own.
+CREATE UNIQUE INDEX data_keys_one_active ON data_keys (workspace_id, purpose) WHERE active;
 
 CREATE TABLE secrets (
   workspace_id uuid NOT NULL,

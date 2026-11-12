@@ -37,9 +37,33 @@ describe('the policy engine', () => {
     expect(decide(base({ actionClass: 'draft' })).decision).toBe('allow');
   });
 
-  it('leaves an agent without a mandate to the approval policy when nothing is exceeded', () => {
-    expect(decide(base()).decision).toBe('allow');
-    expect(decide(base({ actionClass: 'crawl' })).decision).toBe('allow');
+  it('treats an agent without a mandate as level 1 (propose) for every write class', () => {
+    expect(decide(base()).decision).toBe('ask');
+    expect(decide(base({ actionClass: 'crawl' })).decision).toBe('ask');
+    expect(decide(base({ actionClass: 'index.submit' })).decision).toBe('ask');
+    // A draft is the proposal itself, so it runs; reads always run.
+    expect(decide(base({ actionClass: 'draft' })).decision).toBe('allow');
+    const denied = decide(base({ actionClass: 'crawl', approvable: false }));
+    expect(denied.decision).toBe('deny');
+    expect(denied.reasons.join(' ')).toContain('cannot wait for an approval');
+  });
+
+  it('asks for a person when the reach is unknown, with or without a mandate', () => {
+    const withoutMandate = decide(base({ impact: { reach: UNKNOWN_REACH } }));
+    expect(withoutMandate.decision).toBe('ask');
+    expect(withoutMandate.reasons.join(' ')).toContain('traffic at risk is unknown');
+    const denied = decide(base({ impact: { reach: UNKNOWN_REACH }, approvable: false, actionClass: 'site.structural' }));
+    expect(denied.decision).toBe('deny');
+    expect(denied.reasons.join(' ')).toContain('traffic at risk is unknown');
+  });
+
+  it('applies the fixed rules without a mandate', () => {
+    expect(decide(base({ actionClass: 'settings' })).decision).toBe('ask');
+    expect(decide(base({ actionClass: 'destructive' })).decision).toBe('ask');
+    expect(decide(base({ actionClass: 'settings', approvable: false })).decision).toBe('deny');
+    expect(
+      decide(base({ actionClass: 'crawl', impact: { needsPerson: 'Connections always need a person.' } })).reasons.join(' '),
+    ).toContain('Connections always need a person.');
   });
 
   it('refuses what cannot wait for an approval, with the reason and a way out', () => {
@@ -50,10 +74,26 @@ describe('the policy engine', () => {
     expect(out.reasons.at(-1)).toContain('audits.run cannot wait for an approval');
   });
 
-  it('enforces the daily change limit', () => {
-    const settings = autonomySettings({ limits: { changesPerDay: 10 } });
-    expect(decide(base({ settings, counters: { changes: 9 } })).decision).toBe('allow');
-    expect(decide(base({ settings, counters: { changes: 10 } })).decision).toBe('ask');
+  it('enforces the daily change limit on both paths', () => {
+    const settings = autonomySettings({ maxLevel: { 'site.content': 3 }, limits: { changesPerDay: 10 } });
+    const mandate: MandateView = {
+      id: 'mnd_limit',
+      version: 1,
+      levels: { 'site.content': 3 },
+      holdWindow: 'PT2H',
+      purpose: 'Keep the limit',
+    };
+    const impact = { reach: { kind: 'known' as const, affectedUrls: 1, clicksAtRisk: 0, criticalPages: [] } };
+    const withMandate = (changes: number) => decide(base({ settings, counters: { changes }, mandate, impact }));
+    expect(withMandate(9).decision).toBe('allow');
+    const capped = withMandate(10);
+    expect(capped.decision).toBe('ask');
+    expect(capped.level).toBe(1);
+    expect(capped.reasons.join(' ')).toContain('limit is 10');
+
+    const withoutMandate = decide(base({ settings, counters: { changes: 10 }, impact }));
+    expect(withoutMandate.decision).toBe('ask');
+    expect(withoutMandate.reasons.join(' ')).toContain('limit is 10');
   });
 
   it('propose-only lets agents draft but sends every other change to a person', () => {
