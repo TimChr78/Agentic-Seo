@@ -20,9 +20,18 @@ export function initTelemetry(serviceName: string) {
   if (!process.env.OTEL_EXPORTER_OTLP_ENDPOINT || sdk) return;
   sdk = new NodeSDK({ serviceName, traceExporter: new OTLPTraceExporter() });
   sdk.start();
-  logger.info({ endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT }, 'OpenTelemetry tracing enabled');
+  logger.info({ endpoint: endpointOrigin(process.env.OTEL_EXPORTER_OTLP_ENDPOINT) }, 'OpenTelemetry tracing enabled');
 }
 
 export async function shutdownTelemetry() {
   await sdk?.shutdown();
+}
+
+/** Only the origin of the endpoint is logged: user info, paths and query strings can carry credentials. */
+export function endpointOrigin(endpoint: string): string {
+  try {
+    return new URL(endpoint).origin;
+  } catch {
+    return '(invalid URL)';
+  }
 }

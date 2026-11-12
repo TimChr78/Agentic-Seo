@@ -26,3 +26,13 @@ describe('isoDateTime', () => {
     expect(json.properties.sendAt.description).toContain('ISO 8601 with a time zone');
   });
 });
+
+describe('isoDateTime calendar validation', () => {
+  it('rejects impossible calendar dates instead of rolling them over', () => {
+    const field = isoDateTime('at');
+    expect(field.safeParse('2026-02-30T12:00:00Z').success).toBe(false);
+    expect(field.safeParse('2026-02-29T12:00:00Z').success).toBe(false);
+    expect(field.safeParse('2028-02-29T12:00:00Z').success).toBe(true);
+    expect(field.safeParse('2026-04-31T09:00:00+02:00').success).toBe(false);
+  });
+});

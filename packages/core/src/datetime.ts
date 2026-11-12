@@ -67,7 +67,24 @@ export function isoDateTime(field: string) {
   return z
     .string()
     .refine((value) => ISO_DATE_TIME.test(value), `${field} needs a time zone, e.g. ${exampleZ} or ${exampleOffset}.`)
-    .refine((value) => !Number.isNaN(Date.parse(value)), `${field} must be a valid date and time, e.g. ${exampleZ}.`)
+    .refine(
+      (value) => !Number.isNaN(Date.parse(value)) && validCalendarFields(value),
+      `${field} must be a valid date and time, e.g. ${exampleZ}.`,
+    )
     .transform((value) => new Date(value).toISOString())
     .describe(`ISO 8601 with a time zone, e.g. ${exampleZ} or ${exampleOffset}; stored in UTC`);
+}
+
+/**
+ * `Date.parse` normalises impossible fields (2026-02-30 becomes 2 March), so check the calendar
+ * fields themselves: month 1–12, the day within that month (leap years included), hour ≤ 23,
+ * minute and second ≤ 59.
+ */
+function validCalendarFields(value: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/.exec(value);
+  if (!m) return false;
+  const [y, mo, d, h, min, sec] = m.slice(1).map((v) => (v === undefined ? 0 : Number(v)));
+  if (mo < 1 || mo > 12 || d < 1 || h > 23 || min > 59 || sec > 59) return false;
+  const daysInMonth = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+  return d <= daysInMonth;
 }

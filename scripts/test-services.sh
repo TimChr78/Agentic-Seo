@@ -12,8 +12,12 @@ cd "$(dirname "$0")/.."
 
 in_container() { [ -f /.dockerenv ] || grep -qa docker /proc/1/cgroup 2>/dev/null; }
 if [ -z "${AS_TEST_BIND_IP:-}" ] && in_container; then export AS_TEST_BIND_IP=172.17.0.1; fi
-host="${AS_TEST_BIND_IP:-127.0.0.1}"
-[ "$host" = "0.0.0.0" ] && { echo "warning: AS_TEST_BIND_IP=0.0.0.0 exposes the test database to the LAN" >&2; host=127.0.0.1; }
+# The database has a known password, so a wildcard bind is refused rather than "fixed" for one path.
+case "${AS_TEST_BIND_IP:-127.0.0.1}" in
+  0.0.0.0|::|'[::]'|'*') echo "error: AS_TEST_BIND_IP=${AS_TEST_BIND_IP} would expose the test database to the network; use 127.0.0.1 or a specific interface address" >&2; exit 2 ;;
+esac
+export AS_TEST_BIND_IP="${AS_TEST_BIND_IP:-127.0.0.1}"
+host="$AS_TEST_BIND_IP"
 port="${AS_TEST_PG_PORT:-45432}"
 
 # Without the Compose plugin (some hosts only have the Docker CLI), run the same container directly.

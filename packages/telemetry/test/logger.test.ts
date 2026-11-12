@@ -29,3 +29,11 @@ describe('telemetry log level', () => {
     expect(await levelFor('debug')).toBe('debug');
   });
 });
+
+describe('endpointOrigin', () => {
+  it('drops credentials, paths and query strings from the logged endpoint', async () => {
+    const { endpointOrigin } = await import('../src/index');
+    expect(endpointOrigin('https://user:secret@otel.example.com:4318/v1/traces?token=abc')).toBe('https://otel.example.com:4318');
+    expect(endpointOrigin('not a url')).toBe('(invalid URL)');
+  });
+});
