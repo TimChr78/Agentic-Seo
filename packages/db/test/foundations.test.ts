@@ -50,6 +50,28 @@ const SEED: Record<string, { insert: string; appendOnly: boolean }> = {
             VALUES ($1, 'user', 'seed-user', 'seed-client', 'seed.run', 'unknown_key')`,
     appendOnly: false,
   },
+  provider_budgets: {
+    insert: `INSERT INTO provider_budgets (workspace_id, provider_id, period, currency, budget_micros)
+            VALUES ($1, 'fake', '2026-11', 'USD', 1000000)`,
+    appendOnly: false,
+  },
+  provider_cache: {
+    insert: `INSERT INTO provider_cache (workspace_id, cache_key, provider_id, port, operation, request_hash, response, expires_at)
+            VALUES ($1, 'seed-cache', 'fake', 'KeywordData', 'metrics', 'seed-hash', '{}'::jsonb, now() + interval '1 day')`,
+    appendOnly: false,
+  },
+  provider_calls: {
+    insert: `INSERT INTO provider_calls (workspace_id, id, idempotency_key, caller_type, caller_id, purpose, provider_id, port, operation,
+              request_hash, cache_key, max_cost_micros, reserved_micros, currency, budget_period, state)
+            VALUES ($1, gen_random_uuid(), 'seed-key', 'person', 'seed-user', 'seed', 'fake', 'KeywordData', 'metrics',
+              'seed-hash', 'seed-cache', 1000, 1000, 'USD', '2026-11', 'pending')`,
+    appendOnly: false,
+  },
+  provider_rate_buckets: {
+    insert: `INSERT INTO provider_rate_buckets (workspace_id, provider_id, credential_key, tokens, capacity, refill_per_second)
+            VALUES ($1, 'fake', '', 10, 10, 1)`,
+    appendOnly: false,
+  },
   secrets: {
     insert: `INSERT INTO secrets (workspace_id, name, data_key_id, iv, ciphertext, auth_tag, updated_by)
             VALUES ($1, 'seed-secret', 'dk-seed', '\\x00'::bytea, '\\x01'::bytea, '\\x02'::bytea, 'seed-user')`,
