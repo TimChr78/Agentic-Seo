@@ -149,5 +149,3 @@ export function holdWindowMs(window: string): number {
   const m = /^PT(\d+)([HM])$/.exec(window);
   return m ? Number(m[1]) * (m[2] === 'H' ? 3_600_000 : 60_000) : 2 * 3_600_000;
 }
-
-

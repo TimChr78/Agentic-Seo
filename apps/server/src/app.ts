@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { activeMandate } from '@agentic-seo/artifacts';
 import {
   type AuthConfig,
   acceptInvitation,
@@ -9,7 +10,6 @@ import {
   isMcpResourceUrlAllowed,
   withConsentRequest,
 } from '@agentic-seo/auth';
-import { activeMandate } from '@agentic-seo/artifacts';
 import { createExecutor, type Services, userPrincipal } from '@agentic-seo/commands';
 import { AppError, newUuid, remoteAddressFromEnv, resolveClientIp } from '@agentic-seo/core';
 import { createDb } from '@agentic-seo/db';

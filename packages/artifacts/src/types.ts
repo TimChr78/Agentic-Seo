@@ -39,11 +39,7 @@ const competitorRef = z.object({
 const researchLogEntry = z.object({
   at: isoDateTime('at').describe('When the finding was recorded, e.g. 2026-11-12T09:00:00Z'),
   note: z.string().trim().min(1).max(2000).describe('What was learned'),
-  evidence: z
-    .array(z.string().max(500))
-    .max(20)
-    .default([])
-    .describe('URLs, artifact ids or short citations that back the finding'),
+  evidence: z.array(z.string().max(500)).max(20).default([]).describe('URLs, artifact ids or short citations that back the finding'),
 });
 
 const siteContext = z.object({
@@ -63,11 +59,7 @@ const siteContext = z.object({
     .default([])
     .describe('Pages that matter most: home, pricing, top converters. Reach counts them above any threshold'),
   competitors: z.array(competitorRef).max(50).default([]).describe('Domains this site competes with'),
-  researchLog: z
-    .array(researchLogEntry)
-    .max(200)
-    .default([])
-    .describe('Append-only findings with their evidence; newest last'),
+  researchLog: z.array(researchLogEntry).max(200).default([]).describe('Append-only findings with their evidence; newest last'),
 });
 export type SiteContext = z.output<typeof siteContext>;
 
@@ -121,21 +113,9 @@ const agentMandate = z.object({
         .max(50)
         .default([])
         .describe('Change types it may apply, e.g. meta.title, redirect; empty: any within the levels'),
-      connectors: z
-        .array(z.string().max(64))
-        .max(20)
-        .default([])
-        .describe('Connectors it may act through, e.g. github; empty: any'),
-      artifactTypes: z
-        .array(z.string())
-        .max(30)
-        .default([])
-        .describe('Artifact types it may publish; empty: any within the levels'),
-      artifacts: z
-        .array(z.string())
-        .max(100)
-        .default([])
-        .describe('Specific artifacts it may change; empty: any of the allowed types'),
+      connectors: z.array(z.string().max(64)).max(20).default([]).describe('Connectors it may act through, e.g. github; empty: any'),
+      artifactTypes: z.array(z.string()).max(30).default([]).describe('Artifact types it may publish; empty: any within the levels'),
+      artifacts: z.array(z.string()).max(100).default([]).describe('Specific artifacts it may change; empty: any of the allowed types'),
     })
     .strict()
     .default({ sites: [], changeTypes: [], connectors: [], artifactTypes: [], artifacts: [] }),
@@ -206,7 +186,10 @@ export type Skill = z.output<typeof skill>;
 // A prompt is an instruction block with named inputs, versioned so a change is reviewable and an
 // agent can cite the published version it used.
 const promptVariable = z.object({
-  name: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/).describe('Input name used in the instructions, e.g. "page_url"'),
+  name: z
+    .string()
+    .regex(/^[a-z][a-z0-9_]{0,63}$/)
+    .describe('Input name used in the instructions, e.g. "page_url"'),
   description: z.string().max(500).default('').describe('What the value is, for the person filling it in'),
 });
 

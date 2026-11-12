@@ -21,7 +21,10 @@ import {
 // versions are immutable; edits always produce or update a draft. Ported from Agentic Marketing
 // 311460e packages/artifacts/src/commands.ts, with the marketing content languages removed.
 
-const ArtifactId = z.string().regex(/^[a-z]{2,5}_[0-9a-f]{32}$/).describe('Artifact id, e.g. "sct_0192…"');
+const ArtifactId = z
+  .string()
+  .regex(/^[a-z]{2,5}_[0-9a-f]{32}$/)
+  .describe('Artifact id, e.g. "sct_0192…"');
 const VersionStateSchema = z.enum(['draft', 'in_review', 'published', 'superseded', 'rejected']);
 const Author = z.object({ type: z.enum(['user', 'agent']), id: z.string(), client: z.string().nullable() });
 export const Requester = z.object({
@@ -165,8 +168,7 @@ async function checkPublishable(ctx: CommandContext, type: string, content: unkn
 }
 
 /** Called after an artifact version is published (once committed), e.g. to drop caches of its type. */
-export const publishListeners: ((ctx: CommandContext, artifact: { id: string; type: string; workspaceId: string }) => Promise<void>)[] =
-  [];
+export const publishListeners: ((ctx: CommandContext, artifact: { id: string; type: string; workspaceId: string }) => Promise<void>)[] = [];
 
 /**
  * Called inside the publishing transaction, after the version is live. Because it runs in the same
@@ -608,10 +610,7 @@ export const listArtifacts = defineCommand({
           filter,
           or(
             sql`${schema.artifacts.updatedAt} < ${cursor.updatedAt}::timestamptz`,
-            and(
-              eq(schema.artifacts.updatedAt, sql`${cursor.updatedAt}::timestamptz`),
-              sql`${schema.artifacts.id} < ${cursor.id}`,
-            ),
+            and(eq(schema.artifacts.updatedAt, sql`${cursor.updatedAt}::timestamptz`), sql`${schema.artifacts.id} < ${cursor.id}`),
           ),
         )
       : filter;

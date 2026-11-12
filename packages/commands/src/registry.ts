@@ -628,8 +628,7 @@ export async function agentPolicy(
   });
   // Holds and veto windows arrive in Phase 7. Until then an L2 decision keeps its level and reasons
   // but is degraded to an ordinary approval request, so nothing runs without a person.
-  if (policy.decision === 'hold')
-    return { ...policy, decision: 'ask', reasons: [...policy.reasons, 'Holds arrive in Phase 7.'] };
+  if (policy.decision === 'hold') return { ...policy, decision: 'ask', reasons: [...policy.reasons, 'Holds arrive in Phase 7.'] };
   return policy;
 }
 

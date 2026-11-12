@@ -190,6 +190,9 @@ function diffSettings(current: NormalizedSettings, next: NormalizedSettings): z.
   }));
 }
 
+/** A workspace has one singleton per type and site; the site id is part of the key. */
+const singletonKey = (type: string, siteId: string | null | undefined) => `${type}:${siteId ?? ''}`;
+
 const DriftDetail = z.object({
   path: z.string(),
   kind: z.enum(['added', 'removed', 'changed']),
@@ -240,12 +243,20 @@ export const driftConfig = defineCommand({
       );
     const byId = new Map(existing.map((entry) => [entry.a.id, entry]));
     const singletons = new Map(
-      existing.filter((entry) => 'singleton' in artifactTypes[entry.a.type as ArtifactType]).map((entry) => [entry.a.type, entry]),
+      existing
+        .filter((entry) => 'singleton' in artifactTypes[entry.a.type as ArtifactType])
+        .map((entry) => [singletonKey(entry.a.type, entry.a.siteId), entry]),
     );
     const drift: z.infer<typeof Drift>[] = [];
     for (const item of input.bundle.artifacts) {
+      if (!artifactTypes[item.type])
+        throw new AppError(
+          'invalid_input',
+          `${item.id} has the type "${item.type}", which this server does not know. Call artifacts.types for the list.`,
+        );
       const content = await validateContent(item.type, item.content, 'draft');
-      const current = byId.get(item.id) ?? ('singleton' in artifactTypes[item.type] ? singletons.get(item.type) : undefined);
+      const current =
+        byId.get(item.id) ?? ('singleton' in artifactTypes[item.type] ? singletons.get(singletonKey(item.type, item.siteId)) : undefined);
       if (current && current.a.type !== item.type) {
         drift.push({
           kind: 'artifact',
@@ -346,7 +357,9 @@ export const importConfig = defineCommand({
         ),
       );
     const byId = new Map(existing.map((e) => [e.a.id, e]));
-    const singletons = new Map(existing.filter((e) => 'singleton' in artifactTypes[e.a.type as ArtifactType]).map((e) => [e.a.type, e]));
+    const singletons = new Map(
+      existing.filter((e) => 'singleton' in artifactTypes[e.a.type as ArtifactType]).map((e) => [singletonKey(e.a.type, e.a.siteId), e]),
+    );
     const changes: z.infer<typeof Change>[] = [];
     const toPublish: { id: string; type: ArtifactType; change: z.infer<typeof Change> }[] = [];
     for (const item of input.bundle.artifacts) {
@@ -361,7 +374,8 @@ export const importConfig = defineCommand({
         throw new AppError('forbidden', `${item.id} is a ${item.type}: only people can import it.`);
       const content = await validateContent(item.type, item.content, 'draft');
       // A workspace has one of each singleton type per site, whatever its id.
-      const current = byId.get(item.id) ?? ('singleton' in artifactTypes[item.type] ? singletons.get(item.type) : undefined);
+      const current =
+        byId.get(item.id) ?? ('singleton' in artifactTypes[item.type] ? singletons.get(singletonKey(item.type, item.siteId)) : undefined);
       if (current && current.a.type !== item.type)
         throw new AppError('conflict', `${item.id} is a ${current.a.type} here, not a ${item.type}.`);
       const id = current?.a.id ?? item.id;
