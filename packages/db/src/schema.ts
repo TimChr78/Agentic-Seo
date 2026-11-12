@@ -27,7 +27,7 @@ export type Role = 'owner' | 'admin' | 'editor' | 'approver' | 'viewer';
 export type PolicyDecision = 'allow' | 'hold' | 'ask' | 'deny';
 export type InputWarningPrincipal = 'user' | 'token' | 'oauth_client';
 export type ProviderCallerType = 'person' | 'agent' | 'hosted_run' | 'schedule' | 'system';
-export type ProviderCallState = 'pending' | 'submitted' | 'settled' | 'failed' | 'unknown';
+export type ProviderCallState = 'pending' | 'dispatching' | 'submitted' | 'settled' | 'failed' | 'unknown' | 'released';
 
 export const workspaces = pgTable('workspaces', {
   id: uuid('id').primaryKey(),
@@ -165,11 +165,15 @@ export const providerCalls = pgTable(
     currency: text('currency').notNull(),
     providerTaskId: text('provider_task_id'),
     state: text('state').$type<ProviderCallState>().notNull(),
+    /** The provider charged more than the hold; the actual cost is still recorded in full. */
+    overrun: boolean('overrun').notNull().default(false),
     rawResponse: jsonb('raw_response').$type<unknown>(),
     rawExpiresAt: ts('raw_expires_at'),
     error: text('error'),
     budgetPeriod: text('budget_period').notNull(),
     createdAt: ts('created_at').notNull().defaultNow(),
+    /** When the dispatch intent was committed, before any call to the provider. */
+    dispatchedAt: ts('dispatched_at'),
     submittedAt: ts('submitted_at'),
     settledAt: ts('settled_at'),
     updatedAt: ts('updated_at').notNull().defaultNow(),

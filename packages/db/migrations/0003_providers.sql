@@ -8,6 +8,8 @@ CREATE TABLE provider_budgets (
   provider_id text NOT NULL,
   -- The UTC month a budget applies to, e.g. 2026-11. A call settles against the month it started.
   period text NOT NULL CHECK (period ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'),
+  -- Immutable once the period has held or spent anything: spent_micros and held_micros are only
+  -- meaningful in the currency they were reserved in, so the gateway refuses to change it then.
   currency text NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
   budget_micros bigint NOT NULL CHECK (budget_micros >= 0),
   spent_micros bigint NOT NULL DEFAULT 0 CHECK (spent_micros >= 0),
@@ -20,6 +22,8 @@ CREATE TABLE provider_budgets (
 
 -- One row per uncached call, from reservation to settlement. A call that timed out after the
 -- provider accepted it stays `unknown` with its hold kept until reconciliation, never retried blind.
+-- `dispatching` is committed before any network I/O, so cleanup can never mistake a live call for an
+-- abandoned reservation: it moves `dispatching`/`submitted` calls to `unknown` and keeps the hold.
 CREATE TABLE provider_calls (
   id uuid PRIMARY KEY,
   workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
@@ -43,13 +47,18 @@ CREATE TABLE provider_calls (
   actual_cost_micros bigint CHECK (actual_cost_micros IS NULL OR actual_cost_micros >= 0),
   currency text NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
   provider_task_id text,
-  state text NOT NULL CHECK (state IN ('pending', 'submitted', 'settled', 'failed', 'unknown')),
+  state text NOT NULL CHECK (state IN ('pending', 'dispatching', 'submitted', 'settled', 'failed', 'unknown', 'released')),
+  -- Set when a provider charged more than its hold; the actual cost is recorded in full and the
+  -- call is reported to the overrun alert hook.
+  overrun boolean NOT NULL DEFAULT false,
   -- The raw vendor response, kept for seven days for debugging; purgeRawResponses() empties it.
   raw_response jsonb,
   raw_expires_at timestamptz,
   error text,
   budget_period text NOT NULL CHECK (budget_period ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'),
   created_at timestamptz NOT NULL DEFAULT now(),
+  -- When the dispatch intent was committed, before any call to the provider.
+  dispatched_at timestamptz,
   submitted_at timestamptz,
   settled_at timestamptz,
   updated_at timestamptz NOT NULL DEFAULT now(),
@@ -58,6 +67,9 @@ CREATE TABLE provider_calls (
 CREATE INDEX provider_calls_workspace_created ON provider_calls (workspace_id, created_at DESC);
 CREATE INDEX provider_calls_state ON provider_calls (workspace_id, state, updated_at);
 CREATE INDEX provider_calls_task ON provider_calls (provider_id, provider_task_id) WHERE provider_task_id IS NOT NULL;
+-- The reconciliation sweeps: in-flight calls and calls whose outcome is unknown, across workspaces.
+CREATE INDEX provider_calls_in_flight ON provider_calls (updated_at) WHERE state IN ('dispatching', 'submitted');
+CREATE INDEX provider_calls_unresolved ON provider_calls (workspace_id, updated_at) WHERE state = 'unknown';
 
 -- Normalised responses keyed by workspace, provider, credential or property, normalised request,
 -- market and options. A hit is free; the row also carries when it was fetched for "From cache".

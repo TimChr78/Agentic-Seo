@@ -1,16 +1,21 @@
 import { randomUUID } from 'node:crypto';
-import { createDb } from '@agentic-seo/db';
+import { createDb, type Db } from '@agentic-seo/db';
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { APP_ROLE, createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
 import {
   type BudgetThresholdEvent,
+  type CallOverrunEvent,
   createProviderGateway,
+  defineAdapter,
   fakeAdapter,
   type ProviderAdapter,
   ProviderBudgetError,
   ProviderCallUnknownError,
+  ProviderCostError,
   type ProviderGateway,
   ProviderRateLimitError,
+  ProviderTimeoutError,
 } from '../src';
 
 // Integration tests against a disposable, freshly migrated Postgres. They pin the gateway's money
@@ -26,6 +31,15 @@ const appUrl = (url: URL) => {
 };
 
 const providerId = (prefix: string) => `${prefix}-${randomUUID()}`;
+
+/** A promise a test resolves by hand, to hold an adapter inside the gateway at an exact point. */
+const deferred = () => {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+};
 
 describe.skipIf(!hasTestDatabase())('provider gateway', () => {
   let current: Awaited<ReturnType<typeof createDisposableDb>>;
@@ -270,10 +284,10 @@ describe.skipIf(!hasTestDatabase())('provider gateway', () => {
     expect((await budgetOf(gw, id))?.heldMicros).toBe(1_000);
 
     const result = await gw.reconcileAbandoned({ olderThanMinutes: 60 });
-    expect(result.failed).toBeGreaterThanOrEqual(1);
+    expect(result.released).toBeGreaterThanOrEqual(1);
     expect(await budgetOf(gw, id)).toMatchObject({ spentMicros: 0, heldMicros: 0 });
     const row = await db.admin.query<{ state: string }>('SELECT state FROM provider_calls WHERE id = $1', [callId]);
-    expect(row.rows[0]?.state).toBe('failed');
+    expect(row.rows[0]?.state).toBe('released');
   });
 
   it('enforces a token bucket per provider and credential before holding budget', async () => {
@@ -345,5 +359,317 @@ describe.skipIf(!hasTestDatabase())('provider gateway', () => {
       [id],
     );
     expect(after.rows[0]?.present).toBe(false);
+  });
+
+  it('refuses an authorised ceiling below the adapter estimate instead of holding nothing', async () => {
+    const id = providerId('ceiling-refused');
+    const fake = fakeAdapter({ id, ports: ['KeywordData'], estimateMicros: 1_000, actualMicros: 1_000 });
+    const gw = gateway([fake]);
+    await gw.setBudget({ workspaceId: workspace, providerId: id, currency: 'USD', budgetMicros: 1_000 });
+
+    // The probe from the review: a zero ceiling used to reserve nothing, so twenty calls ran and
+    // spent 20,000 against a 1,000 budget. A ceiling below the bounded estimate is not a discount.
+    const attempts = await Promise.allSettled(
+      Array.from({ length: 20 }, (_, i) => call(gw, id, { keywords: [`ceiling-${i}`], market: 'us' }, { maxCostMicros: 0 })),
+    );
+    for (const attempt of attempts) {
+      expect(attempt.status).toBe('rejected');
+      const reason = (attempt as PromiseRejectedResult).reason as Error;
+      expect(reason).toBeInstanceOf(ProviderCostError);
+      expect(reason.message).toMatch(/ceiling/i);
+    }
+    expect(fake.callCount).toBe(0);
+    expect(await budgetOf(gw, id)).toMatchObject({ spentMicros: 0, heldMicros: 0 });
+  });
+
+  it('holds the larger of the caller ceiling and the estimate, and passes the ceiling to the adapter', async () => {
+    const id = providerId('ceiling-hold');
+    const started = deferred();
+    const hold = deferred();
+    const fake = fakeAdapter({
+      id,
+      ports: ['KeywordData'],
+      estimateMicros: 1_000,
+      actualMicros: 1_000,
+      holdBeforeSubmit: async () => {
+        started.resolve();
+        await hold.promise;
+      },
+    });
+    const gw = gateway([fake]);
+    await gw.setBudget({ workspaceId: workspace, providerId: id, currency: 'USD', budgetMicros: 6_000 });
+
+    const first = call(gw, id, { keywords: ['ceiling-hold-1'], market: 'us' }, { maxCostMicros: 5_000 });
+    await started.promise;
+    expect(await budgetOf(gw, id)).toMatchObject({ heldMicros: 5_000 });
+
+    // The caller's ceiling is held, not the smaller estimate, so this call cannot fit.
+    const blocked = await call(gw, id, { keywords: ['ceiling-hold-2'], market: 'us' }, { maxCostMicros: 5_000 }).catch((err) => err);
+    expect(blocked).toBeInstanceOf(ProviderBudgetError);
+
+    hold.resolve();
+    const settled = await first;
+    expect(settled.actualCostMicros).toBe(1_000);
+    expect(fake.ceilings).toEqual([5_000]);
+
+    const again = await call(gw, id, { keywords: ['ceiling-hold-3'], market: 'us' }, { maxCostMicros: 5_000 });
+    expect(again.actualCostMicros).toBe(1_000);
+    expect(await budgetOf(gw, id)).toMatchObject({ spentMicros: 2_000, heldMicros: 0, remainingMicros: 4_000 });
+  });
+
+  it('records an overrun and alerts when the provider charges above the hold', async () => {
+    const id = providerId('overrun');
+    const fake = fakeAdapter({ id, ports: ['KeywordData'], estimateMicros: 1_000, actualMicros: 3_000 });
+    const events: CallOverrunEvent[] = [];
+    const gw = createProviderGateway({
+      db,
+      adapters: [fake],
+      onCallOverrun: (event) => {
+        events.push(event);
+      },
+    });
+    await gw.setBudget({ workspaceId: workspace, providerId: id, currency: 'USD', budgetMicros: 10_000 });
+
+    const result = await call(gw, id, { keywords: ['overrun'], market: 'us' });
+    expect(result.actualCostMicros).toBe(3_000);
+    expect(result.overrun).toBe(true);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      callId: result.callId,
+      workspaceId: workspace,
+      providerId: id,
+      currency: 'USD',
+      maxCostMicros: 1_000,
+      actualCostMicros: 3_000,
+      overrunMicros: 2_000,
+    });
+    expect(await budgetOf(gw, id)).toMatchObject({ spentMicros: 3_000, heldMicros: 0 });
+    const row = await db.admin.query<{ overrun: boolean }>('SELECT overrun FROM provider_calls WHERE id = $1', [result.callId]);
+    expect(row.rows[0]?.overrun).toBe(true);
+  });
+
+  it('never releases the hold of a call that is being dispatched', async () => {
+    const id = providerId('dispatching');
+    const started = deferred();
+    const hold = deferred();
+    const fake = fakeAdapter({
+      id,
+      ports: ['KeywordData'],
+      estimateMicros: 1_000,
+      actualMicros: 1_000,
+      holdBeforeSubmit: async () => {
+        started.resolve();
+        await hold.promise;
+      },
+    });
+    const gw = gateway([fake]);
+    await gw.setBudget({ workspaceId: workspace, providerId: id, currency: 'USD', budgetMicros: 1_000 });
+
+    const inFlight = call(gw, id, { keywords: ['live'], market: 'us' }, { idempotencyKey: 'live-key' });
+    await started.promise;
+
+    // Cleanup runs while the call is in flight. It must not release the hold: the provider may
+    // still charge, and a second call spending that money would overspend the budget.
+    await gw.reconcileAbandoned({ olderThanMinutes: 0 });
+    const row = await db.admin.query<{ state: string }>('SELECT state FROM provider_calls WHERE idempotency_key = $1', ['live-key']);
+    expect(row.rows[0]?.state).toBe('unknown');
+    expect((await budgetOf(gw, id))?.heldMicros).toBe(1_000);
+
+    const second = await call(gw, id, { keywords: ['intruder'], market: 'us' }).catch((err) => err);
+    expect(second).toBeInstanceOf(ProviderBudgetError);
+
+    hold.resolve();
+    const result = await inFlight;
+    expect(result.actualCostMicros).toBe(1_000);
+    expect(await budgetOf(gw, id)).toMatchObject({ spentMicros: 1_000, heldMicros: 0, remainingMicros: 0 });
+    const settledRow = await db.admin.query<{ state: string }>('SELECT state FROM provider_calls WHERE id = $1', [result.callId]);
+    expect(settledRow.rows[0]?.state).toBe('settled');
+  });
+
+  it('reconciles a lost response that has no provider task id, charging once', async () => {
+    const id = providerId('no-task-id');
+    const fake = fakeAdapter({
+      id,
+      ports: ['KeywordData'],
+      estimateMicros: 1_000,
+      actualMicros: 1_000,
+      timeoutAfterCharge: 1,
+      taskId: () => undefined,
+    });
+    const gw = gateway([fake]);
+    await gw.setBudget({ workspaceId: workspace, providerId: id, currency: 'USD', budgetMicros: 10_000 });
+
+    const failure = await call(gw, id, { keywords: ['lost'], market: 'us' }, { idempotencyKey: 'lost-key' }).catch((err) => err);
+    expect(failure).toBeInstanceOf(ProviderCallUnknownError);
+    const unknown = failure as ProviderCallUnknownError;
+    const row = await db.admin.query<{ provider_task_id: string | null; state: string }>(
+      'SELECT provider_task_id, state FROM provider_calls WHERE id = $1',
+      [unknown.callId],
+    );
+    expect(row.rows[0]).toMatchObject({ provider_task_id: null, state: 'unknown' });
+    expect((await budgetOf(gw, id))?.heldMicros).toBe(1_000);
+
+    // Reconciliation must work from the persisted call identity, without a task id.
+    const reconciled = await gw.reconcileUnknown(unknown.callId);
+    expect(reconciled.state).toBe('settled');
+    expect(reconciled.actualCostMicros).toBe(1_000);
+    expect(fake.reconcileRequests).toHaveLength(1);
+    expect(fake.reconcileRequests[0]).toMatchObject({ callId: unknown.callId, idempotencyKey: 'lost-key' });
+    expect(fake.reconcileRequests[0]?.providerTaskId).toBeUndefined();
+    expect(await budgetOf(gw, id)).toMatchObject({ spentMicros: 1_000, heldMicros: 0 });
+  });
+
+  it('reconciles a call that crashed while submitting, without charging twice', async () => {
+    const id = providerId('crash-submit');
+    const started = deferred();
+    const hold = deferred();
+    const fake = fakeAdapter({
+      id,
+      ports: ['KeywordData'],
+      estimateMicros: 1_000,
+      actualMicros: 1_000,
+      taskId: () => undefined,
+      holdAfterCharge: async () => {
+        started.resolve();
+        await hold.promise;
+      },
+    });
+    const gw = gateway([fake]);
+    await gw.setBudget({ workspaceId: workspace, providerId: id, currency: 'USD', budgetMicros: 10_000 });
+
+    const inFlight = call(gw, id, { keywords: ['crash'], market: 'us' }, { idempotencyKey: 'crash-key' });
+    await started.promise;
+    const before = await db.admin.query<{ state: string; dispatched_at: Date | null }>(
+      'SELECT state, dispatched_at FROM provider_calls WHERE idempotency_key = $1',
+      ['crash-key'],
+    );
+    expect(before.rows[0]?.state).toBe('dispatching');
+    expect(before.rows[0]?.dispatched_at).not.toBeNull();
+
+    // The dispatching row has no outcome; reconciliation resolves it from the call identity.
+    const cleanup = await gw.reconcileAbandoned({ olderThanMinutes: 0 });
+    expect(cleanup.settled).toBeGreaterThanOrEqual(1);
+    expect(await budgetOf(gw, id)).toMatchObject({ spentMicros: 1_000, heldMicros: 0 });
+
+    hold.resolve();
+    const result = await inFlight;
+    expect(result.actualCostMicros).toBe(1_000);
+    expect(await budgetOf(gw, id)).toMatchObject({ spentMicros: 1_000, heldMicros: 0 });
+    const after = await db.admin.query<{ state: string }>('SELECT state FROM provider_calls WHERE id = $1', [result.callId]);
+    expect(after.rows[0]?.state).toBe('settled');
+  });
+
+  it('keeps the hold and surfaces a call whose adapter cannot reconcile', async () => {
+    const id = providerId('no-reconcile');
+    const adapter = defineAdapter({
+      id,
+      ports: ['KeywordData'],
+      estimate: () => ({ maxCostMicros: 1_000, currency: 'USD', basis: 'one bounded request' }),
+      call: async () => {
+        throw new ProviderTimeoutError('the provider did not answer');
+      },
+    });
+    const gw = gateway([adapter]);
+    await gw.setBudget({ workspaceId: workspace, providerId: id, currency: 'USD', budgetMicros: 10_000 });
+
+    const failure = await call(gw, id, { keywords: ['unreconcilable'], market: 'us' }, { idempotencyKey: 'stuck-key' }).catch((err) => err);
+    expect(failure).toBeInstanceOf(ProviderCallUnknownError);
+    const callId = (failure as ProviderCallUnknownError).callId;
+
+    const result = await gw.reconcileUnknown(callId);
+    expect(result.state).toBe('unknown');
+    expect(result.reason).toMatch(/cannot reconcile/i);
+    expect((await budgetOf(gw, id))?.heldMicros).toBe(1_000);
+
+    const unresolved = await gw.unresolved({ workspaceId: workspace });
+    expect(unresolved).toContainEqual(
+      expect.objectContaining({ callId, state: 'unknown', heldMicros: 1_000, providerId: id, currency: 'USD' }),
+    );
+  });
+
+  it('refuses to change a budget currency once the period has spend', async () => {
+    const id = providerId('currency-lock');
+    const fake = fakeAdapter({ id, ports: ['KeywordData'], estimateMicros: 1_000, actualMicros: 1_000 });
+    const gw = gateway([fake]);
+    await gw.setBudget({ workspaceId: workspace, providerId: id, currency: 'USD', budgetMicros: 10_000 });
+    await call(gw, id, { keywords: ['priced'], market: 'us' });
+
+    const error = await gw.setBudget({ workspaceId: workspace, providerId: id, currency: 'EUR', budgetMicros: 10_000 }).catch((err) => err);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/USD/);
+    expect((error as Error).message).toMatch(/cannot change|immutable/i);
+    expect(await budgetOf(gw, id)).toMatchObject({ currency: 'USD', spentMicros: 1_000, budgetMicros: 10_000 });
+
+    // Nothing was held or spent in a later period, so its currency is still free to choose.
+    const next = await gw.setBudget({
+      workspaceId: workspace,
+      providerId: id,
+      period: '2030-01',
+      currency: 'EUR',
+      budgetMicros: 5_000,
+    });
+    expect(next.currency).toBe('EUR');
+  });
+
+  it('marks a call unknown when the adapter reports a currency other than the reservation', async () => {
+    const id = providerId('currency-mismatch');
+    const fake = fakeAdapter({
+      id,
+      ports: ['KeywordData'],
+      estimateMicros: 1_000,
+      actualMicros: 1_000,
+      resultCurrency: 'EUR',
+    });
+    const gw = gateway([fake]);
+    await gw.setBudget({ workspaceId: workspace, providerId: id, currency: 'USD', budgetMicros: 10_000 });
+
+    const failure = await call(gw, id, { keywords: ['currency'], market: 'us' }, { idempotencyKey: 'currency-key' }).catch((err) => err);
+    expect(failure).toBeInstanceOf(ProviderCallUnknownError);
+    expect((failure as Error).message).toMatch(/EUR/);
+    expect((failure as Error).message).toMatch(/USD/);
+    expect(await budgetOf(gw, id)).toMatchObject({ currency: 'USD', spentMicros: 0, heldMicros: 1_000 });
+    const row = await db.admin.query<{ state: string; error: string | null }>(
+      'SELECT state, error FROM provider_calls WHERE idempotency_key = $1',
+      ['currency-key'],
+    );
+    expect(row.rows[0]?.state).toBe('unknown');
+    expect(row.rows[0]?.error).toMatch(/EUR/);
+  });
+
+  it('purges raw responses per workspace through row-level-security-scoped transactions', async () => {
+    const id = providerId('purge-scope');
+    const fake = fakeAdapter({ id, ports: ['KeywordData'], estimateMicros: 1_000, actualMicros: 1_000 });
+    const seen: { workspaceId: string; role: string }[] = [];
+    const spy: Db = {
+      ...db,
+      withWorkspace: async (workspaceId, fn, opts) =>
+        db.withWorkspace(
+          workspaceId,
+          async (tx) => {
+            const { rows } = await tx.execute<{ role: string }>(sql`SELECT current_user AS role`);
+            seen.push({ workspaceId, role: rows[0]?.role ?? '' });
+            return fn(tx);
+          },
+          opts,
+        ),
+    };
+    const gw = createProviderGateway({ db: spy, adapters: [fake] });
+    await gw.setBudget({ workspaceId: workspace, providerId: id, currency: 'USD', budgetMicros: 10_000 });
+    await gw.setBudget({ workspaceId: otherWorkspace, providerId: id, currency: 'USD', budgetMicros: 10_000 });
+    await call(gw, id, { keywords: ['purge-scope-a'], market: 'us' });
+    await call(gw, id, { keywords: ['purge-scope-b'], market: 'us' }, {}, otherWorkspace);
+
+    seen.length = 0;
+    const purged = await gw.purgeRawResponses(new Date(Date.now() + 8 * 24 * 60 * 60 * 1000));
+    expect(purged).toBeGreaterThanOrEqual(2);
+    // Every purge transaction is scoped to one workspace and runs as the application role, so RLS
+    // applies; the owner connection only discovers which workspaces have expired rows.
+    expect(new Set(seen.map((entry) => entry.workspaceId))).toEqual(new Set([workspace, otherWorkspace]));
+    expect(seen.every((entry) => entry.role === APP_ROLE.appRole)).toBe(true);
+    const remaining = await db.admin.query<{ n: string }>(
+      'SELECT count(*)::text AS n FROM provider_calls WHERE provider_id = $1 AND raw_response IS NOT NULL',
+      [id],
+    );
+    expect(Number(remaining.rows[0]?.n)).toBe(0);
   });
 });

@@ -40,6 +40,23 @@ const spendRow = z.object({
   currency: z.string(),
 });
 
+const unresolvedCall = z.object({
+  callId: z.string(),
+  workspaceId: z.string(),
+  providerId: z.string(),
+  port: z.string(),
+  operation: z.string(),
+  purpose: z.string(),
+  state: z.enum(['dispatching', 'submitted', 'unknown']),
+  currency: z.string(),
+  heldMicros: z.number().int(),
+  maxCostMicros: z.number().int(),
+  providerTaskId: z.string().nullable(),
+  error: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
 function gateway(ctx: { services: { providers?: ProviderGateway } }): ProviderGateway {
   const providers = ctx.services.providers;
   if (!providers) throw new AppError('precondition_failed', 'The provider gateway is not configured on this server.');
@@ -118,6 +135,19 @@ export const usageSpend = defineCommand({
   },
 });
 
+export const usageUnresolved = defineCommand({
+  name: 'usage.unresolved',
+  title: 'Unresolved provider calls',
+  description: 'Calls whose outcome is unknown and whose budget hold is still kept. Reconcile them; a blind retry could charge twice.',
+  input: z.object({}),
+  output: z.object({ calls: z.array(unresolvedCall) }),
+  permission: 'research:spend',
+  effect: 'read',
+  handler: async (_input, ctx) => ({
+    calls: await gateway(ctx).unresolved({ workspaceId: ctx.principal.workspaceId, tx: ctx.tx }),
+  }),
+});
+
 export const usageEstimate = defineCommand({
   name: 'usage.estimate',
   title: 'Estimate a provider call',
@@ -157,4 +187,4 @@ export const usageEstimate = defineCommand({
     }),
 });
 
-export const providerCommands = [usageBudgets, usageSetBudget, usageSpend, usageEstimate] as const;
+export const providerCommands = [usageBudgets, usageSetBudget, usageSpend, usageUnresolved, usageEstimate] as const;

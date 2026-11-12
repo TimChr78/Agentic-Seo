@@ -16,7 +16,14 @@ import { operationDefinition, PORTS, type PortName } from './ports';
 // Adapters never see the database; features never see an adapter.
 
 export type CallerType = 'person' | 'agent' | 'hosted_run' | 'schedule' | 'system';
-export type CallState = 'pending' | 'submitted' | 'settled' | 'failed' | 'unknown';
+/**
+ * `pending` is a reservation with no dispatch intent; `dispatching` is committed before any call to
+ * the provider. `released` is terminal: the reservation was abandoned before dispatch and its hold
+ * returned. `settled`, `failed` and `released` are terminal and are never resurrected.
+ */
+export type CallState = 'pending' | 'dispatching' | 'submitted' | 'settled' | 'failed' | 'unknown' | 'released';
+
+const TERMINAL_STATES: readonly CallState[] = ['settled', 'failed', 'released'];
 
 export interface Caller {
   type: CallerType;
@@ -40,7 +47,11 @@ export interface ProviderCallInput {
   propertyKey?: string;
   market?: string;
   options?: Record<string, unknown>;
-  /** The ceiling the caller (or the agent's mandate) authorises. Defaults to the adapter's estimate. */
+  /**
+   * The ceiling the caller (or the agent's mandate) authorises, in micros. The hold is the larger
+   * of this and the adapter's bounded estimate; a ceiling below the estimate is refused, and an
+   * actual cost above the hold is recorded in full and flagged as an overrun.
+   */
   maxCostMicros?: number;
   /** Return the estimate without spending. */
   estimate?: boolean;
@@ -69,6 +80,8 @@ export interface ProviderCallResult<T = unknown> {
   fetchedAt: string;
   actualCostMicros: number;
   currency: string;
+  /** True when the provider charged more than the hold; the cost is recorded in full. */
+  overrun: boolean;
   providerTaskId?: string;
 }
 
@@ -103,14 +116,54 @@ export interface BudgetThresholdEvent {
   currency: string;
 }
 
+/**
+ * A settlement whose actual cost exceeded the hold, which means the provider charged above the
+ * bounded estimate or the caller's ceiling. It is recorded in full and reported here; a hook never
+ * changes the result of the call.
+ */
+export interface CallOverrunEvent {
+  workspaceId: string;
+  providerId: string;
+  period: string;
+  callId: string;
+  currency: string;
+  maxCostMicros: number;
+  actualCostMicros: number;
+  overrunMicros: number;
+}
+
+/** An `unknown` call that still holds budget and has not been reconciled. Never silently released. */
+export interface UnresolvedCall {
+  callId: string;
+  workspaceId: string;
+  providerId: string;
+  port: PortName;
+  operation: string;
+  purpose: string;
+  state: 'dispatching' | 'submitted' | 'unknown';
+  currency: string;
+  heldMicros: number;
+  maxCostMicros: number;
+  providerTaskId: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ReconcileResult {
   callId: string;
   state: CallState;
   actualCostMicros: number | null;
   data?: unknown;
+  /** True when reconciliation recorded a cost above the hold. */
+  overrun?: boolean;
+  /** Why the call stays unknown, when it does. */
+  reason?: string;
 }
 
 export interface ReconcileAbandonedResult {
+  /** Reservations released before dispatch; no provider call was made. */
+  released: number;
   failed: number;
   settled: number;
   unknown: number;
@@ -130,6 +183,8 @@ export interface ProviderGatewayOptions {
   now?: () => Date;
   /** Called after a settlement crosses 50, 80 or 100% of a budget. A throwing hook never fails the call. */
   onBudgetThreshold?: (event: BudgetThresholdEvent) => void | Promise<void>;
+  /** Called when a provider charged more than the hold. A throwing hook never fails the call. */
+  onCallOverrun?: (event: CallOverrunEvent) => void | Promise<void>;
 }
 
 export interface ProviderGateway {
@@ -156,6 +211,8 @@ export interface ProviderGateway {
     siteId?: string;
     tx?: Tx;
   }): Promise<SpendRow[]>;
+  /** Calls whose outcome is unknown and whose hold is still kept, for the usage screen. */
+  unresolved(input: { workspaceId: string; tx?: Tx }): Promise<UnresolvedCall[]>;
   currentPeriod(): string;
 }
 
@@ -182,9 +239,11 @@ interface CallRow extends Record<string, unknown> {
   currency: string;
   provider_task_id: string | null;
   state: CallState;
+  overrun: boolean;
   error: string | null;
   budget_period: string;
   created_at: Date;
+  dispatched_at: Date | null;
   updated_at: Date;
 }
 
@@ -590,13 +649,29 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
     });
   }
 
+  /**
+   * Persist the dispatch intent in its own committed transaction, before any network I/O. Without
+   * it a live call would still read as `pending` and cleanup could release its hold.
+   */
+  async function beginDispatch(workspaceId: string, callId: string): Promise<boolean> {
+    return db.withWorkspace(workspaceId, async (tx) => {
+      const { rowCount } = await tx.execute(
+        sql`UPDATE provider_calls
+               SET state = 'dispatching', dispatched_at = now(), updated_at = now()
+             WHERE id = ${callId} AND state = 'pending'`,
+      );
+      return (rowCount ?? 0) > 0;
+    });
+  }
+
   async function updateSubmitted(workspaceId: string, callId: string, providerTaskId?: string): Promise<void> {
     await db.withWorkspace(workspaceId, async (tx) => {
       await tx.execute(
         sql`UPDATE provider_calls
-               SET state = 'submitted', provider_task_id = COALESCE(${providerTaskId ?? null}, provider_task_id),
+               SET state = CASE WHEN state = 'unknown' THEN state ELSE 'submitted' END,
+                   provider_task_id = COALESCE(${providerTaskId ?? null}, provider_task_id),
                    submitted_at = COALESCE(submitted_at, now()), updated_at = now()
-             WHERE id = ${callId} AND state IN ('pending', 'submitted')`,
+             WHERE id = ${callId} AND state IN ('pending', 'dispatching', 'submitted', 'unknown')`,
       );
     });
   }
@@ -607,38 +682,72 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
         sql`UPDATE provider_calls
                SET state = 'unknown', provider_task_id = COALESCE(${providerTaskId ?? null}, provider_task_id),
                    error = ${message.slice(0, 1_000)}, updated_at = now()
-             WHERE id = ${callId} AND state NOT IN ('settled', 'failed')`,
+             WHERE id = ${callId} AND state IN ('pending', 'dispatching', 'submitted', 'unknown')`,
       );
     });
   }
 
-  async function failCall(workspaceId: string, callId: string, message: string, providerTaskId?: string): Promise<void> {
-    await db.withWorkspace(workspaceId, async (tx) => {
-      const { rows } = await tx.execute<CallRow>(sql`SELECT * FROM provider_calls WHERE id = ${callId} FOR UPDATE`);
-      const call = rows[0];
-      if (!call || call.state === 'settled' || call.state === 'failed') return;
-      await releaseBudget(tx, workspaceId, call.provider_id, call.budget_period, micros(call.reserved_micros));
-      await tx.execute(
+  // A failure the provider reported itself: terminal, and its hold is released exactly once, because
+  // only the transaction that wins the guarded state transition touches the budget.
+  async function failCall(workspaceId: string, callId: string, message: string, providerTaskId?: string): Promise<boolean> {
+    return db.withWorkspace(workspaceId, async (tx) => {
+      const { rows } = await tx.execute<{ provider_id: string; budget_period: string; reserved_micros: string }>(
         sql`UPDATE provider_calls
-               SET state = 'failed', actual_cost_micros = 0, provider_task_id = COALESCE(${providerTaskId ?? null}, provider_task_id),
+               SET state = 'failed', actual_cost_micros = 0, overrun = false,
+                   provider_task_id = COALESCE(${providerTaskId ?? null}, provider_task_id),
                    error = ${message.slice(0, 1_000)}, settled_at = now(), updated_at = now()
-             WHERE id = ${callId}`,
+             WHERE id = ${callId} AND state IN ('dispatching', 'submitted', 'unknown')
+             RETURNING provider_id, budget_period, reserved_micros::text AS reserved_micros`,
       );
+      const row = rows[0];
+      if (!row) return false;
+      await releaseBudget(tx, workspaceId, row.provider_id, row.budget_period, micros(row.reserved_micros));
+      return true;
     });
   }
 
   async function settleCall(
     workspaceId: string,
     callId: string,
-    args: { actualCostMicros: number; providerTaskId?: string; raw?: unknown; data?: unknown; ttlSeconds: number },
-  ): Promise<{ events: BudgetThresholdEvent[]; fetchedAt: string }> {
+    args: {
+      actualCostMicros: number;
+      providerTaskId?: string;
+      raw?: unknown;
+      data?: unknown;
+      ttlSeconds: number;
+      currency?: string;
+    },
+  ): Promise<{
+    applied: boolean;
+    overrun: boolean;
+    events: BudgetThresholdEvent[];
+    overrunEvent: CallOverrunEvent | null;
+    fetchedAt: string;
+  }> {
     const fetchedAt = now();
     return db.withWorkspace(workspaceId, async (tx) => {
       const { rows } = await tx.execute<CallRow>(sql`SELECT * FROM provider_calls WHERE id = ${callId} FOR UPDATE`);
       const call = rows[0];
       if (!call) throw new AppError('not_found', `Provider call ${callId} does not exist.`);
-      if (call.state === 'settled') return { events: [], fetchedAt: fetchedAt.toISOString() };
+      if (TERMINAL_STATES.includes(call.state)) {
+        // A failed or released call already returned its hold; settling it would release it twice.
+        // A settled call is idempotent: its cost and response are already recorded.
+        if (call.state === 'settled')
+          return { applied: false, overrun: false, events: [], overrunEvent: null, fetchedAt: fetchedAt.toISOString() };
+        throw new AppError('conflict', `Provider call ${callId} is already ${call.state}; its cost cannot be recorded a second time.`, {
+          callId,
+          state: call.state,
+        });
+      }
+      if (args.currency !== undefined && args.currency !== call.currency)
+        throw new AppError(
+          'conflict',
+          `Provider call ${callId} was reserved in ${call.currency}, but the provider reported ${args.currency}.`,
+          { callId, currency: call.currency, reportedCurrency: args.currency },
+        );
       const actual = Math.max(0, Math.ceil(args.actualCostMicros));
+      const reserved = micros(call.reserved_micros);
+      const overrun = actual > reserved;
       const parts: CacheKeyParts = {
         workspaceId,
         providerId: call.provider_id,
@@ -651,16 +760,39 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
         optionsHash: call.options_hash,
         cacheKey: call.cache_key,
       };
-      const events = await settleBudget(tx, workspaceId, call.provider_id, call.budget_period, micros(call.reserved_micros), actual);
-      await tx.execute(
+      // The guarded transition is the settlement: a row already moved to a terminal state returns
+      // nothing, so no hold is released and no cost is counted twice.
+      const settled = await tx.execute<{ id: string }>(
         sql`UPDATE provider_calls
-               SET state = 'settled', actual_cost_micros = ${actual}, provider_task_id = COALESCE(${args.providerTaskId ?? null}, provider_task_id),
+               SET state = 'settled', actual_cost_micros = ${actual}, overrun = ${overrun},
+                   provider_task_id = COALESCE(${args.providerTaskId ?? null}, provider_task_id),
                    raw_response = ${args.raw === undefined ? null : JSON.stringify(args.raw)}::jsonb,
                    raw_expires_at = now() + interval '7 days', error = NULL, settled_at = now(), updated_at = now()
-             WHERE id = ${callId}`,
+             WHERE id = ${callId} AND state IN ('dispatching', 'submitted', 'unknown')
+             RETURNING id`,
       );
+      if (!settled.rows.length)
+        return { applied: false, overrun: false, events: [], overrunEvent: null, fetchedAt: fetchedAt.toISOString() };
+      const events = await settleBudget(tx, workspaceId, call.provider_id, call.budget_period, reserved, actual);
       if (args.data !== undefined) await writeCache(tx, parts, args.data, args.ttlSeconds, fetchedAt);
-      return { events, fetchedAt: fetchedAt.toISOString() };
+      return {
+        applied: true,
+        overrun,
+        events,
+        overrunEvent: overrun
+          ? {
+              workspaceId,
+              providerId: call.provider_id,
+              period: call.budget_period,
+              callId,
+              currency: call.currency,
+              maxCostMicros: reserved,
+              actualCostMicros: actual,
+              overrunMicros: actual - reserved,
+            }
+          : null,
+        fetchedAt: fetchedAt.toISOString(),
+      };
     });
   }
 
@@ -672,6 +804,15 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
       } catch {
         // A notification hook must never change the result of a call that already ran.
       }
+    }
+  }
+
+  async function fireOverrun(event: CallOverrunEvent | null): Promise<void> {
+    if (!event || !options.onCallOverrun) return;
+    try {
+      await options.onCallOverrun(event);
+    } catch {
+      // A notification hook must never change the result of a call that already ran.
     }
   }
 
@@ -714,11 +855,12 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
           fetchedAt: now().toISOString(),
           actualCostMicros: reconciled.actualCostMicros ?? 0,
           currency: existing.currency,
+          overrun: reconciled.overrun ?? false,
         };
       throw new ProviderCallUnknownError(
         `Provider call ${existing.id} is still unknown. Reconcile it before retrying; a blind retry could charge twice.`,
         existing.id,
-        { providerTaskId: existing.provider_task_id },
+        { providerTaskId: existing.provider_task_id, reason: reconciled.reason },
       );
     }
     if (existing.state === 'settled') {
@@ -732,6 +874,7 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
           fetchedAt: iso(cached.fetched_at),
           actualCostMicros: 0,
           currency: existing.currency,
+          overrun: false,
         };
       throw new AppError(
         'conflict',
@@ -739,10 +882,15 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
         { callId: existing.id },
       );
     }
-    if (existing.state === 'failed')
-      throw new AppError('conflict', 'This idempotency key belongs to a failed provider call. Use a new key, or fix the cause and retry.', {
-        callId: existing.id,
-      });
+    if (existing.state === 'failed' || existing.state === 'released')
+      throw new AppError(
+        'conflict',
+        'This idempotency key belongs to a provider call that did not run. Use a new key, or fix the cause and retry.',
+        {
+          callId: existing.id,
+          state: existing.state,
+        },
+      );
     throw new AppError('conflict', `Provider call ${existing.id} is still ${existing.state}. Wait for it to finish instead of retrying.`, {
       callId: existing.id,
     });
@@ -757,9 +905,23 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
 
     const parts = cacheParts(input, adapter.id, request);
     const period = input.period ?? currentPeriod();
-    const maxCostMicros = input.maxCostMicros ?? estimate.maxCostMicros;
-    if (!Number.isInteger(maxCostMicros) || maxCostMicros < 0)
-      throw new ProviderCostError('The maximum authorised cost must be a whole, non-negative number of micros.', { maxCostMicros });
+    if (input.maxCostMicros !== undefined && (!Number.isInteger(input.maxCostMicros) || input.maxCostMicros < 0))
+      throw new ProviderCostError('The maximum authorised cost must be a whole, non-negative number of micros.', {
+        maxCostMicros: input.maxCostMicros,
+      });
+    // The estimate is a bounded ceiling the adapter commits to; a caller ceiling below it cannot
+    // authorise the call, and treating it as a smaller hold would let the call spend unheld money.
+    if (input.maxCostMicros !== undefined && input.maxCostMicros < estimate.maxCostMicros)
+      throw new ProviderCostError(
+        `The authorised ceiling of ${money(input.maxCostMicros, estimate.currency)} is below the ${adapter.id} estimate of ${money(estimate.maxCostMicros, estimate.currency)} for ${input.port}.${input.operation}. Raise the ceiling to at least the estimate.`,
+        {
+          providerId: adapter.id,
+          maxCostMicros: input.maxCostMicros,
+          estimateMicros: estimate.maxCostMicros,
+          currency: estimate.currency,
+        },
+      );
+    const maxCostMicros = Math.max(input.maxCostMicros ?? 0, estimate.maxCostMicros);
 
     if (op.ttlSeconds > 0 && !input.refresh) {
       const cached = await db.withWorkspace(input.workspaceId, (tx) => readCache(tx, input.workspaceId, parts.cacheKey));
@@ -772,6 +934,7 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
           fetchedAt: iso(cached.fetched_at),
           actualCostMicros: 0,
           currency: estimate.currency,
+          overrun: false,
         };
     }
 
@@ -787,12 +950,19 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
     });
     if (reservation.existing) return handleExisting<T>(reservation.existing, input, parts);
     const { callId } = reservation;
+    if (!(await beginDispatch(input.workspaceId, callId)))
+      throw new AppError(
+        'conflict',
+        `Provider call ${callId} was released before it was dispatched, so nothing was sent to the provider. Use a new idempotency key.`,
+        { callId },
+      );
 
     let submitted = false;
     let submittedTaskId: string | undefined;
     const ctx: AdapterCallContext = {
       workspaceId: input.workspaceId,
       callId,
+      idempotencyKey,
       port: input.port,
       operation: input.operation,
       credentialKey: parts.credentialKey,
@@ -809,7 +979,10 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
 
     let result: { data: unknown; actualCostMicros: number; providerTaskId?: string; raw?: unknown; currency?: string };
     try {
-      result = await adapter.call(input.operation, request, ctx);
+      result = await adapter.call(input.operation, request, ctx, {
+        maxCostMicros,
+        currency: estimate.currency,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const unknownError = isUnknownCallError(err);
@@ -827,6 +1000,19 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
       throw new AppError('precondition_failed', `The ${adapter.id} adapter failed on ${input.port}.${input.operation}: ${message}`, {
         providerId: adapter.id,
         callId,
+      });
+    }
+
+    // A charge in another currency cannot be settled against a hold in this one: keep the hold and
+    // leave the call unknown for reconciliation rather than corrupt the budget's arithmetic.
+    const resultCurrency = result.currency ?? estimate.currency;
+    if (resultCurrency !== estimate.currency) {
+      const message = `The ${adapter.id} adapter reported ${resultCurrency} for a call reserved in ${estimate.currency}. The call is recorded as unknown and its hold is kept until it is reconciled.`;
+      await markUnknown(input.workspaceId, callId, message, result.providerTaskId);
+      throw new ProviderCallUnknownError(message, callId, {
+        providerId: adapter.id,
+        currency: estimate.currency,
+        reportedCurrency: resultCurrency,
       });
     }
 
@@ -855,8 +1041,10 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
       raw: result.raw,
       data,
       ttlSeconds: op.ttlSeconds,
+      currency: resultCurrency,
     });
     await fireThresholds(settled.events);
+    await fireOverrun(settled.overrunEvent);
 
     return {
       data: data as T,
@@ -865,7 +1053,8 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
       cache: 'miss',
       fetchedAt: settled.fetchedAt,
       actualCostMicros,
-      currency: result.currency ?? estimate.currency,
+      currency: resultCurrency,
+      overrun: actualCostMicros > maxCostMicros,
       ...(result.providerTaskId === undefined ? {} : { providerTaskId: result.providerTaskId }),
     };
   }
@@ -875,26 +1064,24 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
     return rows[0] ?? null;
   }
 
-  async function reconcileCall(call: CallRow): Promise<{ state: CallState; actualCostMicros: number | null; data?: unknown }> {
+  async function reconcileCall(
+    call: CallRow,
+  ): Promise<{ state: CallState; actualCostMicros: number | null; data?: unknown; overrun?: boolean; reason?: string }> {
     if (call.state !== 'unknown')
       return { state: call.state, actualCostMicros: call.actual_cost_micros === null ? null : micros(call.actual_cost_micros) };
     const adapter = adapters.get(call.provider_id);
     if (!adapter)
-      throw new AppError('precondition_failed', `Provider call ${call.id} uses adapter "${call.provider_id}", which is not configured.`);
+      return {
+        state: 'unknown',
+        actualCostMicros: null,
+        reason: `Provider call ${call.id} uses adapter "${call.provider_id}", which is not configured, so it cannot be reconciled. Its hold is kept.`,
+      };
     if (!adapter.reconcile)
-      throw new AppError(
-        'precondition_failed',
-        `Provider call ${call.id} is unknown, and the ${adapter.id} adapter cannot reconcile it. Add a reconcile implementation before retrying.`,
-        { callId: call.id },
-      );
-    if (!call.provider_task_id)
-      throw new AppError(
-        'precondition_failed',
-        `Provider call ${call.id} is unknown and has no provider task id, so it cannot be reconciled.`,
-        {
-          callId: call.id,
-        },
-      );
+      return {
+        state: 'unknown',
+        actualCostMicros: null,
+        reason: `Provider call ${call.id} is unknown, and the ${adapter.id} adapter cannot reconcile it: it declares no reconcile(). Its hold is kept and it stays visible as unresolved.`,
+      };
 
     const ctx: AdapterReconcileContext = {
       workspaceId: call.workspace_id,
@@ -905,10 +1092,25 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
       propertyKey: call.property_key,
       market: call.market,
     };
-    const result = await adapter.reconcile(call.provider_task_id, ctx);
+    // The persisted call identity always goes to the adapter, so a lost response is reconcilable
+    // even when no provider task id was ever recorded.
+    const result = await adapter.reconcile(
+      {
+        callId: call.id,
+        idempotencyKey: call.idempotency_key,
+        ...(call.provider_task_id === null ? {} : { providerTaskId: call.provider_task_id }),
+      },
+      ctx,
+    );
 
     if (result.state === 'settled') {
-      const actual = result.actualCostMicros ?? micros(call.max_cost_micros);
+      const currency = result.currency ?? call.currency;
+      if (currency !== call.currency) {
+        const message = `Reconciliation reported ${currency} for a call reserved in ${call.currency}. The call stays unknown and its hold is kept.`;
+        await markUnknown(call.workspace_id, call.id, message, result.providerTaskId);
+        return { state: 'unknown', actualCostMicros: null, reason: message };
+      }
+      const actual = Math.max(0, Math.ceil(result.actualCostMicros ?? micros(call.max_cost_micros)));
       let data: unknown;
       if (result.data !== undefined) {
         const op = operationDefinition(call.port, call.operation);
@@ -916,23 +1118,33 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
       }
       const settled = await settleCall(call.workspace_id, call.id, {
         actualCostMicros: actual,
-        providerTaskId: result.providerTaskId ?? call.provider_task_id,
+        providerTaskId: result.providerTaskId ?? call.provider_task_id ?? undefined,
         raw: result.raw,
         data,
         ttlSeconds: operationDefinition(call.port, call.operation).ttlSeconds,
+        currency,
       });
       await fireThresholds(settled.events);
-      return { state: 'settled', actualCostMicros: actual, ...(data === undefined ? {} : { data }) };
+      await fireOverrun(settled.overrunEvent);
+      return {
+        state: 'settled',
+        actualCostMicros: actual,
+        ...(settled.overrun ? { overrun: true } : {}),
+        ...(data === undefined ? {} : { data }),
+      };
     }
     if (result.state === 'failed') {
       await failCall(call.workspace_id, call.id, result.error ?? 'The provider reported that the call failed.', result.providerTaskId);
       return { state: 'failed', actualCostMicros: 0 };
     }
 
+    const reason = result.reason ?? 'The provider has no outcome for this call yet. Its hold is kept.';
     await db.withWorkspace(call.workspace_id, (tx) =>
-      tx.execute(sql`UPDATE provider_calls SET updated_at = now() WHERE id = ${call.id} AND state = 'unknown'`),
+      tx.execute(
+        sql`UPDATE provider_calls SET error = ${reason.slice(0, 1_000)}, updated_at = now() WHERE id = ${call.id} AND state = 'unknown'`,
+      ),
     );
-    return { state: 'unknown', actualCostMicros: null };
+    return { state: 'unknown', actualCostMicros: null, reason };
   }
 
   async function reconcileUnknown(callId: string): Promise<ReconcileResult> {
@@ -954,49 +1166,63 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
     const at = now();
     const cutoff = new Date(at.getTime() - olderThanMinutes * 60_000);
     const unknownCutoff = new Date(at.getTime() - unknownOlderThanMinutes * 60_000);
-    const counts: ReconcileAbandonedResult = { failed: 0, settled: 0, unknown: 0 };
+    const counts: ReconcileAbandonedResult = { released: 0, failed: 0, settled: 0, unknown: 0 };
 
-    const pending = await db.admin.query<CallRow>(
+    const reservations = await db.admin.query<CallRow>(
       `SELECT * FROM provider_calls WHERE state = 'pending' AND updated_at <= $1 ORDER BY created_at`,
       [cutoff],
     );
-    for (const call of pending.rows) {
+    for (const call of reservations.rows) {
       const released = await db.withWorkspace(call.workspace_id, async (tx) => {
-        const { rowCount } = await tx.execute(
+        const { rows } = await tx.execute<{ provider_id: string; budget_period: string; reserved_micros: string }>(
           sql`UPDATE provider_calls
-                 SET state = 'failed', actual_cost_micros = 0, error = 'The call was abandoned before it was submitted.', settled_at = now(), updated_at = now()
-               WHERE id = ${call.id} AND state = 'pending' AND updated_at <= ${cutoff}`,
+                 SET state = 'released', actual_cost_micros = 0, overrun = false,
+                     error = 'The reservation was abandoned before dispatch; nothing was sent to the provider.',
+                     settled_at = now(), updated_at = now()
+               WHERE id = ${call.id} AND state = 'pending' AND dispatched_at IS NULL AND updated_at <= ${cutoff}
+               RETURNING provider_id, budget_period, reserved_micros::text AS reserved_micros`,
         );
-        if (!rowCount) return false;
-        await releaseBudget(tx, call.workspace_id, call.provider_id, call.budget_period, micros(call.reserved_micros));
+        const row = rows[0];
+        if (!row) return false;
+        await releaseBudget(tx, call.workspace_id, row.provider_id, row.budget_period, micros(row.reserved_micros));
         return true;
       });
-      if (released) counts.failed += 1;
+      if (released) counts.released += 1;
     }
 
-    const submitted = await db.admin.query<CallRow>(
-      `SELECT * FROM provider_calls WHERE state = 'submitted' AND updated_at <= $1 ORDER BY created_at`,
+    // A dispatched call may still be running, or may have been charged with its outcome lost.
+    // Never release its hold: move it to `unknown` and let reconciliation decide.
+    const inFlight = await db.admin.query<CallRow>(
+      `SELECT * FROM provider_calls WHERE state IN ('dispatching', 'submitted') AND updated_at <= $1 ORDER BY created_at`,
       [cutoff],
     );
-    for (const call of submitted.rows) {
-      await db.withWorkspace(call.workspace_id, (tx) =>
-        tx.execute(
+    for (const call of inFlight.rows) {
+      const moved = await db.withWorkspace(call.workspace_id, async (tx) => {
+        const { rowCount } = await tx.execute(
           sql`UPDATE provider_calls
-                 SET state = 'unknown', error = 'The call was submitted but its result was never recorded.', updated_at = now()
-               WHERE id = ${call.id} AND state = 'submitted' AND updated_at <= ${cutoff}`,
-        ),
-      );
+                 SET state = 'unknown',
+                     error = COALESCE(error, 'The call was dispatched but no outcome was recorded; its hold is kept until it is reconciled.'),
+                     updated_at = now()
+               WHERE id = ${call.id} AND state IN ('dispatching', 'submitted') AND updated_at <= ${cutoff}`,
+        );
+        return (rowCount ?? 0) > 0;
+      });
+      if (!moved) continue;
       const refreshed = await loadCall(call.id);
-      if (refreshed?.state === 'unknown' && refreshed.provider_task_id && adapters.get(refreshed.provider_id)?.reconcile) {
-        try {
-          const result = await reconcileCall(refreshed);
-          if (result.state === 'settled') counts.settled += 1;
-          else counts.unknown += 1;
-        } catch {
-          // A provider outage must not stop the other calls from being reconciled; keep this hold.
-          counts.unknown += 1;
-        }
-      } else counts.unknown += 1;
+      if (refreshed?.state !== 'unknown') continue;
+      if (!adapters.get(refreshed.provider_id)?.reconcile) {
+        counts.unknown += 1;
+        continue;
+      }
+      try {
+        const result = await reconcileCall(refreshed);
+        if (result.state === 'settled') counts.settled += 1;
+        else if (result.state === 'failed') counts.failed += 1;
+        else counts.unknown += 1;
+      } catch {
+        // A provider outage must not stop the other calls from being reconciled; keep this hold.
+        counts.unknown += 1;
+      }
     }
 
     const unknown = await db.admin.query<CallRow>(
@@ -1007,6 +1233,7 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
       try {
         const result = await reconcileCall(call);
         if (result.state === 'settled') counts.settled += 1;
+        else if (result.state === 'failed') counts.failed += 1;
         else counts.unknown += 1;
       } catch {
         counts.unknown += 1;
@@ -1016,12 +1243,24 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
     return counts;
   }
 
+  // Discover the workspaces with expired raw responses through the owner connection, then purge
+  // each one in its own workspace-scoped transaction, so row-level security always applies.
   async function purgeRawResponses(at: Date = now()): Promise<number> {
-    const result = await db.admin.query(
-      `UPDATE provider_calls SET raw_response = NULL, updated_at = now() WHERE raw_expires_at IS NOT NULL AND raw_expires_at <= $1`,
+    const { rows } = await db.admin.query<{ workspace_id: string }>(
+      `SELECT DISTINCT workspace_id FROM provider_calls WHERE raw_expires_at IS NOT NULL AND raw_expires_at <= $1`,
       [at],
     );
-    return result.rowCount ?? 0;
+    let purged = 0;
+    for (const row of rows) {
+      purged += await db.withWorkspace(row.workspace_id, async (tx) => {
+        const { rowCount } = await tx.execute(
+          sql`UPDATE provider_calls SET raw_response = NULL, updated_at = now()
+               WHERE workspace_id = ${row.workspace_id} AND raw_response IS NOT NULL AND raw_expires_at <= ${at}`,
+        );
+        return rowCount ?? 0;
+      });
+    }
+    return purged;
   }
 
   async function budgets(input: { workspaceId: string; period?: string; tx?: Tx }): Promise<BudgetView[]> {
@@ -1071,6 +1310,28 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
       throw new AppError('invalid_input', 'A budget must be a whole, non-negative number of micros.');
     if (!/^[A-Z]{3}$/.test(input.currency)) throw new AppError('invalid_input', 'A budget currency must be a three-letter uppercase code.');
     const run = async (tx: Tx) => {
+      // The currency is immutable once the period has activity: spent and held amounts are only
+      // meaningful in the currency they were reserved in.
+      const existing = await tx.execute<{ currency: string; spent_micros: string; held_micros: string }>(
+        sql`SELECT currency, spent_micros::text AS spent_micros, held_micros::text AS held_micros
+              FROM provider_budgets
+             WHERE workspace_id = ${input.workspaceId} AND provider_id = ${input.providerId} AND period = ${period}
+             FOR UPDATE`,
+      );
+      const current = existing.rows[0];
+      if (current && current.currency !== input.currency && (micros(current.spent_micros) > 0 || micros(current.held_micros) > 0))
+        throw new AppError(
+          'precondition_failed',
+          `The ${input.providerId} budget for ${period} already has ${money(micros(current.spent_micros), current.currency)} spent and ${money(micros(current.held_micros), current.currency)} held in ${current.currency}, so its currency cannot change to ${input.currency} in this period. Set a ${input.currency} budget for a period with no activity, or keep ${current.currency}.`,
+          {
+            providerId: input.providerId,
+            period,
+            currency: current.currency,
+            requestedCurrency: input.currency,
+            spentMicros: micros(current.spent_micros),
+            heldMicros: micros(current.held_micros),
+          },
+        );
       await tx.execute(
         sql`INSERT INTO provider_budgets (workspace_id, provider_id, period, currency, budget_micros)
               VALUES (${input.workspaceId}, ${input.providerId}, ${period}, ${input.currency}, ${input.budgetMicros})
@@ -1148,6 +1409,51 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
     return input.tx ? run(input.tx) : db.withWorkspace(input.workspaceId, run);
   }
 
+  async function unresolved(input: { workspaceId: string; tx?: Tx }): Promise<UnresolvedCall[]> {
+    const run = async (tx: Tx) => {
+      const { rows } = await tx.execute<{
+        id: string;
+        workspace_id: string;
+        provider_id: string;
+        port: PortName;
+        operation: string;
+        purpose: string;
+        state: 'dispatching' | 'submitted' | 'unknown';
+        currency: string;
+        reserved_micros: string;
+        max_cost_micros: string;
+        provider_task_id: string | null;
+        error: string | null;
+        created_at: Date;
+        updated_at: Date;
+      }>(
+        sql`SELECT id, workspace_id, provider_id, port, operation, purpose, state, currency,
+                   reserved_micros::text AS reserved_micros, max_cost_micros::text AS max_cost_micros,
+                   provider_task_id, error, created_at, updated_at
+              FROM provider_calls
+             WHERE workspace_id = ${input.workspaceId} AND state IN ('dispatching', 'submitted', 'unknown')
+             ORDER BY created_at`,
+      );
+      return rows.map((row) => ({
+        callId: row.id,
+        workspaceId: row.workspace_id,
+        providerId: row.provider_id,
+        port: row.port,
+        operation: row.operation,
+        purpose: row.purpose,
+        state: row.state,
+        currency: row.currency,
+        heldMicros: micros(row.reserved_micros),
+        maxCostMicros: micros(row.max_cost_micros),
+        providerTaskId: row.provider_task_id,
+        error: row.error,
+        createdAt: iso(row.created_at),
+        updatedAt: iso(row.updated_at),
+      }));
+    };
+    return input.tx ? run(input.tx) : db.withWorkspace(input.workspaceId, run);
+  }
+
   async function estimateOnly(input: Omit<ProviderCallInput, 'estimate'>): Promise<ProviderEstimateResult> {
     const op = operationDefinition(input.port, input.operation);
     const request = parseRequest(op, input.port, input.operation, input.request);
@@ -1165,6 +1471,7 @@ export function createProviderGateway(options: ProviderGatewayOptions): Provider
     budgets,
     setBudget,
     spend,
+    unresolved,
     currentPeriod,
   };
 }

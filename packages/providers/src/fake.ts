@@ -1,8 +1,10 @@
 import type {
   AdapterCallContext,
+  AdapterCallLimits,
   AdapterCallResult,
   AdapterRateLimit,
   AdapterReconcileContext,
+  AdapterReconcileRequest,
   AdapterReconcileResult,
   CostEstimate,
   ProviderAdapter,
@@ -26,6 +28,8 @@ export interface FakeAdapterOptions {
   /** What the call actually reports. Defaults to the estimate. */
   actualMicros?: FakeCost;
   currency?: string;
+  /** The currency the call *reports*; differs from `currency` to exercise the gateway's guard. */
+  resultCurrency?: string;
   /** How many calls time out after the provider accepted them (the first N). */
   timeoutAfterCharge?: number;
   /** Return an Error to fail a call before it charges. */
@@ -34,6 +38,17 @@ export interface FakeAdapterOptions {
   data?: FakeData;
   taskId?: FakeTaskId;
   rateLimit?: AdapterRateLimit;
+  /**
+   * Awaited before the provider accepts the call. A test holds the call in `dispatching` with it,
+   * without the provider having charged anything yet.
+   */
+  holdBeforeSubmit?: () => Promise<void>;
+  /**
+   * Awaited after the provider charged but before the submit is recorded or the result returns:
+   * the state of a process that died mid-submission. Reconciliation must resolve it from the
+   * call's idempotency key.
+   */
+  holdAfterCharge?: () => Promise<void>;
 }
 
 interface ChargedCall {
@@ -54,12 +69,16 @@ export class FakeAdapter implements ProviderAdapter {
   readonly ports: readonly PortName[];
   readonly rateLimit?: AdapterRateLimit;
   readonly invocations: FakeInvocation[] = [];
+  /** The ceiling the gateway authorised for each call, in order. */
+  readonly ceilings: number[] = [];
+  readonly reconcileRequests: AdapterReconcileRequest[] = [];
   reconcileCount = 0;
 
   private readonly options: FakeAdapterOptions;
   private sequence = 0;
   private timeoutsLeft: number;
-  private readonly charged = new Map<string, ChargedCall>();
+  private readonly chargedByTaskId = new Map<string, ChargedCall>();
+  private readonly chargedByIdempotencyKey = new Map<string, ChargedCall>();
 
   constructor(options: FakeAdapterOptions = {}) {
     this.options = options;
@@ -93,43 +112,54 @@ export class FakeAdapter implements ProviderAdapter {
     };
   }
 
-  async call(operation: string, request: unknown, ctx: AdapterCallContext): Promise<AdapterCallResult> {
+  async call(operation: string, request: unknown, ctx: AdapterCallContext, limits: AdapterCallLimits): Promise<AdapterCallResult> {
     const sequence = ++this.sequence;
     this.invocations.push({ port: ctx.port, operation, request, sequence });
+    this.ceilings.push(limits.maxCostMicros);
 
     const failure = this.options.failure?.(operation, request, sequence);
     if (failure) throw failure;
 
     const data = (this.options.data ?? defaultFakeData)(ctx.port, operation, request);
     const actualCostMicros = costOf(this.options.actualMicros ?? this.options.estimateMicros, operation, request, 1_000);
-    const taskId = this.options.taskId?.(ctx.port, operation, sequence) ?? `fake-${ctx.port.toLowerCase()}-${sequence}`;
+    const taskId = this.options.taskId ? this.options.taskId(ctx.port, operation, sequence) : `fake-${ctx.port.toLowerCase()}-${sequence}`;
+
+    await this.options.holdBeforeSubmit?.();
+    // The provider charges on receipt; the gateway's own record follows `onSubmitted`.
+    const charged: ChargedCall = { data, actualCostMicros, raw: { fake: true, port: ctx.port, operation, sequence } };
+    if (taskId !== undefined) this.chargedByTaskId.set(taskId, charged);
+    this.chargedByIdempotencyKey.set(ctx.idempotencyKey, charged);
+    await this.options.holdAfterCharge?.();
     await ctx.onSubmitted(taskId);
-    this.charged.set(taskId, { data, actualCostMicros, raw: { fake: true, port: ctx.port, operation, sequence } });
 
     if (this.timeoutsLeft > 0) {
       this.timeoutsLeft -= 1;
-      throw new ProviderTimeoutError(`The fake provider accepted ${taskId} but did not answer in time.`, taskId);
+      throw new ProviderTimeoutError(`The fake provider accepted ${taskId ?? 'the call'} but did not answer in time.`, taskId);
     }
 
     return {
       data,
       actualCostMicros,
-      providerTaskId: taskId,
+      ...(taskId === undefined ? {} : { providerTaskId: taskId }),
       raw: { fake: true, port: ctx.port, operation, sequence },
-      currency: this.options.currency ?? 'USD',
+      currency: this.options.resultCurrency ?? this.options.currency ?? 'USD',
     };
   }
 
-  async reconcile(providerTaskId: string, _ctx: AdapterReconcileContext): Promise<AdapterReconcileResult> {
+  async reconcile(request: AdapterReconcileRequest, _ctx: AdapterReconcileContext): Promise<AdapterReconcileResult> {
     this.reconcileCount += 1;
-    const charged = this.charged.get(providerTaskId);
-    if (!charged) return { state: 'unknown' };
+    this.reconcileRequests.push(request);
+    const charged =
+      (request.providerTaskId === undefined ? undefined : this.chargedByTaskId.get(request.providerTaskId)) ??
+      this.chargedByIdempotencyKey.get(request.idempotencyKey);
+    if (!charged) return { state: 'unknown', reason: 'the fake provider has no record of this call' };
     return {
       state: 'settled',
       actualCostMicros: charged.actualCostMicros,
       data: charged.data,
       raw: charged.raw,
-      providerTaskId,
+      ...(request.providerTaskId === undefined ? {} : { providerTaskId: request.providerTaskId }),
+      currency: this.options.resultCurrency ?? this.options.currency ?? 'USD',
     };
   }
 }
