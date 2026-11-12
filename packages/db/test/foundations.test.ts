@@ -57,6 +57,26 @@ const SEED: Record<string, { insert: string; appendOnly: boolean }> = {
             VALUES ($1, 'tok-seed', 'seed-user', 'Seed token', 'token-hash-' || md5(random()::text), 'hint', '{sites:read}')`,
     appendOnly: false,
   },
+  artifacts: {
+    insert: `INSERT INTO artifacts (workspace_id, id, type, name, latest_version)
+            VALUES ($1, 'not_seed', 'note', 'Seed note', 1)`,
+    appendOnly: false,
+  },
+  artifact_versions: {
+    insert: `INSERT INTO artifact_versions (workspace_id, artifact_id, number, state, content, content_hash, author_type, author_id)
+            VALUES ($1, 'not_seed', 1, 'draft', '{}'::jsonb, 'seed-hash', 'user', 'seed-user')`,
+    appendOnly: false,
+  },
+  approval_requests: {
+    insert: `INSERT INTO approval_requests (workspace_id, id, artifact_id, version, status, requested_by_type, requested_by_id, note)
+            VALUES ($1, 'apr_seed', 'not_seed', 1, 'pending', 'user', 'seed-user', 'Seed request')`,
+    appendOnly: false,
+  },
+  learnings: {
+    insert: `INSERT INTO learnings (workspace_id, id, statement, author_type, author_id)
+            VALUES ($1, 'lrn_seed', 'Seed learning', 'user', 'seed-user')`,
+    appendOnly: false,
+  },
   audit_log: {
     insert: `INSERT INTO audit_log (workspace_id, principal_type, principal_id, surface, command, effect, input_hash, ok, hash)
             VALUES ($1, 'user', 'seed-user', 'rest', 'seed.run', 'write', 'seed-hash', true, 'seed-hash')`,

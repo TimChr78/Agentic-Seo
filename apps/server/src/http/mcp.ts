@@ -101,6 +101,40 @@ export function mcpServerFor(
     },
     async (uri) => ({ contents: [{ uri: uri.href, text: MCP_INSTRUCTIONS, mimeType: 'text/markdown' }] }),
   );
+  // The JSON Schema catalogue for every artifact type and the workspace's current learnings. Both
+  // are resources rather than tools because a client reads them for context; the commands behind
+  // them stay callable and permission-checked in the usual way.
+  const resources: { name: string; uri: string; title: string; description: string; command: string; input: unknown }[] = [
+    {
+      name: 'artifact-types',
+      uri: 'artifact-types://catalogue',
+      title: 'Artifact type catalogue',
+      description: 'Every artifact type with the JSON Schema its content must match.',
+      command: 'artifacts.types',
+      input: {},
+    },
+    {
+      name: 'learnings',
+      uri: 'learnings://current',
+      title: 'Active learnings',
+      description: 'The active conclusions with their evidence, newest first.',
+      command: 'learnings.list',
+      input: { status: 'active' },
+    },
+  ];
+  for (const resource of resources) {
+    const cmd = commands.find((c) => c.name === resource.command);
+    if (!cmd?.permission || !principal.permissions.has(cmd.permission)) continue;
+    server.registerResource(
+      resource.name,
+      resource.uri,
+      { title: resource.title, description: resource.description, mimeType: 'application/json' },
+      async (uri) => {
+        const out = await executor.execute(cmd, resource.input, principal, { surface: 'mcp' });
+        return { contents: [{ uri: uri.href, text: JSON.stringify(out), mimeType: 'application/json' }] };
+      },
+    );
+  }
   for (const cmd of commands) {
     if (cmd.humansOnly || !cmd.permission) continue;
     const toolName = mcpToolName(cmd.name, style);

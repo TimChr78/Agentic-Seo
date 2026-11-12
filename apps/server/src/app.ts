@@ -9,6 +9,7 @@ import {
   isMcpResourceUrlAllowed,
   withConsentRequest,
 } from '@agentic-seo/auth';
+import { activeMandate } from '@agentic-seo/artifacts';
 import { createExecutor, type Services, userPrincipal } from '@agentic-seo/commands';
 import { AppError, newUuid, remoteAddressFromEnv, resolveClientIp } from '@agentic-seo/core';
 import { createDb } from '@agentic-seo/db';
@@ -76,8 +77,10 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   const services: Services = {
     keyProvider,
     directory,
+    publicUrl: config.publicUrl,
     serverVersion: VERSION,
     strictInputs: config.strictInputs,
+    activeMandate,
     ...agentLedgerServices(),
   };
   const executor = createExecutor(db, services, {

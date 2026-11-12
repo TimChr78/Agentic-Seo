@@ -13,4 +13,6 @@ People-only commands (members.*, invitations.*, apiTokens.create/update/revoke, 
 
 Secrets are write-only: secrets.list shows names and who changed them, never values; an agent is never granted secrets:write.
 
+Artifacts (notes, site context, mandates, skills, prompts and later recommendations, change sets and reports) are versioned: you create drafts with artifacts.create/updateDraft, then artifacts.requestPublish sends the draft to a person or publishes it when the policy allows. Read artifacts.types, or the resource artifact-types://catalogue, before writing content. Read the workspace's conclusions from the resource learnings://current and add evidence-backed ones with learnings.add.
+
 This guide is also available as the resource ${MCP_GUIDE_URI}.`;

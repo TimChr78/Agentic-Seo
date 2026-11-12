@@ -287,6 +287,113 @@ export const agentActions = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+// Versioned artifacts and their approvals (Phase 0 task C2). See 0004_artifacts.sql.
+
+export type VersionState = 'draft' | 'in_review' | 'published' | 'superseded' | 'rejected';
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'withdrawn';
+export type LearningStatus = 'active' | 'retracted';
+
+export const artifacts = pgTable(
+  'artifacts',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    type: text('type').notNull(),
+    name: text('name').notNull(),
+    /** The site this artifact belongs to, when it is site-scoped; sites itself arrives later. */
+    siteId: uuid('site_id'),
+    latestVersion: integer('latest_version').notNull(),
+    publishedVersion: integer('published_version'),
+    archived: boolean('archived').notNull().default(false),
+    /** The agent that owns this artifact; a missing agent counts as retired, never as active. */
+    ownerAgentId: text('owner_agent_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    index('artifacts_type').on(t.workspaceId, t.type, t.updatedAt),
+    index('artifacts_owner_agent').on(t.workspaceId, t.ownerAgentId),
+    index('artifacts_site').on(t.workspaceId, t.siteId),
+  ],
+);
+
+export const artifactVersions = pgTable(
+  'artifact_versions',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    artifactId: text('artifact_id').notNull(),
+    number: integer('number').notNull(),
+    state: text('state').$type<VersionState>().notNull(),
+    content: jsonb('content').$type<unknown>().notNull(),
+    contentHash: text('content_hash').notNull(),
+    basedOn: integer('based_on'),
+    authorType: text('author_type').$type<'user' | 'agent'>().notNull(),
+    authorId: text('author_id').notNull(),
+    authorClient: text('author_client'),
+    note: text('note'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.artifactId, t.number] })],
+);
+
+export const approvalRequests = pgTable(
+  'approval_requests',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    artifactId: text('artifact_id').notNull(),
+    version: integer('version').notNull(),
+    status: text('status').$type<ApprovalStatus>().notNull(),
+    requestedByType: text('requested_by_type').$type<'user' | 'agent'>().notNull(),
+    requestedById: text('requested_by_id').notNull(),
+    requestedByClient: text('requested_by_client'),
+    note: text('note').notNull(),
+    decidedBy: text('decided_by'),
+    decidedAt: ts('decided_at'),
+    decisionNote: text('decision_note'),
+    /** A bundle is reviewed together: one row per artifact, sharing this id. */
+    bundleId: text('bundle_id'),
+    /** A held agent change runs at this time unless a person vetoes it; holds arrive in Phase 7. */
+    holdUntil: ts('hold_until'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    index('approval_requests_pending').on(t.workspaceId, t.createdAt),
+    index('approval_requests_bundle').on(t.workspaceId, t.bundleId),
+  ],
+);
+
+export type LearningEvidence = {
+  kind: 'change_set' | 'recommendation' | 'report' | 'rank_tracker' | 'ai_visibility_tracker';
+  id: string;
+  summary: string;
+  numbers: Record<string, number>;
+};
+
+export const learnings = pgTable(
+  'learnings',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    siteId: uuid('site_id'),
+    statement: text('statement').notNull(),
+    scope: jsonb('scope').$type<Record<string, unknown>>().notNull().default({}),
+    evidence: jsonb('evidence').$type<LearningEvidence[]>().notNull().default([]),
+    authorType: text('author_type').$type<'user' | 'agent'>().notNull(),
+    authorId: text('author_id').notNull(),
+    agentId: text('agent_id'),
+    status: text('status').$type<LearningStatus>().notNull().default('active'),
+    retractedBy: text('retracted_by'),
+    retractedAt: ts('retracted_at'),
+    retractReason: text('retract_reason'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
 // The provider gateway (Phase 0 task E). Amounts are bigint micros; see 0003_providers.sql.
 
 export const providerBudgets = pgTable(
