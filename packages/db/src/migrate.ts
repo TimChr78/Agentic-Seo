@@ -66,10 +66,16 @@ type RoleClient = Pick<pg.Client, 'query' | 'escapeLiteral'>;
  */
 async function assertCannotBypassRls(client: RoleClient, role: string): Promise<void> {
   const { rows } = await client.query<{ rolsuper: boolean; rolbypassrls: boolean; inherits: boolean }>(
-    `SELECT r.rolsuper, r.rolbypassrls,
+    // Every role reachable through memberships, at any depth: SET ROLE works through a chain
+    // (app → intermediate → bypass), whatever INHERIT says, so a direct check is not enough.
+    `WITH RECURSIVE reachable(oid) AS (
+       SELECT m.roleid FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = $1
+       UNION
+       SELECT m.roleid FROM pg_auth_members m JOIN reachable ON m.member = reachable.oid
+     )
+     SELECT r.rolsuper, r.rolbypassrls,
             EXISTS (
-              SELECT 1 FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
-               WHERE m.member = r.oid AND (g.rolsuper OR g.rolbypassrls)
+              SELECT 1 FROM reachable JOIN pg_roles g ON g.oid = reachable.oid WHERE g.rolsuper OR g.rolbypassrls
             ) AS inherits
        FROM pg_roles r
       WHERE r.rolname = $1`,

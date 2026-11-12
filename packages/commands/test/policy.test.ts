@@ -103,6 +103,21 @@ describe('the policy engine', () => {
     expect(decide(base({ settings, command: 'audits.run', actionClass: 'crawl', approvable: false })).decision).toBe('deny');
   });
 
+  it('a workspace draft ceiling of 0 makes agents observe-only, with or without a mandate', () => {
+    const settings = autonomySettings({ maxLevel: { draft: 0 } });
+    expect(decide(base({ settings, actionClass: 'draft' })).decision).toBe('deny');
+    const levels = { draft: 1, 'site.content': 3 } as MandateView['levels'];
+    const withMandate = decide(
+      base({
+        settings,
+        actionClass: 'draft',
+        mandate: { id: 'mnd_draft', version: 1, levels, holdWindow: 'PT2H', purpose: 'Draft ceiling' },
+      }),
+    );
+    expect(withMandate.decision).toBe('deny');
+    expect(decide(base({ settings, actionClass: 'read' })).decision).toBe('allow');
+  });
+
   it('off leaves agents read-only', () => {
     const settings = autonomySettings({ switch: 'off' });
     expect(decide(base({ settings, actionClass: 'read' })).decision).toBe('allow');

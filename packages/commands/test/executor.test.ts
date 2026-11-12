@@ -31,6 +31,36 @@ const readCommand = defineCommand({
   handler: async () => ({ ok: true }),
 });
 
+let readRuns = 0;
+const slowRead = defineCommand({
+  name: 'test.slowRead',
+  title: 'Slow read',
+  description: 'A read whose handler counts how often it runs.',
+  input: z.object({}),
+  output: z.object({ runs: z.number() }),
+  permission: null,
+  effect: 'read',
+  handler: async () => {
+    readRuns += 1;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return { runs: readRuns };
+  },
+});
+
+const crashingWrite = defineCommand({
+  name: 'test.crash',
+  title: 'Crash',
+  description: 'A write whose handler throws an unexpected (non-AppError) exception.',
+  input: z.object({}),
+  output: z.object({}),
+  permission: null,
+  effect: 'write',
+  actionClass: 'crawl',
+  handler: async () => {
+    throw new Error('connection reset: password=hunter2');
+  },
+});
+
 let runs = 0;
 const slowWrite = defineCommand({
   name: 'test.slowWrite',
@@ -138,6 +168,42 @@ describe.skipIf(!hasTestDatabase())('the command executor', () => {
       expect(runs).toBe(1);
       expect(a).toEqual({ value: 'same', runs: 1 });
       expect(b).toEqual(a);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('runs a concurrent idempotent read once: the waiter sees the committed key', async () => {
+    const current = await setCurrent();
+    const db = createDb({ adminUrl: current.url.toString(), appUrl: appUrl(current.url), poolSize: 4 });
+    try {
+      const executor = createExecutor(db, services);
+      const principal = userPrincipal('user_1', current.workspace, 'owner');
+      readRuns = 0;
+      const key = randomUUID();
+      const [a, b] = await Promise.all([
+        executor.execute(slowRead, {}, principal, { surface: 'rest', idempotencyKey: key }),
+        executor.execute(slowRead, {}, principal, { surface: 'rest', idempotencyKey: key }),
+      ]);
+      expect(readRuns).toBe(1);
+      expect(b).toEqual(a);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('audits an unexpected exception as a sanitized internal failure', async () => {
+    const current = await setCurrent();
+    const db = createDb({ adminUrl: current.url.toString(), appUrl: appUrl(current.url), poolSize: 4 });
+    try {
+      const executor = createExecutor(db, services);
+      const principal = userPrincipal('user_1', current.workspace, 'owner');
+      await expect(executor.execute(crashingWrite, {}, principal, { surface: 'rest' })).rejects.toThrow('connection reset');
+      const { rows } = await current.db.admin.query<{ ok: boolean; error: string }>(
+        "SELECT ok, error FROM audit_log WHERE workspace_id = $1 AND command = 'test.crash'",
+        [current.workspace],
+      );
+      expect(rows).toEqual([{ ok: false, error: 'internal: The command failed with an unexpected error.' }]);
     } finally {
       await db.close();
     }

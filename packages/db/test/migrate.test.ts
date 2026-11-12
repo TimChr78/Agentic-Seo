@@ -309,10 +309,11 @@ describe.skipIf(!hasTestDatabase())('the application role', () => {
   it('strips superuser and bypassrls from an existing role, and refuses a role that inherits them', async () => {
     const role = runScoped(`role_${randomBytes(3).toString('hex')}`);
     const parent = runScoped(`role_parent_${randomBytes(3).toString('hex')}`);
+    const middle = runScoped(`role_middle_${randomBytes(3).toString('hex')}`);
     const client = new pg.Client({ connectionString: maintUrl() });
     await client.connect();
     try {
-      for (const name of [role, parent]) await client.query(`DROP ROLE IF EXISTS ${name}`);
+      for (const name of [role, middle, parent]) await client.query(`DROP ROLE IF EXISTS ${name}`);
       // A role created by hand (or by an older installer) must not keep its bypass privileges.
       await client.query(`CREATE ROLE ${role} LOGIN SUPERUSER BYPASSRLS PASSWORD 'initial'`);
       await ensureAppRole(client, { appRolePassword: 'changed', appRole: role });
@@ -327,9 +328,18 @@ describe.skipIf(!hasTestDatabase())('the application role', () => {
       await client.query(`CREATE ROLE ${parent} NOLOGIN BYPASSRLS`);
       await client.query(`GRANT ${parent} TO ${role}`);
       await expect(ensureAppRole(client, { appRolePassword: 'changed', appRole: role })).rejects.toThrow(/bypass/i);
+
+      // Through an intermediate role too: app → middle → bypass reaches the bypass role by SET ROLE.
+      await client.query(`REVOKE ${parent} FROM ${role}`);
+      await client.query(`CREATE ROLE ${middle} NOLOGIN`);
+      await client.query(`GRANT ${parent} TO ${middle}`);
+      await client.query(`GRANT ${middle} TO ${role}`);
+      await expect(ensureAppRole(client, { appRolePassword: 'changed', appRole: role })).rejects.toThrow(/bypass/i);
     } finally {
       await client.query(`REVOKE ${parent} FROM ${role}`).catch(() => {});
-      for (const name of [role, parent]) await client.query(`DROP ROLE IF EXISTS ${name}`).catch(() => {});
+      await client.query(`REVOKE ${middle} FROM ${role}`).catch(() => {});
+      await client.query(`REVOKE ${parent} FROM ${middle}`).catch(() => {});
+      for (const name of [role, middle, parent]) await client.query(`DROP ROLE IF EXISTS ${name}`).catch(() => {});
       await client.end();
     }
   });

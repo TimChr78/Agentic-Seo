@@ -204,6 +204,14 @@ function redact(input: unknown, fields?: readonly string[]) {
  * every command; a command that records several items itself calls it directly and declares
  * `auditsItself`.
  */
+/**
+ * What the audit log records about a failure: an AppError's code and message, or, for an
+ * unexpected exception, a fixed internal marker. The original exception is never written to the
+ * log (it can carry SQL, secrets or stack details); it stays on the span for diagnostics.
+ */
+export type AuditedError = { code: string; message: string };
+const UNEXPECTED_FAILURE: AuditedError = { code: 'internal', message: 'The command failed with an unexpected error.' };
+
 export async function appendAuditEntry(
   tx: Tx,
   p: Principal,
@@ -211,7 +219,7 @@ export async function appendAuditEntry(
   cmd: { name: string; effect: string },
   inputHash: string,
   target: string | undefined,
-  error?: AppError,
+  error?: AuditedError,
   ip?: string | null,
 ) {
   // Serialise appends per workspace so the hash chain never forks under concurrency.
@@ -248,7 +256,7 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
     cmd: AnyCommand,
     inputHash: string,
     target: string | undefined,
-    error?: AppError,
+    error?: AuditedError,
   ) => appendAuditEntry(tx, p, surface, cmd, inputHash, target, error);
 
   /** Validate → authorize → idempotency → handler → validate output → audit (writes and failures), in one transaction. */
@@ -434,7 +442,9 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
               return out;
             },
             // Reads see one consistent snapshot; writes keep read-committed so their locks see the latest rows.
-            { snapshot: cmd.effect === 'read' },
+            // An idempotent request also runs read-committed: its key lock may wait for another
+            // request, and only a statement snapshot taken after the wait sees the committed key.
+            { snapshot: cmd.effect === 'read' && !opts.idempotencyKey },
           ),
         );
         // An audited read is recorded in its own transaction: the hash chain must be appended under
@@ -468,6 +478,13 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
             )
             .catch((e) => span.recordException(e as Error));
         if (err instanceof AppError) return fail(err);
+        // An unexpected exception is audited too (as a sanitized internal failure): a write that
+        // failed must leave a trace whatever the cause.
+        await db
+          .withWorkspace(principal.workspaceId, (tx) =>
+            appendAudit(tx, principal, opts.surface, cmd, inputHash, target, UNEXPECTED_FAILURE),
+          )
+          .catch((e) => span.recordException(e as Error));
         report('error');
         span.recordException(err as Error);
         span.setStatus({ code: SpanStatusCode.ERROR });
