@@ -1,0 +1,70 @@
+# Optional site-specific Compose settings. Copy this file to compose.override.yaml next to
+# docker-compose.yml; Compose reads compose.override.yaml automatically, so the release file stays
+# untouched and an upgrade only replaces docker-compose.yml and bumps ASEO_VERSION.
+#
+# Every example is commented out. Uncomment one block at a time: each block is a complete file on
+# its own. If you need more than one, merge their entries under a single `services:` key.
+#
+# The named volumes in docker-compose.yml stay declared when you replace them with bind mounts;
+# Compose merges a service's volume entries by container path, so the bind mount wins.
+
+# (a) A tunnel container (cloudflared, for example) on another Docker network. Attach the app to
+# that network and keep `default`, so it still reaches Postgres. Replace `tunnel` with the name of
+# the network your tunnel container is on; point the tunnel at http://app:3000 (or the container
+# name, e.g. http://agentic-seo-app-1:3000). The app then needs no host port at all: `!override`
+# (Compose 2.24 or newer) replaces the app's port list. Running behind a proxy or tunnel also means
+# setting TRUSTED_PROXY_CIDRS and CLIENT_IP_HEADER in .env (see block (c)).
+#
+# services:
+#   app:
+#     networks:
+#       - default
+#       - tunnel
+#     ports: !override []
+#
+# networks:
+#   default: {}
+#   tunnel:
+#     external: true
+
+# (b) Bind mounts instead of named volumes, e.g. to keep the database off the Docker image file on a
+# NAS (Unraid's docker.img). Owners of the host directories:
+# - Postgres: the Alpine image's entrypoint drops to uid 70 (postgres);
+# - appdata: the app runs as uid 1000 (node).
+#   mkdir -p /srv/aseo/{pgdata,appdata}
+#   chown 70:70 /srv/aseo/pgdata && chown 1000:1000 /srv/aseo/appdata
+#
+# services:
+#   postgres:
+#     volumes:
+#       - /srv/aseo/pgdata:/var/lib/postgresql/data
+#   app:
+#     volumes:
+#       - /srv/aseo/appdata:/data
+
+# (c) Proxy and tunnel settings. Put these in .env rather than here: docker-compose.yml passes every
+# one of them through, and Compose recreates the app when they change.
+#
+#   PUBLIC_URL=https://seo.example.com          the address people and agents use (MCP needs HTTPS)
+#   ASEO_PORT=8080                              the host port; the app still listens on 3000 inside
+#   ASEO_BIND=127.0.0.1                         the host address it is published on (the default)
+#   CLIENT_IP_HEADER=cf-connecting-ip,x-forwarded-for
+#   TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128,172.16.0.0/12
+#
+# TLS belongs to the proxy or tunnel in front; the app sends HSTS once PUBLIC_URL is HTTPS.
+
+# (d) Reach the app from other machines. The default mapping publishes on 127.0.0.1 only. To publish
+# on one LAN address, set it in .env (no override needed); 0.0.0.0 means every interface, which
+# also means every network this host is on. Prefer a tunnel or reverse proxy (blocks (a) and (c)).
+#
+#   ASEO_BIND=192.168.1.10
+
+# (e) Resource limits, sized to the host.
+#
+# services:
+#   app:
+#     mem_limit: 1g
+#     cpus: 2
+#   postgres:
+#     mem_limit: 1g
+#     cpus: 1
