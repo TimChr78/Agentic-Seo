@@ -36,23 +36,9 @@ APP_DB_PASSWORD=$(openssl rand -hex 16)
 AUTH_SECRET=$(openssl rand -base64 32)
 MASTER_KEY=$(openssl rand -base64 32)
 
-ENV_FILE=$(mktemp)
-COOKIES=$(mktemp)
-cat >"$ENV_FILE" <<ENV
-POSTGRES_PASSWORD=$POSTGRES_PASSWORD
-APP_DB_PASSWORD=$APP_DB_PASSWORD
-AUTH_SECRET=$AUTH_SECRET
-MASTER_KEY=$MASTER_KEY
-PUBLIC_URL=$BASE
-ASEO_PORT=$PORT
-ASEO_BIND=$BIND_IP
-ASEO_BUILD_IMAGE=$IMAGE
-ENV
-
-# The same pinned Postgres the Compose file uses.
-PG_IMAGE=$(sed -n 's/^ *image: *\(postgres:.*\)$/\1/p' docker-compose.yml | head -n 1)
-[ -n "$PG_IMAGE" ]
-
+# Installed before anything is created, so a failure at any point removes what exists by then.
+ENV_FILE=
+COOKIES=
 COMPOSE_MODE=false
 PLAIN_MODE=false
 
@@ -73,12 +59,40 @@ cleanup() {
     docker network rm "$NET" >/dev/null 2>&1 || true
     docker volume rm "$PG_VOLUME" >/dev/null 2>&1 || true
   fi
-  rm -f "$ENV_FILE" "$COOKIES"
+  [ -z "$ENV_FILE" ] || rm -f "$ENV_FILE"
+  [ -z "$COOKIES" ] || rm -f "$COOKIES"
   exit "$code"
 }
 trap cleanup EXIT
 
-dc() { docker compose --env-file "$ENV_FILE" -p "$RUN_ID" -f docker-compose.yml -f docker-compose.build.yml "$@"; }
+ENV_FILE=$(mktemp)
+COOKIES=$(mktemp)
+cat >"$ENV_FILE" <<ENV
+POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+APP_DB_PASSWORD=$APP_DB_PASSWORD
+AUTH_SECRET=$AUTH_SECRET
+MASTER_KEY=$MASTER_KEY
+PUBLIC_URL=$BASE
+ASEO_PORT=$PORT
+ASEO_BIND=$BIND_IP
+ASEO_BUILD_IMAGE=$IMAGE
+ENV
+
+# The same pinned Postgres the Compose file uses.
+PG_IMAGE=$(sed -n 's/^ *image: *\(postgres:.*\)$/\1/p' docker-compose.yml | head -n 1)
+[ -n "$PG_IMAGE" ]
+
+# Compose prefers the shell's variables to --env-file, so an exported ASEO_BIND, ASEO_PORT or
+# password would silently replace this run's. The run's values are exported in a subshell, and the
+# settings the file leaves at their defaults are unset.
+dc() (
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+  unset ROLE SKIP_MIGRATIONS APP_DB_ROLE KEY_PROVIDER WEB_DIST ASEO_VERSION ASEO_GIT_SHA TRUSTED_ORIGINS
+  docker compose --env-file "$ENV_FILE" -p "$RUN_ID" -f docker-compose.yml -f docker-compose.build.yml "$@"
+)
 use_compose() { docker compose version >/dev/null 2>&1; }
 
 # Always build the local image: the release file pulls ghcr.io/timchr78/agentic-seo, and the
