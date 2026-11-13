@@ -29,6 +29,11 @@ CREATE TABLE artifacts (
 CREATE INDEX artifacts_type ON artifacts (workspace_id, type, updated_at DESC);
 CREATE INDEX artifacts_owner_agent ON artifacts (workspace_id, owner_agent_id) WHERE owner_agent_id IS NOT NULL;
 CREATE INDEX artifacts_site ON artifacts (workspace_id, site_id) WHERE site_id IS NOT NULL;
+-- A site has one site context, and a workspace one that belongs to no site. The commands check this
+-- first; the index is what holds when two requests race. NULLS NOT DISTINCT makes the site-less
+-- one unique too.
+CREATE UNIQUE INDEX artifacts_singleton ON artifacts (workspace_id, type, site_id) NULLS NOT DISTINCT
+  WHERE type = 'site_context';
 
 CREATE TABLE artifact_versions (
   workspace_id uuid NOT NULL,

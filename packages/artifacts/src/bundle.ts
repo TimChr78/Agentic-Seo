@@ -1,9 +1,9 @@
-import { agentPolicy, autonomySettings, defineCommand, PolicyDeniedError } from '@agentic-seo/commands';
+import { type AgentUndo, agentPolicy, autonomySettings, defineCommand, PolicyDeniedError } from '@agentic-seo/commands';
 import { AppError, canonicalJson, hashValue } from '@agentic-seo/core';
 import { schema } from '@agentic-seo/db';
 import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
-import { author, requestPublish, updateDraft, validateContent } from './commands';
+import { author, lockSingleton, requestPublish, updateDraft, validateContent } from './commands';
 import { diffJson } from './diff';
 import { type ArtifactType, artifactTypeEnum, artifactTypes } from './types';
 
@@ -360,6 +360,7 @@ export const importConfig = defineCommand({
     const singletons = new Map(
       existing.filter((e) => 'singleton' in artifactTypes[e.a.type as ArtifactType]).map((e) => [singletonKey(e.a.type, e.a.siteId), e]),
     );
+    const seenSingletons = new Map<string, string>();
     const changes: z.infer<typeof Change>[] = [];
     const toPublish: { id: string; type: ArtifactType; change: z.infer<typeof Change> }[] = [];
     for (const item of input.bundle.artifacts) {
@@ -374,8 +375,20 @@ export const importConfig = defineCommand({
         throw new AppError('forbidden', `${item.id} is a ${item.type}: only people can import it.`);
       const content = await validateContent(item.type, item.content, 'draft');
       // A workspace has one of each singleton type per site, whatever its id.
-      const current =
-        byId.get(item.id) ?? ('singleton' in artifactTypes[item.type] ? singletons.get(singletonKey(item.type, item.siteId)) : undefined);
+      const isSingleton = 'singleton' in artifactTypes[item.type];
+      if (isSingleton) {
+        const key = singletonKey(item.type, item.siteId);
+        // Two entries for one singleton cannot both apply: say so instead of creating both.
+        const first = seenSingletons.get(key);
+        if (first)
+          throw new AppError(
+            'invalid_input',
+            `${first} and ${item.id} are both the ${item.type} of the same site. A site has one; remove one of them from the bundle.`,
+          );
+        seenSingletons.set(key, item.id);
+        if (!input.dryRun) await lockSingleton(ctx, item.type, item.siteId);
+      }
+      const current = byId.get(item.id) ?? (isSingleton ? singletons.get(singletonKey(item.type, item.siteId)) : undefined);
       if (current && current.a.type !== item.type)
         throw new AppError('conflict', `${item.id} is a ${current.a.type} here, not a ${item.type}.`);
       const id = current?.a.id ?? item.id;
@@ -429,10 +442,44 @@ export const importConfig = defineCommand({
         impact,
         approvable: true,
       });
-      if (policy.decision === 'deny') throw new PolicyDeniedError(policy);
+      // Each nested publish gets its own ledger row, as the executor would write for
+      // artifacts.requestPublish: the import's own row only covers creating the drafts.
+      const record = (recorded: typeof policy, ok: boolean, error: string | null, undo: AgentUndo | null) =>
+        ctx.services.onAgentAction?.(ctx.tx, {
+          agentId: agent.id,
+          command: requestPublish.name,
+          actionClass: recorded.actionClass,
+          decision: recorded.decision,
+          reasons: recorded.reasons,
+          impact: recorded.impact,
+          ok,
+          error,
+          target: artifactId,
+          surface: ctx.surface ?? 'internal',
+          level: recorded.level ?? null,
+          intent: input.note,
+          undo,
+          mandateId: recorded.mandate?.id ?? null,
+          mandateVersion: recorded.mandate?.version ?? null,
+        });
+      if (policy.decision === 'deny') {
+        await record(policy, false, policy.reasons.join(' ').slice(0, 1000), null);
+        throw new PolicyDeniedError(policy);
+      }
       // Each publish sets its own reversal; a held step leaves the collector empty.
       ctx.undo?.set(null);
-      return requestPublish.handler(request, { ...ctx, policy });
+      let out: Awaited<ReturnType<typeof requestPublish.handler>>;
+      try {
+        out = await requestPublish.handler(request, { ...ctx, policy });
+      } catch (err) {
+        // The import carries on with the other artifacts, so this refusal is not recorded by the executor.
+        if (err instanceof AppError) await record(policy, false, err.message.slice(0, 1000), null);
+        throw err;
+      }
+      // The same facts the executor adds after requestPublish, e.g. the approval it created.
+      const extra = requestPublish.ledgerImpact?.(out);
+      await record(extra ? { ...policy, impact: { ...policy.impact, ...extra } } : policy, true, null, ctx.undo?.get() ?? null);
+      return out;
     };
     // Publish in dependency order; what fails for want of another artifact is retried in a later pass.
     let pending = toPublish.sort((x, y) => ORDER.indexOf(x.type) - ORDER.indexOf(y.type));

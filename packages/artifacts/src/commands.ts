@@ -181,6 +181,9 @@ export const publishHooks: ((
 ) => Promise<void>)[] = [];
 
 async function publishVersion(ctx: CommandContext, artifactId: string, number: number) {
+  // Locked before the live version is read: two publishes of one artifact must not both supersede
+  // the same version and each leave their own marked published.
+  await lockArtifacts(ctx, [artifactId]);
   const a = await loadArtifact(ctx, artifactId);
   await checkPublishable(ctx, a.type, (await loadVersion(ctx, artifactId, number)).content, artifactId);
   if (a.publishedVersion && a.publishedVersion !== number) await setVersionState(ctx, artifactId, a.publishedVersion, 'superseded');
@@ -202,6 +205,13 @@ async function lockArtifacts(ctx: CommandContext, ids: string[]) {
     .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), inArray(schema.artifacts.id, ids)))
     .orderBy(asc(schema.artifacts.id))
     .for('update');
+}
+
+/** Serialises creation of a workspace's singleton artifact (one per type and site) until the transaction ends. */
+export async function lockSingleton(ctx: CommandContext, type: string, siteId: string | null | undefined) {
+  await ctx.tx.execute(
+    sql`SELECT pg_advisory_xact_lock(hashtextextended(${`artifact-singleton:${ctx.principal.workspaceId}:${type}:${siteId ?? ''}`}, 0))`,
+  );
 }
 
 /** Publishes a version through the same checks and listeners as any other publish (agents.undo). */
@@ -365,6 +375,9 @@ export const createArtifact = defineCommand({
     const id = newId(artifactTypes[input.type].prefix);
     const ws = ctx.principal.workspaceId;
     if ('singleton' in artifactTypes[input.type]) {
+      // Two creations of the same singleton wait for each other here, so the second sees the first
+      // and gets the conflict below rather than the unique index's error.
+      await lockSingleton(ctx, input.type, input.siteId);
       const [existing] = await ctx.tx
         .select({ id: schema.artifacts.id })
         .from(schema.artifacts)
@@ -801,6 +814,10 @@ export const requestPublish = defineCommand({
   ledgerImpact: (out) => (out.approvalId ? { approvalId: out.approvalId } : undefined),
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
+    // Locked before the draft and its author are read, for people too (`impact` only runs for
+    // agents): an edit that lands after this point cannot go live under a decision made for the
+    // content that was there before it.
+    await lockArtifacts(ctx, [input.artifactId]);
     const a = await loadArtifact(ctx, input.artifactId);
     refuseAgentsFor(ctx, a.type);
     const v = await loadVersion(ctx, a.id, a.latestVersion);
@@ -910,6 +927,8 @@ export const requestPublishBundle = defineCommand({
     const ids = [...new Set(input.artifactIds)];
     if (ids.length < 2)
       throw new AppError('invalid_input', 'A bundle needs at least two different artifacts; use artifacts.requestPublish for one.');
+    // Locked before any draft or author is read, for people too (see artifacts.requestPublish).
+    await lockArtifacts(ctx, ids);
     const members = [];
     for (const id of ids) {
       const a = await loadArtifact(ctx, id);
@@ -1365,6 +1384,17 @@ async function decide(ctx: CommandContext, approvalId: string) {
 
 /** The request itself, or every pending request of its bundle in publish order. */
 async function bundleMembers(ctx: CommandContext, r: ApprovalRow) {
+  // The artifacts are locked (in id order) before any of them is published or rejected, so two
+  // decisions on versions of one artifact run one after the other.
+  const artifactIds = r.bundleId
+    ? (
+        await ctx.tx
+          .select({ artifactId: schema.approvalRequests.artifactId })
+          .from(schema.approvalRequests)
+          .where(and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), eq(schema.approvalRequests.bundleId, r.bundleId)))
+      ).map((x) => x.artifactId)
+    : [r.artifactId];
+  await lockArtifacts(ctx, [...new Set(artifactIds)]);
   if (!r.bundleId) return [r];
   const rows = await ctx.tx
     .select({ r: schema.approvalRequests, content: schema.artifactVersions.content })

@@ -88,6 +88,81 @@ describe('config bundles', () => {
     expect((await res.json()).message).toContain('workspace:admin');
   });
 
+  it('records each publish of an agent’s import in the ledger, held and refused alike', async () => {
+    const token = (
+      await api.call('apiTokens.create', { name: 'Importing agent', scopes: ['artifacts:read', 'artifacts:write', 'artifacts:publish'] })
+    ).token;
+    const agentCall = async (name: string, body: unknown = {}) => {
+      const res = await fetch(`${t.base}/v1/${name}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, body: (await res.json()) as any };
+    };
+    const agentId = (await agentCall('whoami')).body.agent.id as string;
+    const exported = await api.call('config.export', {});
+    const ledger = async (target: string) =>
+      (
+        await t.srv.db.admin.query<{ decision: string; ok: boolean; impact: { approvalId?: string }; command: string }>(
+          `SELECT command, decision, ok, impact FROM agent_actions
+            WHERE workspace_id = $1 AND agent_id = $2 AND target = $3 AND command = 'artifacts.requestPublish'
+            ORDER BY id`,
+          [ws, agentId, target],
+        )
+      ).rows;
+
+    // Held: site memory is a settings change, so a person must approve it.
+    const contextId = `sct_${'e'.repeat(32)}`;
+    const held = await agentCall('config.import', {
+      bundle: {
+        ...exported,
+        artifacts: [{ id: contextId, type: 'site_context', name: 'Site context', content: { businessOverview: 'A news site.' } }],
+      },
+      dryRun: false,
+      publish: true,
+    });
+    expect(held.status).toBe(200);
+    expect(held.body.changes[0].publish).toBe('in_review');
+    const [pending] = (
+      await t.srv.db.admin.query<{ id: string }>(
+        `SELECT id FROM approval_requests WHERE workspace_id = $1 AND artifact_id = $2 AND status = 'pending'`,
+        [ws, contextId],
+      )
+    ).rows;
+    const heldRows = await ledger(contextId);
+    expect(heldRows).toHaveLength(1);
+    expect(heldRows[0]).toMatchObject({ decision: 'ask', ok: true });
+    expect(heldRows[0]?.impact.approvalId).toBe(pending?.id);
+
+    // Refused: a mandate at level 0 for settings forbids this agent to publish site memory.
+    const mandate = await api.call('artifacts.create', {
+      type: 'agent_mandate',
+      name: 'No settings',
+      content: {
+        agent: agentId,
+        purpose: 'Draft only.',
+        expires: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+        levels: { draft: 1, settings: 0 },
+      },
+    });
+    expect((await api.call('artifacts.requestPublish', { artifactId: mandate.artifactId, note: 'grant' })).status).toBe('published');
+    await api.call('approvals.reject', { approvalId: pending!.id, note: 'Not yet' });
+    const refused = await agentCall('config.import', {
+      bundle: {
+        ...exported,
+        artifacts: [{ id: contextId, type: 'site_context', name: 'Site context', content: { businessOverview: 'A sports site.' } }],
+      },
+      dryRun: false,
+      publish: true,
+    });
+    expect(refused.status).toBe(200);
+    expect(refused.body.changes[0].publish).toBe('failed');
+    const rows = await ledger(contextId);
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toMatchObject({ decision: 'deny', ok: false });
+  });
+
   it('refuses an unknown artifact type in a bundle', async () => {
     const exported = await api.call('config.export', { includeDrafts: true });
     const bundle = {
