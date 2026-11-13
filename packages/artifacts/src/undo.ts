@@ -81,6 +81,7 @@ export async function undoAgentAction(tx: Tx, ctx: CommandContext, actionId: num
 
 export const undoAgent = defineCommand({
   name: 'agents.undo',
+  retryOnDeadlock: true,
   title: 'Undo an agent action',
   description:
     'Reverse something an agent did: republish the version it replaced, or unpublish what it first published. Only people can undo. An action whose artifact has newer work live cannot be undone automatically; the refusal explains it.',

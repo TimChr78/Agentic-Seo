@@ -318,6 +318,7 @@ export const driftConfig = defineCommand({
 
 export const importConfig = defineCommand({
   name: 'config.import',
+  retryOnDeadlock: true,
   title: 'Import a bundle of artifacts',
   description:
     'Apply a bundle from config.export: creates missing artifacts (keeping their ids and site ids), puts changed content in a new draft, leaves equal ones alone. A bundle with settings also applies the non-secret workspace settings, as a person with workspace:admin. With publish, the drafts go through artifacts.requestPublish in dependency order, so the approval policy applies. Starts as a dry run; pass dryRun: false to apply. Nothing is deleted.',

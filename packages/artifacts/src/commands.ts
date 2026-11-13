@@ -364,6 +364,7 @@ function refuseAgentsFor(ctx: CommandContext, type: string) {
 
 export const createArtifact = defineCommand({
   name: 'artifacts.create',
+  retryOnDeadlock: true,
   title: 'Create artifact draft',
   description:
     'Create a new artifact (note, site context, skill, …) as version 1 in draft state. Nothing is live until it is published with artifacts.requestPublish. Pass siteId for a site-scoped type.',
@@ -434,6 +435,7 @@ export const createArtifact = defineCommand({
 
 export const setOwner = defineCommand({
   name: 'artifacts.setOwner',
+  retryOnDeadlock: true,
   title: 'Set an artifact’s owning agent',
   description:
     'Assign, transfer or clear the agent that owns an artifact. An active owner’s artifact cannot be changed beyond a draft by another agent without a person; a paused or retired owner does not block. Pass `ownerAgentId: null` to clear it. People only, and audited.',
@@ -471,6 +473,7 @@ export const setOwner = defineCommand({
 
 export const updateDraft = defineCommand({
   name: 'artifacts.updateDraft',
+  retryOnDeadlock: true,
   title: 'Update artifact draft',
   description:
     'Replace the content of an artifact. Edits the current draft, or starts a new draft version when the latest version is published, in review or rejected. Pass `expectedContentHash` (from artifacts.get) to avoid overwriting someone else’s concurrent edit.',
@@ -735,6 +738,7 @@ export const diff = defineCommand({
 
 export const discardDraft = defineCommand({
   name: 'artifacts.discardDraft',
+  retryOnDeadlock: true,
   title: 'Discard draft',
   description:
     'Delete the unpublished versions after the live one and return the artifact to its live version. Refuses when nothing is live, there is no draft, or the draft is waiting for approval.',
@@ -798,6 +802,7 @@ export const discardDraft = defineCommand({
 
 export const requestPublish = defineCommand({
   name: 'artifacts.requestPublish',
+  retryOnDeadlock: true,
   title: 'Submit for review (or publish)',
   description:
     'Submits the latest draft for review under the workspace approval policy; publishes directly only when the policy allows it (policy `none`, or `agent_changes` for a person’s own edits). Check the result with approvals.list or artifacts.get.',
@@ -894,6 +899,7 @@ export const requestPublish = defineCommand({
 
 export const requestPublishBundle = defineCommand({
   name: 'artifacts.requestPublishBundle',
+  retryOnDeadlock: true,
   title: 'Submit several artifacts for one review',
   description:
     'Submits the latest drafts of artifacts that belong together for ONE review, e.g. a note and the recommendation that cites it. References between them are checked as if they were already published; a person approves or rejects them together, and approval publishes them in dependency order in one step (all or nothing). Publishes directly when the approval policy allows it.',
@@ -1438,6 +1444,7 @@ async function bundleMembers(ctx: CommandContext, r: ApprovalRow) {
 
 export const approve = defineCommand({
   name: 'approvals.approve',
+  retryOnDeadlock: true,
   title: 'Approve and publish',
   description:
     'Approve a pending request and publish that version; for a bundle, every request in it, published in dependency order in one step. Only people can approve.',
@@ -1515,6 +1522,7 @@ async function requestingAgent(ctx: CommandContext, r: { requestedByType: string
 
 export const reject = defineCommand({
   name: 'approvals.reject',
+  retryOnDeadlock: true,
   title: 'Reject a change',
   description:
     'Reject a pending request (for a bundle: every request in it). The versions stay in history as rejected; editing an artifact starts a new draft.',

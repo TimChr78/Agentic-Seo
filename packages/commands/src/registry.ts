@@ -117,6 +117,13 @@ export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType
    * appending one for the whole call. A call that throws is still audited by the executor.
    */
   auditsItself?: boolean;
+  /**
+   * Run the handler again when Postgres aborts its transaction as a deadlock victim. Set it only on
+   * a write whose handler does everything inside the transaction: a rollback cannot take back a
+   * call to a key service or a provider, and a second run would repeat it. Without it a deadlock
+   * is answered with a conflict. Reads are always retried.
+   */
+  retryOnDeadlock?: boolean;
   /** What the command acts on, for the audit log (e.g. an artifact id). */
   target?: (input: z.output<I>) => string | undefined;
   /**
@@ -356,107 +363,116 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       const committed: (() => Promise<void>)[] = [];
       let policy: PolicyOutcome | undefined;
       try {
-        const result = await retrySnapshotConflicts(cmd.effect === 'read', () =>
-          db.withWorkspace(
-            principal.workspaceId,
-            async (tx) => {
-              committed.length = 0;
-              policy = undefined;
-              // ADR-0006: every agent write passes the policy engine before the handler runs.
-              if (agent && cmd.effect !== 'read') {
-                // The agent's policy lock comes first, before an impact function locks artifacts:
-                // every write of one agent then takes its locks in the same order.
-                await lockAgentPolicy(tx, principal.workspaceId, agent.id);
-                const impact = cmd.impact
-                  ? await cmd.impact(parsed.data, { principal, tx, services })
-                  : await estimateImpact({
-                      command: cmd.name,
-                      actionClass: actionClassOf(cmd),
-                      input: parsed.data,
-                    });
-                policy = await agentPolicy(tx, services, principal, {
-                  command: cmd.name,
-                  actionClass: impact.actionClass ?? actionClassOf(cmd),
-                  impact,
-                  approvable: cmd.approvable === true,
-                });
-                if (policy.decision === 'deny') throw new PolicyDeniedError(policy);
-              }
-              if (opts.idempotencyKey) {
-                // Serialise retries of one (workspace, key) before the lookup. Two concurrent
-                // requests must not both miss and both run the handler: the second waits here,
-                // then sees the response the first committed.
-                await tx.execute(
-                  sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${principal.workspaceId}:${opts.idempotencyKey}`}, 0))`,
-                );
-                const [hit] = await tx
-                  .select()
-                  .from(schema.idempotencyKeys)
-                  .where(
-                    and(eq(schema.idempotencyKeys.workspaceId, principal.workspaceId), eq(schema.idempotencyKeys.key, opts.idempotencyKey)),
-                  );
-                if (hit) {
-                  if (hit.command !== cmd.name || hit.inputHash !== inputHash)
-                    throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.');
-                  return hit.response as z.output<C['output']>;
+        const inputTarget = target;
+        const result = await retrySnapshotConflicts(
+          cmd.effect === 'read',
+          () =>
+            db.withWorkspace(
+              principal.workspaceId,
+              async (tx) => {
+                committed.length = 0;
+                policy = undefined;
+                // A rolled-back attempt may have named what it created; that no longer exists.
+                target = inputTarget;
+                // ADR-0006: every agent write passes the policy engine before the handler runs.
+                if (agent && cmd.effect !== 'read') {
+                  // The agent's policy lock comes first, before an impact function locks artifacts:
+                  // every write of one agent then takes its locks in the same order.
+                  await lockAgentPolicy(tx, principal.workspaceId, agent.id);
+                  const impact = cmd.impact
+                    ? await cmd.impact(parsed.data, { principal, tx, services })
+                    : await estimateImpact({
+                        command: cmd.name,
+                        actionClass: actionClassOf(cmd),
+                        input: parsed.data,
+                      });
+                  policy = await agentPolicy(tx, services, principal, {
+                    command: cmd.name,
+                    actionClass: impact.actionClass ?? actionClassOf(cmd),
+                    impact,
+                    approvable: cmd.approvable === true,
+                  });
+                  if (policy.decision === 'deny') throw new PolicyDeniedError(policy);
                 }
-              }
-              const undo = createUndoCollector();
-              const out = withInputWarnings(
-                cmd.output.parse(
-                  await cmd.handler(parsed.data, {
-                    principal,
-                    tx,
-                    services,
+                if (opts.idempotencyKey) {
+                  // Serialise retries of one (workspace, key) before the lookup. Two concurrent
+                  // requests must not both miss and both run the handler: the second waits here,
+                  // then sees the response the first committed.
+                  await tx.execute(
+                    sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${principal.workspaceId}:${opts.idempotencyKey}`}, 0))`,
+                  );
+                  const [hit] = await tx
+                    .select()
+                    .from(schema.idempotencyKeys)
+                    .where(
+                      and(
+                        eq(schema.idempotencyKeys.workspaceId, principal.workspaceId),
+                        eq(schema.idempotencyKeys.key, opts.idempotencyKey),
+                      ),
+                    );
+                  if (hit) {
+                    if (hit.command !== cmd.name || hit.inputHash !== inputHash)
+                      throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.');
+                    return hit.response as z.output<C['output']>;
+                  }
+                }
+                const undo = createUndoCollector();
+                const out = withInputWarnings(
+                  cmd.output.parse(
+                    await cmd.handler(parsed.data, {
+                      principal,
+                      tx,
+                      services,
+                      surface: opts.surface,
+                      policy,
+                      undo,
+                      afterCommit: (fn) => committed.push(fn),
+                    }),
+                  ),
+                  unknownMessages,
+                ) as z.output<C['output']>;
+                // The handler ran: let it link the ledger row to what it created, while the policy
+                // decision itself stays the one made before the change.
+                if (agent && policy && cmd.ledgerImpact) {
+                  const extra = cmd.ledgerImpact(out);
+                  if (extra) policy = { ...policy, impact: { ...policy.impact, ...extra } };
+                }
+                if (opts.idempotencyKey)
+                  await tx.insert(schema.idempotencyKeys).values({
+                    workspaceId: principal.workspaceId,
+                    key: opts.idempotencyKey,
+                    command: cmd.name,
+                    inputHash,
+                    response: redact(out, cmd.sensitiveOutput) as object,
+                  });
+                if (cmd.effect !== 'read') target = cmd.auditTarget?.(out) ?? target;
+                if (cmd.effect !== 'read' && !cmd.auditsItself) await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
+                if (agent && policy && services.onAgentAction)
+                  await services.onAgentAction(tx, {
+                    agentId: agent.id,
+                    command: cmd.name,
+                    actionClass: policy.actionClass,
+                    decision: policy.decision,
+                    reasons: policy.reasons,
+                    impact: policy.impact,
+                    ok: true,
+                    error: null,
+                    target: target ?? null,
                     surface: opts.surface,
-                    policy,
-                    undo,
-                    afterCommit: (fn) => committed.push(fn),
-                  }),
-                ),
-                unknownMessages,
-              ) as z.output<C['output']>;
-              // The handler ran: let it link the ledger row to what it created, while the policy
-              // decision itself stays the one made before the change.
-              if (agent && policy && cmd.ledgerImpact) {
-                const extra = cmd.ledgerImpact(out);
-                if (extra) policy = { ...policy, impact: { ...policy.impact, ...extra } };
-              }
-              if (opts.idempotencyKey)
-                await tx.insert(schema.idempotencyKeys).values({
-                  workspaceId: principal.workspaceId,
-                  key: opts.idempotencyKey,
-                  command: cmd.name,
-                  inputHash,
-                  response: redact(out, cmd.sensitiveOutput) as object,
-                });
-              if (cmd.effect !== 'read') target = cmd.auditTarget?.(out) ?? target;
-              if (cmd.effect !== 'read' && !cmd.auditsItself) await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
-              if (agent && policy && services.onAgentAction)
-                await services.onAgentAction(tx, {
-                  agentId: agent.id,
-                  command: cmd.name,
-                  actionClass: policy.actionClass,
-                  decision: policy.decision,
-                  reasons: policy.reasons,
-                  impact: policy.impact,
-                  ok: true,
-                  error: null,
-                  target: target ?? null,
-                  surface: opts.surface,
-                  level: policy.level ?? null,
-                  intent: intentOf(parsed.data),
-                  undo: undo.get(),
-                  mandateId: policy.mandate?.id ?? null,
-                  mandateVersion: policy.mandate?.version ?? null,
-                });
-              return out;
-            },
-            // Reads see one consistent snapshot; writes keep read-committed so their locks see the latest rows.
-            // An idempotent request also runs read-committed: its key lock may wait for another
-            // request, and only a statement snapshot taken after the wait sees the committed key.
-            { snapshot: cmd.effect === 'read' && !opts.idempotencyKey },
-          ),
+                    level: policy.level ?? null,
+                    intent: intentOf(parsed.data),
+                    undo: undo.get(),
+                    mandateId: policy.mandate?.id ?? null,
+                    mandateVersion: policy.mandate?.version ?? null,
+                  });
+                return out;
+              },
+              // Reads see one consistent snapshot; writes keep read-committed so their locks see the latest rows.
+              // An idempotent request also runs read-committed: its key lock may wait for another
+              // request, and only a statement snapshot taken after the wait sees the committed key.
+              { snapshot: cmd.effect === 'read' && !opts.idempotencyKey },
+            ),
+          cmd.effect === 'read' || cmd.retryOnDeadlock === true,
         );
         // An audited read is recorded in its own transaction: the hash chain must be appended under
         // its lock with the latest entries visible, which a snapshot taken earlier would not show.
@@ -654,15 +670,16 @@ function intentOf(input: unknown): string | null {
  * same row after the snapshot began, and the snapshot cannot see the winner. Run the read again
  * in a fresh snapshot, which does: twice at most.
  */
-export async function retrySnapshotConflicts<T>(isRead: boolean, run: () => Promise<T>): Promise<T> {
+export async function retrySnapshotConflicts<T>(isRead: boolean, run: () => Promise<T>, retryDeadlock = isRead): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await run();
     } catch (err) {
-      // A deadlock victim was rolled back whole, so any command can run again. Commands take
-      // their locks in a fixed order; this is for the orders nobody thought of.
+      // A deadlock victim was rolled back whole, so a command that works only inside its
+      // transaction can run again (`retryOnDeadlock`). Commands take their locks in a fixed order;
+      // this is for the orders nobody thought of. Either way the caller gets a conflict, not a 500.
       if (isDeadlock(err)) {
-        if (attempt < 2) continue;
+        if (retryDeadlock && attempt < 2) continue;
         throw new AppError('conflict', 'Another change to the same data was in progress. Nothing was changed; try again.');
       }
       if (!isRead || attempt >= 2 || !isSerializationFailure(err)) throw err;
