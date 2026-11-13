@@ -8,7 +8,8 @@
 # Copy .env.example to .env first: `aseo init` writes one with fresh secrets.
 services:
   postgres:
-    image: postgres:17-alpine
+    # Pinned by digest: a pull never changes the database's patch version behind your back.
+    image: postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065
     restart: unless-stopped
     environment:
       POSTGRES_USER: aseo
@@ -77,7 +78,10 @@ services:
       # will be configuration instead of this volume.
       - appdata:/data
     ports:
-      - "${ASEO_PORT:-3000}:3000"
+      # Loopback only by default: nothing on the network reaches the app until you decide it should.
+      # Put a tunnel or reverse proxy in front (compose.override.example.yaml), or set ASEO_BIND to
+      # another host address.
+      - "${ASEO_BIND:-127.0.0.1}:${ASEO_PORT:-3000}:3000"
 
 volumes:
   pgdata:

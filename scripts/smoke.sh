@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Smoke test of the Docker image as a self-hoster runs it: a fresh Postgres, `aseo migrate`,
 # `aseo bootstrap`, `aseo doctor`, the health endpoints, the admin UI shell, a REST sign-in, an API
-# token and `/v1/whoami`. CI runs it; run it locally with `scripts/smoke.sh` (it creates and removes
-# its own containers, network and volume).
+# token and `/v1/whoami`. CI runs it; run it locally with `scripts/smoke.sh`. Every run has its own
+# id: its Compose project, containers, network, volume and label carry it, and cleanup removes only
+# those, so two runs side by side (or a real install on the same host) never touch each other.
 #
 # Uses `docker compose` when the plugin is installed, and plain `docker run` on a user-defined
 # network otherwise: some hosts -- including the delegate sandboxes -- ship only the Docker CLI.
@@ -10,11 +11,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-LABEL=aseo-smoke=1
+RUN_ID="aseo-smoke-$(openssl rand -hex 4)"
+LABEL="aseo-smoke-run=$RUN_ID"
+NET="$RUN_ID-net"
+PG_CONTAINER="$RUN_ID-postgres"
+APP_CONTAINER="$RUN_ID-app"
+PG_VOLUME="$RUN_ID-pgdata"
 IMAGE="${SMOKE_IMAGE:-aseo-smoke-app}"
-# A port of its own: 3000 is what the app itself publishes, so a self-hoster or a dev server may
-# already hold it. SMOKE_PORT moves it.
-PORT="${SMOKE_PORT:-3300}"
+# A free port chosen for this run, so nothing a self-hoster or a dev server holds is in the way.
+# SMOKE_PORT fixes it.
+PORT="${SMOKE_PORT:-$(node -e "const s=require('node:net').createServer();s.listen(0,()=>{console.log(s.address().port);s.close()})")}"
 # Inside a container (a delegate's sandbox) the Docker daemon publishes on the host, and the host's
 # bridge address is what this script can reach; on a normal host that is loopback.
 in_container() { [ -f /.dockerenv ] || grep -qa docker /proc/1/cgroup 2>/dev/null; }
@@ -39,8 +45,13 @@ AUTH_SECRET=$AUTH_SECRET
 MASTER_KEY=$MASTER_KEY
 PUBLIC_URL=$BASE
 ASEO_PORT=$PORT
+ASEO_BIND=$BIND_IP
 ASEO_BUILD_IMAGE=$IMAGE
 ENV
+
+# The same pinned Postgres the Compose file uses.
+PG_IMAGE=$(sed -n 's/^ *image: *\(postgres:.*\)$/\1/p' docker-compose.yml | head -n 1)
+[ -n "$PG_IMAGE" ]
 
 COMPOSE_MODE=false
 PLAIN_MODE=false
@@ -51,21 +62,23 @@ cleanup() {
     echo "--- last 50 log lines" >&2
     if $COMPOSE_MODE; then
       dc logs --tail 50 app 2>&1 | tail -50 >&2 || true
-    elif docker inspect aseo-smoke-app >/dev/null 2>&1; then
-      docker logs --tail 50 aseo-smoke-app 2>&1 | tail -50 >&2 || true
+    elif docker inspect "$APP_CONTAINER" >/dev/null 2>&1; then
+      docker logs --tail 50 "$APP_CONTAINER" 2>&1 | tail -50 >&2 || true
     fi
   fi
   if $COMPOSE_MODE; then dc down -v --remove-orphans >/dev/null 2>&1 || true; fi
-  # A killed earlier run can leave containers or a network behind: they carry the label.
-  docker ps -aq --filter "label=$LABEL" | xargs -r docker rm -f >/dev/null 2>&1 || true
-  docker network ls -q --filter "label=$LABEL" | xargs -r docker network rm >/dev/null 2>&1 || true
-  if $PLAIN_MODE; then docker volume rm aseo_smoke_pgdata >/dev/null 2>&1 || true; fi
+  # Only what this run created: the label and the names carry its id.
+  if $PLAIN_MODE; then
+    docker ps -aq --filter "label=$LABEL" | xargs -r docker rm -f >/dev/null 2>&1 || true
+    docker network rm "$NET" >/dev/null 2>&1 || true
+    docker volume rm "$PG_VOLUME" >/dev/null 2>&1 || true
+  fi
   rm -f "$ENV_FILE" "$COOKIES"
   exit "$code"
 }
 trap cleanup EXIT
 
-dc() { docker compose --env-file "$ENV_FILE" -p aseo_smoke -f docker-compose.yml -f docker-compose.build.yml "$@"; }
+dc() { docker compose --env-file "$ENV_FILE" -p "$RUN_ID" -f docker-compose.yml -f docker-compose.build.yml "$@"; }
 use_compose() { docker compose version >/dev/null 2>&1; }
 
 # Always build the local image: the release file pulls ghcr.io/timchr78/agentic-seo, and the
@@ -85,27 +98,27 @@ if use_compose; then
 else
   PLAIN_MODE=true
   echo "--- starting with docker run (no Compose plugin)"
-  docker network create --label "$LABEL" aseo-smoke-net >/dev/null
-  docker run -d --name aseo-smoke-postgres --label "$LABEL" --network aseo-smoke-net --network-alias postgres \
+  docker network create --label "$LABEL" "$NET" >/dev/null
+  docker run -d --name "$PG_CONTAINER" --label "$LABEL" --network "$NET" --network-alias postgres \
     -e POSTGRES_USER=aseo -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" -e POSTGRES_DB=aseo \
-    -v aseo_smoke_pgdata:/var/lib/postgresql/data postgres:17-alpine >/dev/null
+    -v "$PG_VOLUME":/var/lib/postgresql/data "$PG_IMAGE" >/dev/null
   for _ in $(seq 60); do
-    if docker exec aseo-smoke-postgres pg_isready -U aseo -d aseo >/dev/null 2>&1; then break; fi
+    if docker exec "$PG_CONTAINER" pg_isready -U aseo -d aseo >/dev/null 2>&1; then break; fi
     sleep 1
   done
-  docker exec aseo-smoke-postgres pg_isready -U aseo -d aseo >/dev/null
+  docker exec "$PG_CONTAINER" pg_isready -U aseo -d aseo >/dev/null
 
   database_url="postgres://aseo:$POSTGRES_PASSWORD@postgres:5432/aseo"
-  docker run --rm --label "$LABEL" --network aseo-smoke-net --env-file "$ENV_FILE" \
+  docker run --rm --label "$LABEL" --network "$NET" --env-file "$ENV_FILE" \
     -e DATABASE_URL="$database_url" -e ROLE=all "$IMAGE" aseo migrate
-  docker run -d --name aseo-smoke-app --label "$LABEL" --network aseo-smoke-net \
+  docker run -d --name "$APP_CONTAINER" --label "$LABEL" --network "$NET" \
     --env-file "$ENV_FILE" -e DATABASE_URL="$database_url" -e ROLE=all -p "$BIND_IP:$PORT:3000" "$IMAGE" >/dev/null
   for _ in $(seq 180); do
     if curl -fsS "$BASE/readyz" >/dev/null 2>&1; then break; fi
     sleep 1
   done
-  docker exec -e ASEO_BOOTSTRAP_PASSWORD="$PASSWORD" aseo-smoke-app aseo bootstrap --email "$EMAIL" --workspace Smoke
-  docker exec aseo-smoke-app aseo doctor
+  docker exec -e ASEO_BOOTSTRAP_PASSWORD="$PASSWORD" "$APP_CONTAINER" aseo bootstrap --email "$EMAIL" --workspace Smoke
+  docker exec "$APP_CONTAINER" aseo doctor
 fi
 
 # The endpoints an operator, a proxy and an MCP client rely on. Each grep is the assertion: set -e

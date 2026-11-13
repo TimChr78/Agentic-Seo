@@ -19,7 +19,10 @@ docker compose exec app aseo bootstrap --email you@example.com --workspace 'My s
 docker compose exec app aseo doctor
 ```
 
-The admin UI and the REST API are then on `http://localhost:3000`. `aseo init` generates
+The admin UI and the REST API are then on `http://localhost:3000`, **on this machine only**: the
+app is published on `127.0.0.1` by default. To reach it from elsewhere, put a tunnel or reverse
+proxy in front (see the override example), or set `ASEO_BIND` in `.env` to a host address
+(`0.0.0.0` means every interface and every network the host is on). `aseo init` generates
 `POSTGRES_PASSWORD`, `APP_DB_PASSWORD`, `AUTH_SECRET` and `MASTER_KEY` and asks for `PUBLIC_URL`.
 `aseo bootstrap` reads the password from `ASEO_BOOTSTRAP_PASSWORD`, a hidden prompt, or stdin.
 
@@ -27,6 +30,18 @@ The admin UI and the REST API are then on `http://localhost:3000`. `aseo init` g
 `docker-compose.build.yml` is an overlay for a source checkout: it builds this tree and tags it
 `agentic-seo:local`. Always pass both `-f` flags when building locally, and neither when the image
 is published.
+
+Naming files with `-f` turns off Compose's automatic reading of `compose.override.yaml`. If you
+have one, name it too, last, in **every** command for a source build (`up`, `exec`, `logs`, `down`),
+or its networks, mounts and port settings are ignored:
+
+```bash
+export COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml:compose.override.yaml
+docker compose up -d --build
+```
+
+`COMPOSE_FILE` (in the shell or in `.env`) saves repeating the flags; leave the override out of the
+list when you do not have one.
 
 By hand, generate the two passwords as **hex** (`openssl rand -hex 32`) and the two keys as base64
 (`openssl rand -base64 32`). Compose substitutes `POSTGRES_PASSWORD` into `DATABASE_URL` verbatim
@@ -36,8 +51,12 @@ trace. If a password must stay as it is, percent-encode the reserved character i
 yourself (`/` as `%2F`) and set that `DATABASE_URL` for the `app` service in `compose.override.yaml`.
 
 `ASEO_VERSION` pins the released image so a restart or pull does not silently change versions;
-`ASEO_PORT` is the published host port (the app still listens on 3000 inside the container). If you
-change `ASEO_PORT`, change `PUBLIC_URL` with it, because the UI and the sign-in origin use it.
+`ASEO_PORT` is the published host port (the app still listens on 3000 inside the container) and
+`ASEO_BIND` the host address it is published on (default `127.0.0.1`). If you change `ASEO_PORT`,
+change `PUBLIC_URL` with it, because the UI and the sign-in origin use it.
+
+`.env.example` leaves `POSTGRES_PASSWORD` and `APP_DB_PASSWORD` empty, and Compose refuses to start
+until both are set.
 
 ## Environment variables
 
@@ -65,7 +84,7 @@ cp compose.override.example.yaml compose.override.yaml
 ```
 
 The example has commented blocks for a tunnel on another Docker network, bind mounts instead of the
-named volumes, proxy settings, a loopback-only port mapping and resource limits. Uncomment the block
+named volumes, proxy settings, publishing beyond loopback and resource limits. Uncomment the block
 you need. Upgrading then means replacing `docker-compose.yml` with the new release's copy and
 bumping `ASEO_VERSION`; your override is untouched.
 
@@ -82,6 +101,9 @@ Both services use `restart: unless-stopped`, so the stack comes back after a hos
 Docker daemon restart. The app waits for Postgres to report healthy, then migrates before it serves
 (`SKIP_MIGRATIONS` stays `false`; Kubernetes runs migrations as a separate job instead).
 
+A container without the `api` role (`ROLE=worker` or `ROLE=scheduler`) has no HTTP listener; its
+healthcheck passes while the process runs.
+
 The image's healthcheck probes `/readyz` (which pings Postgres) every 15 s and ignores the first
 60 s, so a first migration does not count as a failed probe. On a large install an upgrade can take
 longer than that: start it with `docker compose up -d` rather than `docker compose up --wait` when
@@ -95,6 +117,8 @@ git pull                                # while releases are built from a checko
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 docker compose exec app aseo doctor
 ```
+
+With a `compose.override.yaml`, add it as a third `-f` or set `COMPOSE_FILE` as shown above.
 
 The app runs migrations at start-up. Take a backup first (see below). With a release image instead,
 change `ASEO_VERSION` in `.env`, run `docker compose pull` and then `docker compose up -d`.
@@ -111,10 +135,19 @@ Restore into a new stack before serving traffic:
 
 ```bash
 docker compose down
-docker compose up -d postgres
-docker compose exec -T postgres pg_restore -U aseo -d aseo --clean --if-exists < aseo-2026-01-01.dump
+docker compose up -d --wait postgres
+# A dump has no roles. Create the app role first (the name in APP_DB_ROLE, default aseo_app), or the
+# dump's grants fail and the app is later refused by its own tables. The app sets the role's
+# password and login when it starts.
+docker compose exec -T postgres psql -U aseo -d aseo -v ON_ERROR_STOP=1 \
+  -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'aseo_app') THEN CREATE ROLE aseo_app NOLOGIN; END IF; END \$\$"
+docker compose exec -T postgres pg_restore -U aseo -d aseo --clean --if-exists --exit-on-error < aseo-2026-01-01.dump
 docker compose up -d
+docker compose exec app aseo doctor
 ```
+
+`--exit-on-error` stops at the first problem instead of leaving a half-restored database that
+looks complete.
 
 A dump holds the encrypted secrets, so keep `MASTER_KEY` (or the OpenBao/AWS KMS key) with your
 backups: without it the stored provider credentials cannot be read. `appdata` needs a backup of its
@@ -126,5 +159,6 @@ own once storage lands; today it is empty.
 Postgres and the app, runs `aseo migrate`, `aseo bootstrap` and `aseo doctor`, then checks
 `/healthz`, `/readyz`, `/openapi.json` and the UI, signs in over REST, creates an API token and
 calls `/v1/whoami`. It uses `docker compose` when the plugin is installed and plain `docker run` on
-a user-defined network otherwise, and it removes everything it created. CI runs it on every pull
+a user-defined network otherwise. Each run uses its own id for the project, containers, network and
+volume and a free port, and removes only what it created. CI runs it on every pull
 request.

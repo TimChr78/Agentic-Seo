@@ -1,6 +1,7 @@
 # One image for every role (ADR-0002). Select roles with ROLE=api,worker,scheduler (default: all).
 # The renderer sidecar of overview.md §2 is a separate image in Phase 2 and is not built here.
-FROM node:24-slim AS base
+# Pinned by digest so a rebuild of one commit gives the same runtime; bump it deliberately.
+FROM node:24-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS base
 ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH NODE_ENV=production COREPACK_HOME=/corepack
 WORKDIR /app
 # pnpm (the version pinned in package.json) is part of the image, so a container never downloads it.
@@ -51,7 +52,10 @@ RUN pnpm_bin=$(find /corepack/v1/pnpm -maxdepth 3 -name pnpm.cjs | head -n 1) \
 RUN mkdir -p /data && chown node:node /data
 USER node
 EXPOSE 3000
+# Only the api role listens on HTTP (apps/server/src/main.ts). A worker-only or scheduler-only
+# container has no /readyz, so it is healthy while its process runs: Docker's restart policy
+# covers a process that exits.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=60s \
-  CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/readyz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+  CMD ["node", "-e", "const roles = (process.env.ROLE || 'all').split(',').map((r) => r.trim()); if (!roles.includes('all') && !roles.includes('api')) process.exit(0); fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/readyz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
 # `docker run … aseo <cmd>` works because `aseo` is on PATH; the default command serves all roles.
 CMD ["pnpm", "--filter", "@agentic-seo/server", "start"]
