@@ -117,6 +117,26 @@ export async function activeMandate(tx: Tx, agentId: string, now = new Date()): 
   return (await activeMandates(tx, [agentId], now)).get(agentId) ?? null;
 }
 
+/**
+ * Serialises mandate publishing for these agents until the transaction ends, in a stable order.
+ * A command that publishes several mandates takes all of them here first, so two such commands
+ * cannot each hold one and wait for the other.
+ */
+export async function lockMandateAgents(tx: Tx, agentIds: string[]) {
+  for (const agentId of [...new Set(agentIds)].sort())
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtextextended('agent-mandate:' || current_setting('app.workspace_id') || ':' || ${agentId}, 0))`,
+    );
+}
+
+/** The agents named by the mandates among these artifact contents. */
+export function mandateAgentsOf(items: { type: string; content: unknown }[]): string[] {
+  return items
+    .filter((item) => item.type === 'agent_mandate')
+    .map((item) => (item.content as { agent?: unknown } | null)?.agent)
+    .filter((agent): agent is string => typeof agent === 'string');
+}
+
 // Before a mandate is published: the agent exists, the levels fit the workspace ceilings, it does
 // not overlap another active mandate for the same agent, and it ends within a year.
 publishValidators.set('agent_mandate', async (content, tx, artifact) => {
@@ -124,9 +144,7 @@ publishValidators.set('agent_mandate', async (content, tx, artifact) => {
   const problems: string[] = [];
   // One mandate publish per agent at a time: two different mandate artifacts lock different rows,
   // so without this both would read "no active mandate" and both go live.
-  await tx.execute(
-    sql`SELECT pg_advisory_xact_lock(hashtextextended('agent-mandate:' || current_setting('app.workspace_id') || ':' || ${m.agent}, 0))`,
-  );
+  await lockMandateAgents(tx, [m.agent]);
   const [agent] = await tx.select({ status: schema.agents.status }).from(schema.agents).where(eq(schema.agents.id, m.agent));
   if (!agent) problems.push(`agent ${m.agent} does not exist`);
   else if (agent.status === 'revoked') problems.push(`agent ${m.agent} is revoked`);

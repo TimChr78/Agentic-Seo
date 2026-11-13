@@ -3,8 +3,9 @@ import { AppError, canonicalJson, hashValue } from '@agentic-seo/core';
 import { schema } from '@agentic-seo/db';
 import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
-import { author, lockArtifacts, lockSingleton, requestPublish, updateDraft, validateContent } from './commands';
+import { author, lockArtifactIds, lockArtifacts, lockSingleton, requestPublish, updateDraft, validateContent } from './commands';
 import { diffJson } from './diff';
+import { lockMandateAgents, mandateAgentsOf } from './mandates';
 import { type ArtifactType, artifactTypeEnum, artifactTypes } from './types';
 
 // Config as code: a workspace's artifacts as one JSON bundle, to keep in git, review as diffs and
@@ -358,9 +359,10 @@ export const importConfig = defineCommand({
         );
       seenSingletons.set(key, item);
     }
-    // Locks are taken up front and in a stable order (singletons by key, then artifacts by id), so
-    // two imports of the same artifacts in different orders wait for each other instead of
-    // deadlocking. The workspace is read only after the singleton locks: a singleton another
+    // Locks are taken up front and in a stable order (singletons by key, the bundle's ids, the
+    // artifact rows by id, then the mandates' agents), so two imports of the same artifacts in
+    // different orders wait for each other instead of deadlocking. The id locks cover artifacts
+    // that do not exist yet, which a row lock cannot. The workspace is read only after the singleton locks: a singleton another
     // request created while this one waited is then updated, not inserted a second time.
     if (!input.dryRun) {
       for (const key of [...seenSingletons.keys()].sort()) {
@@ -382,7 +384,12 @@ export const importConfig = defineCommand({
             .filter((row) => seenSingletons.has(singletonKey(row.type, row.siteId)))
             .map((row) => row.id)
         : [];
+      await lockArtifactIds(
+        ctx,
+        input.bundle.artifacts.map((item) => item.id),
+      );
       await lockArtifacts(ctx, [...new Set([...input.bundle.artifacts.map((item) => item.id), ...singletonIds])]);
+      if (input.publish) await lockMandateAgents(ctx.tx, mandateAgentsOf(input.bundle.artifacts));
     }
     const existing = await ctx.tx
       .select({ a: schema.artifacts, hash: schema.artifactVersions.contentHash })

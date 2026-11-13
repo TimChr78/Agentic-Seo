@@ -364,6 +364,9 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
               policy = undefined;
               // ADR-0006: every agent write passes the policy engine before the handler runs.
               if (agent && cmd.effect !== 'read') {
+                // The agent's policy lock comes first, before an impact function locks artifacts:
+                // every write of one agent then takes its locks in the same order.
+                await lockAgentPolicy(tx, principal.workspaceId, agent.id);
                 const impact = cmd.impact
                   ? await cmd.impact(parsed.data, { principal, tx, services })
                   : await estimateImpact({
@@ -610,7 +613,7 @@ export async function agentPolicy(
 ): Promise<PolicyOutcome> {
   const agent = principal.agent;
   if (!agent) throw new Error('agentPolicy needs an agent principal');
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${principal.workspaceId}:${agent.id}`}, 0))`);
+  await lockAgentPolicy(tx, principal.workspaceId, agent.id);
   const [ws] = await tx.select({ settings: schema.workspaces.settings }).from(schema.workspaces);
   const mandate = req.actionClass === 'read' ? null : ((await services.activeMandate?.(tx, agent.id)) ?? null);
   const counters = (await services.agentCounters?.(tx, agent.id)) ?? { changes: 0 };
@@ -632,6 +635,11 @@ export async function agentPolicy(
   return policy;
 }
 
+/** One policy decision per agent at a time, until the transaction ends. Taking it again in the same transaction is free. */
+async function lockAgentPolicy(tx: Tx, workspaceId: string, agentId: string) {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${workspaceId}:${agentId}`}, 0))`);
+}
+
 /** What the agent said it is doing: an explicit intent, else the reviewer note or reason most commands take. */
 function intentOf(input: unknown): string | null {
   if (!input || typeof input !== 'object') return null;
@@ -646,14 +654,27 @@ function intentOf(input: unknown): string | null {
  * same row after the snapshot began, and the snapshot cannot see the winner. Run the read again
  * in a fresh snapshot, which does: twice at most.
  */
-async function retrySnapshotConflicts<T>(isRead: boolean, run: () => Promise<T>): Promise<T> {
+export async function retrySnapshotConflicts<T>(isRead: boolean, run: () => Promise<T>): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await run();
     } catch (err) {
+      // A deadlock victim was rolled back whole, so any command can run again. Commands take
+      // their locks in a fixed order; this is for the orders nobody thought of.
+      if (isDeadlock(err)) {
+        if (attempt < 2) continue;
+        throw new AppError('conflict', 'Another change to the same data was in progress. Nothing was changed; try again.');
+      }
       if (!isRead || attempt >= 2 || !isSerializationFailure(err)) throw err;
     }
   }
+}
+
+/** Postgres SQLSTATE 40P01 (this transaction was chosen as the deadlock victim), directly or as a cause. */
+export function isDeadlock(err: unknown): boolean {
+  for (let e = err as { code?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++)
+    if (e.code === '40P01') return true;
+  return false;
 }
 
 /** Postgres SQLSTATE 40001, directly or as the cause of a Drizzle query error. */

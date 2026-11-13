@@ -3,7 +3,7 @@ import { AppError } from '@agentic-seo/core';
 import { type AgentUndo, schema, type Tx } from '@agentic-seo/db';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { publishArtifactVersion, unpublishArtifactVersion } from './commands';
+import { lockArtifacts, publishArtifactVersion, unpublishArtifactVersion } from './commands';
 
 // Reversing an agent's publish (ADR-0006 §5.4). The previous version goes live through the same
 // publish checks and listeners as any publish; a first publish is taken out of service again and
@@ -40,6 +40,12 @@ registerUndoHandler(async (ctx, undo) => {
   return `Republished ${undo.artifactId} v${undo.previousVersion}.`;
 });
 
+/** Every artifact a reversal touches, through nested groups. */
+function undoArtifactIds(undo: AgentUndo): string[] {
+  if (undo.kind === 'group') return [...new Set(undo.items.flatMap(undoArtifactIds))];
+  return undo.kind === 'republish' ? [undo.artifactId] : [];
+}
+
 /**
  * Reverses one agent action in the caller's transaction, returns what happened and marks the
  * ledger row undone. `by` names the person who did it. The command lives here because the
@@ -63,6 +69,9 @@ export async function undoAgentAction(tx: Tx, ctx: CommandContext, actionId: num
   const undo = action.undo as AgentUndo | null;
   if (!undo) throw new AppError('conflict', `${action.command} changed nothing that can be undone.`);
   if (undo.kind === 'none') throw new AppError('conflict', undo.reason);
+  // A group is undone in its recorded order, but its artifacts are locked in id order first, like
+  // every other command that touches several.
+  await lockArtifacts({ ...ctx, tx }, undoArtifactIds(undo));
   const steps = await runUndo({ ...ctx, tx }, undo);
   const result = [steps.join(' '), note ? `Note: ${note}` : ''].filter(Boolean).join(' ').slice(0, 2000);
   const undoneAt = new Date();

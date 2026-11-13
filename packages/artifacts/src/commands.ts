@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { diffJson } from './diff';
 import { noteWithPolicy, publishClass, publishImpact } from './impact';
 import { ARTIFACT_LIST_MAX_LIMIT, decodeArtifactListCursor, encodeArtifactListCursor } from './list';
+import { lockMandateAgents, mandateAgentsOf } from './mandates';
 import {
   ARTIFACT_TYPES,
   type ArtifactType,
@@ -205,6 +206,16 @@ export async function lockArtifacts(ctx: CommandContext, ids: string[]) {
     .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), inArray(schema.artifacts.id, ids)))
     .orderBy(asc(schema.artifacts.id))
     .for('update');
+}
+
+/**
+ * Serialises work on these artifact ids (in id order) whether or not their rows exist yet. A row
+ * lock cannot hold an id that is about to be created, so a command that creates artifacts under
+ * given ids takes this first.
+ */
+export async function lockArtifactIds(ctx: CommandContext, ids: string[]) {
+  for (const id of [...new Set(ids)].sort())
+    await ctx.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`artifact-id:${ctx.principal.workspaceId}:${id}`}, 0))`);
 }
 
 /** Serialises creation of a workspace's singleton artifact (one per type and site) until the transaction ends. */
@@ -953,6 +964,8 @@ export const requestPublishBundle = defineCommand({
         previousVersion: a.publishedVersion,
       });
     }
+    // Every mandate lock the publish will need, in a stable order, before the first check takes one.
+    await lockMandateAgents(ctx.tx, mandateAgentsOf(members));
     const ordered = dependencyOrder(members);
     await checkBundlePublishable(ctx, ordered);
     const [w] = await ctx.tx
@@ -1414,6 +1427,12 @@ async function bundleMembers(ctx: CommandContext, r: ApprovalRow) {
     .where(and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), eq(schema.approvalRequests.bundleId, r.bundleId)));
   const decided = rows.find((x) => x.r.status !== 'pending');
   if (decided) throw new AppError('conflict', `Part of this bundle (${decided.r.id}) was already ${decided.r.status}.`);
+  // Every mandate lock the publish will need, in a stable order (see requestPublishBundle).
+  const mandatePrefix = `${artifactTypes.agent_mandate.prefix}_`;
+  await lockMandateAgents(
+    ctx.tx,
+    mandateAgentsOf(rows.map((x) => ({ type: x.r.artifactId.startsWith(mandatePrefix) ? 'agent_mandate' : '', content: x.content }))),
+  );
   return dependencyOrder(rows.map((x) => ({ id: x.r.artifactId, content: x.content, row: x.r }))).map((x) => x.row);
 }
 

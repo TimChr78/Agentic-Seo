@@ -11,19 +11,49 @@ let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
 let editor: User;
 
-/** Resolves once `n` sessions of this test's database are waiting for a lock. */
+/** The backend holding the lock in `holding`, so `blocked` counts only sessions waiting for it. */
+let holderPid = 0;
+
+/**
+ * Resolves once `n` sessions are waiting for a lock the holding connection has, directly or queued
+ * behind another session that is (a second request for one row waits in line behind the first).
+ */
 const blocked = (n: number) =>
   eventually(
     async () =>
       Number(
         (
           await t.srv.db.admin.query<{ n: string }>(
-            `SELECT count(*) AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+            `WITH waiting AS (
+               SELECT pid, pg_blocking_pids(pid) AS behind FROM pg_stat_activity
+                WHERE datname = current_database() AND wait_event_type = 'Lock'
+             ), direct AS (SELECT pid FROM waiting WHERE $1::int = ANY (behind))
+             SELECT count(*) AS n FROM waiting
+              WHERE $1::int = ANY (behind) OR behind && ARRAY(SELECT pid FROM direct)`,
+            [holderPid],
           )
         ).rows[0]?.n,
       ),
     (waiting) => waiting >= n,
   ).then((waiting) => expect(waiting).toBeGreaterThanOrEqual(n));
+
+/** Whether a third session could take this lock right now (it is rolled back at once). */
+async function free(sql: string, params: unknown[]): Promise<boolean> {
+  const client = await t.srv.db.admin.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ free?: boolean }>(sql, params);
+    return rows[0]?.free ?? true;
+  } catch (err) {
+    if ((err as { code?: string }).code === '55P03') return false;
+    throw err;
+  } finally {
+    await client.query('ROLLBACK').catch(() => {});
+    client.release();
+  }
+}
+const rowFree = (ws: string, id: string) => free('SELECT 1 FROM artifacts WHERE workspace_id = $1 AND id = $2 FOR UPDATE NOWAIT', [ws, id]);
+const advisoryFree = (key: string) => free('SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0)) AS free', [key]);
 
 /**
  * Runs `during` while a second connection holds whatever `take` locked, commits, and only then
@@ -37,6 +67,7 @@ async function holding<T>(
   let started: { pending: Promise<T> };
   try {
     await client.query('BEGIN');
+    holderPid = Number((await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]?.pid);
     await take((sql, params) => client.query(sql, params));
     started = await during();
     await client.query('COMMIT');
@@ -271,5 +302,122 @@ describe('artifact concurrency', () => {
       [ws],
     );
     expect(rows).toHaveLength(1);
+  });
+
+  it('two imports creating the same new artifacts in opposite orders both finish', async () => {
+    const ws = await t.workspaceWith([[owner, 'owner']], 'none');
+    const api = t.api(owner, ws);
+    const [a, b] = [`not_${'1'.repeat(32)}`, `not_${'2'.repeat(32)}`];
+    const entry = (id: string) => ({ id, type: 'note' as const, name: id.slice(0, 8), content: { title: 'New', body: 'x' } });
+    // Neither artifact exists, so there is no row to lock: the imports wait on the ids themselves.
+    const settled = await holding(
+      (q) => q(advisory, [`artifact-id:${ws}:${a}`]).then(() => {}),
+      async () => {
+        const calls = Promise.allSettled([
+          api.call('config.import', { bundle: bundleOf([entry(a), entry(b)]), dryRun: false }),
+          api.call('config.import', { bundle: bundleOf([entry(b), entry(a)]), dryRun: false }),
+        ]);
+        await blocked(2);
+        return { pending: calls };
+      },
+    );
+    expect(settled.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled']);
+  });
+
+  const agentOf = async (api: ReturnType<typeof t.api>, name: string, scopes: string[]) => {
+    const token = (await api.call('apiTokens.create', { name, scopes: scopes as never })).token;
+    const call = async (command: string, body: unknown = {}) => {
+      const res = await fetch(`${t.base}/v1/${command}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, body: (await res.json()) as any };
+    };
+    return { call, id: (await call('whoami')).body.agent.id as string };
+  };
+
+  it('an agent’s publish waits for its policy lock before it locks the artifact', async () => {
+    const ws = await t.workspaceWith([[owner, 'owner']], 'none');
+    const api = t.api(owner, ws);
+    const agent = await agentOf(api, 'Ordered agent', ['artifacts:read', 'artifacts:write', 'artifacts:publish']);
+    const note = (await agent.call('artifacts.create', { type: 'note', name: 'Mine', content: { title: 'a', body: 'b' } })).body;
+    const settled = await holding(
+      (q) => q(advisory, [`agent-policy:${ws}:${agent.id}`]).then(() => {}),
+      async () => {
+        const calls = Promise.all([
+          agent.call('artifacts.requestPublish', { artifactId: note.artifactId, note: 'publish' }),
+          agent.call('artifacts.updateDraft', { artifactId: note.artifactId, content: { title: 'a', body: 'c' } }),
+        ]);
+        await blocked(2);
+        // Holding the artifact here while the edit holds the policy lock is the deadlock.
+        expect(await rowFree(ws, note.artifactId)).toBe(true);
+        return { pending: calls };
+      },
+    );
+    for (const r of settled) expect(r.status).toBeLessThan(500);
+  });
+
+  it('imports publishing mandates for the same agents take the mandate locks in one order', async () => {
+    const ws = await t.workspaceWith([[owner, 'owner']], 'none');
+    const api = t.api(owner, ws);
+    const agents = [
+      (await agentOf(api, 'Agent one', ['artifacts:read'])).id,
+      (await agentOf(api, 'Agent two', ['artifacts:read'])).id,
+    ].sort();
+    const mandate = (c: string, agent: string) => ({
+      id: `mnd_${c.repeat(32)}`,
+      type: 'agent_mandate' as const,
+      name: `Mandate ${c}`,
+      content: { agent, purpose: 'Test.', expires: new Date(Date.now() + 30 * 86_400_000).toISOString() },
+    });
+    const [first, second] = agents as [string, string];
+    const settled = await holding(
+      (q) => q(advisory, [`agent-mandate:${ws}:${first}`]).then(() => {}),
+      async () => {
+        const calls = Promise.allSettled([
+          api.call('config.import', { bundle: bundleOf([mandate('1', first), mandate('2', second)]), dryRun: false, publish: true }),
+          api.call('config.import', { bundle: bundleOf([mandate('3', second), mandate('4', first)]), dryRun: false, publish: true }),
+        ]);
+        await blocked(2);
+        // Neither import went ahead and took the second agent's lock out of order.
+        expect(await advisoryFree(`agent-mandate:${ws}:${second}`)).toBe(true);
+        return { pending: calls };
+      },
+    );
+    expect(settled.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled']);
+  });
+
+  it('undoing a group locks its artifacts in id order, whatever order it was recorded in', async () => {
+    const ws = await t.workspaceWith([[owner, 'owner']], 'none');
+    const api = t.api(owner, ws);
+    const agent = await agentOf(api, 'Undone agent', ['artifacts:read']);
+    const twice = async (name: string) => {
+      const { artifactId } = await api.call('artifacts.create', { type: 'note', name, content: { title: name, body: 'v1' } });
+      await api.call('artifacts.requestPublish', { artifactId, note: 'v1' });
+      await api.call('artifacts.updateDraft', { artifactId, content: { title: name, body: 'v2' } });
+      await api.call('artifacts.requestPublish', { artifactId, note: 'v2' });
+      return artifactId;
+    };
+    const [a, b] = [await twice('One'), await twice('Two')].sort() as [string, string];
+    const step = (artifactId: string) => ({ kind: 'republish', artifactId, previousVersion: 1, publishedVersion: 2 });
+    // The ledger entry of a bundle the agent published as [b, a].
+    const { rows } = await t.srv.db.admin.query<{ id: string }>(
+      `INSERT INTO agent_actions (workspace_id, agent_id, command, action_class, decision, ok, surface, undo)
+       VALUES ($1, $2, 'artifacts.requestPublishBundle', 'draft', 'allow', true, 'rest', $3::jsonb) RETURNING id`,
+      [ws, agent.id, JSON.stringify({ kind: 'group', items: [step(b), step(a)] })],
+    );
+    const undone = await holding(
+      (q) => q('SELECT 1 FROM artifacts WHERE workspace_id = $1 AND id = $2 FOR UPDATE', [ws, a]).then(() => {}),
+      async () => {
+        const call = api.call('agents.undo', { actionId: Number(rows[0]?.id) });
+        call.catch(() => {});
+        await blocked(1);
+        // It waits for `a` without having taken `b` first.
+        expect(await rowFree(ws, b)).toBe(true);
+        return { pending: call };
+      },
+    );
+    expect(undone.steps).toHaveLength(2);
   });
 });
