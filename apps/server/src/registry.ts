@@ -1,3 +1,4 @@
+import { artifactCommands, configCommands, learningsCommands, undoAgent } from '@agentic-seo/artifacts';
 import { agentCommands, memberCommands, tokenCommands } from '@agentic-seo/auth';
 import type { AnyCommand } from '@agentic-seo/commands';
 import { secretCommands } from '@agentic-seo/secrets';
@@ -14,6 +15,10 @@ export const commands = [
   ...memberCommands,
   ...tokenCommands,
   ...agentCommands,
+  ...artifactCommands,
+  ...learningsCommands,
+  ...configCommands,
+  undoAgent,
   { ...setSecret, actionClass: 'settings' as const },
   listSecrets,
   { ...deleteSecret, actionClass: 'settings' as const },

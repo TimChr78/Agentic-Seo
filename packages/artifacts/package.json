@@ -1,0 +1,19 @@
+{
+  "name": "@agentic-seo/artifacts",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@agentic-seo/commands": "workspace:*",
+    "@agentic-seo/core": "workspace:*",
+    "@agentic-seo/db": "workspace:*",
+    "drizzle-orm": "0.45.4",
+    "zod": "4.6.7"
+  }
+}

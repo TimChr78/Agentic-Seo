@@ -41,6 +41,8 @@ export async function recordAgentAction(tx: Tx, entry: AgentActionEntry): Promis
     level: entry.level,
     intent: entry.intent,
     undo: entry.undo,
+    mandateId: entry.mandateId ?? null,
+    mandateVersion: entry.mandateVersion ?? null,
   });
 }
 

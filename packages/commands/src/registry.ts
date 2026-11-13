@@ -1,7 +1,7 @@
 import { AppError, canonicalJson, hashValue, sha256 } from '@agentic-seo/core';
 import { type Db, schema, type Tx } from '@agentic-seo/db';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import {
   type ActionClass,
@@ -11,6 +11,7 @@ import {
   estimateImpact,
   type Impact,
   type MandateView,
+  type PolicyInput,
   type PolicyOutcome,
 } from './policy';
 import type { Permission, Principal } from './principal';
@@ -39,6 +40,9 @@ export interface AgentActionEntry {
   level: number | null;
   intent: string | null;
   undo: AgentUndo | null;
+  /** The mandate version that decided, for the ledger. */
+  mandateId?: string | null;
+  mandateVersion?: number | null;
 }
 
 /** Extension point for dependencies commands need (key providers, clocks…). Packages augment it. */
@@ -47,11 +51,13 @@ export interface Services {
   serverVersion: string;
   /** Whether unknown input keys are rejected rather than warned about. */
   strictInputs: boolean;
-  /** The agent's active mandate (ADR-0006); registered by the server once mandates land (Phase 7). */
+  /** Public URL of the server, so command output can carry admin deep links. */
+  publicUrl?: string;
+  /** The agent's active mandate; registered by the server through the artifacts package. */
   activeMandate?: (tx: Tx, agentId: string) => Promise<{ view: MandateView; outsideHours: string | null } | null>;
   /** What an agent did in the last 24 hours, from the ledger; wired by the server. */
   agentCounters?: (tx: Tx, agentId: string) => Promise<AgentCounters>;
-  /** Records one agent write in the action ledger; wired by the server once agents land (task C). */
+  /** Records one agent write in the action ledger; wired by the server. */
   onAgentAction?: (tx: Tx, entry: AgentActionEntry) => Promise<void>;
 }
 
@@ -111,6 +117,13 @@ export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType
    * appending one for the whole call. A call that throws is still audited by the executor.
    */
   auditsItself?: boolean;
+  /**
+   * Run the handler again when Postgres aborts its transaction as a deadlock victim. Set it only on
+   * a write whose handler does everything inside the transaction: a rollback cannot take back a
+   * call to a key service or a provider, and a second run would repeat it. Without it a deadlock
+   * is answered with a conflict. Reads are always retried.
+   */
+  retryOnDeadlock?: boolean;
   /** What the command acts on, for the audit log (e.g. an artifact id). */
   target?: (input: z.output<I>) => string | undefined;
   /**
@@ -350,102 +363,116 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       const committed: (() => Promise<void>)[] = [];
       let policy: PolicyOutcome | undefined;
       try {
-        const result = await retrySnapshotConflicts(cmd.effect === 'read', () =>
-          db.withWorkspace(
-            principal.workspaceId,
-            async (tx) => {
-              committed.length = 0;
-              policy = undefined;
-              // ADR-0006: every agent write passes the policy engine before the handler runs.
-              if (agent && cmd.effect !== 'read') {
-                const impact = cmd.impact
-                  ? await cmd.impact(parsed.data, { principal, tx, services })
-                  : await estimateImpact({
-                      command: cmd.name,
-                      actionClass: actionClassOf(cmd),
-                      input: parsed.data,
-                    });
-                policy = await agentPolicy(tx, services, principal, {
-                  command: cmd.name,
-                  actionClass: impact.actionClass ?? actionClassOf(cmd),
-                  impact,
-                  approvable: cmd.approvable === true,
-                });
-                if (policy.decision === 'deny') throw new PolicyDeniedError(policy);
-              }
-              if (opts.idempotencyKey) {
-                // Serialise retries of one (workspace, key) before the lookup. Two concurrent
-                // requests must not both miss and both run the handler: the second waits here,
-                // then sees the response the first committed.
-                await tx.execute(
-                  sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${principal.workspaceId}:${opts.idempotencyKey}`}, 0))`,
-                );
-                const [hit] = await tx
-                  .select()
-                  .from(schema.idempotencyKeys)
-                  .where(
-                    and(eq(schema.idempotencyKeys.workspaceId, principal.workspaceId), eq(schema.idempotencyKeys.key, opts.idempotencyKey)),
-                  );
-                if (hit) {
-                  if (hit.command !== cmd.name || hit.inputHash !== inputHash)
-                    throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.');
-                  return hit.response as z.output<C['output']>;
+        const inputTarget = target;
+        const result = await retrySnapshotConflicts(
+          cmd.effect === 'read',
+          () =>
+            db.withWorkspace(
+              principal.workspaceId,
+              async (tx) => {
+                committed.length = 0;
+                policy = undefined;
+                // A rolled-back attempt may have named what it created; that no longer exists.
+                target = inputTarget;
+                // ADR-0006: every agent write passes the policy engine before the handler runs.
+                if (agent && cmd.effect !== 'read') {
+                  // The agent's policy lock comes first, before an impact function locks artifacts:
+                  // every write of one agent then takes its locks in the same order.
+                  await lockAgentPolicy(tx, principal.workspaceId, agent.id);
+                  const impact = cmd.impact
+                    ? await cmd.impact(parsed.data, { principal, tx, services })
+                    : await estimateImpact({
+                        command: cmd.name,
+                        actionClass: actionClassOf(cmd),
+                        input: parsed.data,
+                      });
+                  policy = await agentPolicy(tx, services, principal, {
+                    command: cmd.name,
+                    actionClass: impact.actionClass ?? actionClassOf(cmd),
+                    impact,
+                    approvable: cmd.approvable === true,
+                  });
+                  if (policy.decision === 'deny') throw new PolicyDeniedError(policy);
                 }
-              }
-              const undo = createUndoCollector();
-              const out = withInputWarnings(
-                cmd.output.parse(
-                  await cmd.handler(parsed.data, {
-                    principal,
-                    tx,
-                    services,
+                if (opts.idempotencyKey) {
+                  // Serialise retries of one (workspace, key) before the lookup. Two concurrent
+                  // requests must not both miss and both run the handler: the second waits here,
+                  // then sees the response the first committed.
+                  await tx.execute(
+                    sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${principal.workspaceId}:${opts.idempotencyKey}`}, 0))`,
+                  );
+                  const [hit] = await tx
+                    .select()
+                    .from(schema.idempotencyKeys)
+                    .where(
+                      and(
+                        eq(schema.idempotencyKeys.workspaceId, principal.workspaceId),
+                        eq(schema.idempotencyKeys.key, opts.idempotencyKey),
+                      ),
+                    );
+                  if (hit) {
+                    if (hit.command !== cmd.name || hit.inputHash !== inputHash)
+                      throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.');
+                    return hit.response as z.output<C['output']>;
+                  }
+                }
+                const undo = createUndoCollector();
+                const out = withInputWarnings(
+                  cmd.output.parse(
+                    await cmd.handler(parsed.data, {
+                      principal,
+                      tx,
+                      services,
+                      surface: opts.surface,
+                      policy,
+                      undo,
+                      afterCommit: (fn) => committed.push(fn),
+                    }),
+                  ),
+                  unknownMessages,
+                ) as z.output<C['output']>;
+                // The handler ran: let it link the ledger row to what it created, while the policy
+                // decision itself stays the one made before the change.
+                if (agent && policy && cmd.ledgerImpact) {
+                  const extra = cmd.ledgerImpact(out);
+                  if (extra) policy = { ...policy, impact: { ...policy.impact, ...extra } };
+                }
+                if (opts.idempotencyKey)
+                  await tx.insert(schema.idempotencyKeys).values({
+                    workspaceId: principal.workspaceId,
+                    key: opts.idempotencyKey,
+                    command: cmd.name,
+                    inputHash,
+                    response: redact(out, cmd.sensitiveOutput) as object,
+                  });
+                if (cmd.effect !== 'read') target = cmd.auditTarget?.(out) ?? target;
+                if (cmd.effect !== 'read' && !cmd.auditsItself) await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
+                if (agent && policy && services.onAgentAction)
+                  await services.onAgentAction(tx, {
+                    agentId: agent.id,
+                    command: cmd.name,
+                    actionClass: policy.actionClass,
+                    decision: policy.decision,
+                    reasons: policy.reasons,
+                    impact: policy.impact,
+                    ok: true,
+                    error: null,
+                    target: target ?? null,
                     surface: opts.surface,
-                    policy,
-                    undo,
-                    afterCommit: (fn) => committed.push(fn),
-                  }),
-                ),
-                unknownMessages,
-              ) as z.output<C['output']>;
-              // The handler ran: let it link the ledger row to what it created, while the policy
-              // decision itself stays the one made before the change.
-              if (agent && policy && cmd.ledgerImpact) {
-                const extra = cmd.ledgerImpact(out);
-                if (extra) policy = { ...policy, impact: { ...policy.impact, ...extra } };
-              }
-              if (opts.idempotencyKey)
-                await tx.insert(schema.idempotencyKeys).values({
-                  workspaceId: principal.workspaceId,
-                  key: opts.idempotencyKey,
-                  command: cmd.name,
-                  inputHash,
-                  response: redact(out, cmd.sensitiveOutput) as object,
-                });
-              if (cmd.effect !== 'read') target = cmd.auditTarget?.(out) ?? target;
-              if (cmd.effect !== 'read' && !cmd.auditsItself) await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
-              if (agent && policy && services.onAgentAction)
-                await services.onAgentAction(tx, {
-                  agentId: agent.id,
-                  command: cmd.name,
-                  actionClass: policy.actionClass,
-                  decision: policy.decision,
-                  reasons: policy.reasons,
-                  impact: policy.impact,
-                  ok: true,
-                  error: null,
-                  target: target ?? null,
-                  surface: opts.surface,
-                  level: policy.level ?? null,
-                  intent: intentOf(parsed.data),
-                  undo: undo.get(),
-                });
-              return out;
-            },
-            // Reads see one consistent snapshot; writes keep read-committed so their locks see the latest rows.
-            // An idempotent request also runs read-committed: its key lock may wait for another
-            // request, and only a statement snapshot taken after the wait sees the committed key.
-            { snapshot: cmd.effect === 'read' && !opts.idempotencyKey },
-          ),
+                    level: policy.level ?? null,
+                    intent: intentOf(parsed.data),
+                    undo: undo.get(),
+                    mandateId: policy.mandate?.id ?? null,
+                    mandateVersion: policy.mandate?.version ?? null,
+                  });
+                return out;
+              },
+              // Reads see one consistent snapshot; writes keep read-committed so their locks see the latest rows.
+              // An idempotent request also runs read-committed: its key lock may wait for another
+              // request, and only a statement snapshot taken after the wait sees the committed key.
+              { snapshot: cmd.effect === 'read' && !opts.idempotencyKey },
+            ),
+          cmd.effect === 'read' || cmd.retryOnDeadlock === true,
         );
         // An audited read is recorded in its own transaction: the hash chain must be appended under
         // its lock with the latest entries visible, which a snapshot taken earlier would not show.
@@ -474,6 +501,8 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                 level: policy!.level ?? null,
                 intent: intentOf(parsed.data),
                 undo: null,
+                mandateId: policy!.mandate?.id ?? null,
+                mandateVersion: policy!.mandate?.version ?? null,
               }),
             )
             .catch((e) => span.recordException(e as Error));
@@ -505,6 +534,93 @@ export type Executor = ReturnType<typeof createExecutor>;
  * lock first, so two concurrent requests from the same agent cannot both read counters below a
  * limit and both run.
  */
+/**
+ * What the other agents have on the artifacts this action changes, before the policy engine
+ * decides: the owner of an artifact when it belongs to another agent, and any pending change (an
+ * open approval request) from a different agent. The executor only calls this for changes beyond a
+ * draft; people never reach it. The artifact rows are locked for update (in id order) so the
+ * decision and the write see the same owner, and `artifacts.setOwner` cannot slip between them.
+ */
+export async function coordinationFor(
+  tx: Tx,
+  workspaceId: string,
+  agentId: string,
+  actionClass: ActionClass,
+  impact: Impact,
+): Promise<{ ownership: NonNullable<PolicyInput['ownership']> | null; conflicts: string[] }> {
+  const touched = impact.touches?.artifacts ?? [];
+  if (!touched.length || actionClass === 'draft' || actionClass === 'read') return { ownership: null, conflicts: [] };
+  const ids = [...new Set(touched.map((a) => a.id))];
+  const rows = await tx
+    .select({ id: schema.artifacts.id, name: schema.artifacts.name, ownerAgentId: schema.artifacts.ownerAgentId })
+    .from(schema.artifacts)
+    .where(and(eq(schema.artifacts.workspaceId, workspaceId), inArray(schema.artifacts.id, ids)))
+    .orderBy(asc(schema.artifacts.id))
+    .for('update');
+  const names = new Map(rows.map((a) => [a.id, a.name]));
+
+  let ownership: NonNullable<PolicyInput['ownership']> | null = null;
+  for (const a of rows) {
+    if (!a.ownerAgentId || a.ownerAgentId === agentId) continue;
+    const [owner] = await tx
+      .select({ id: schema.agents.id, name: schema.agents.name, status: schema.agents.status })
+      .from(schema.agents)
+      .where(and(eq(schema.agents.workspaceId, workspaceId), eq(schema.agents.id, a.ownerAgentId)));
+    const candidate: NonNullable<PolicyInput['ownership']> = {
+      agentId: a.ownerAgentId,
+      // A deleted owner is reported as retired; it never blocks.
+      agentName: owner?.name ?? 'a retired agent',
+      active: owner?.status === 'active',
+      artifactId: a.id,
+      artifactName: a.name,
+    };
+    // An active owner anywhere is the one worth explaining; keep the first if all are inactive.
+    if (!ownership || (candidate.active && !ownership.active)) ownership = candidate;
+    if (ownership.active) break;
+  }
+
+  // Pending approvals from another agent on the same artifacts. The requesting agent comes from
+  // the credential the request recorded, exactly as approval looks it up.
+  const pending = await tx.execute<{ artifact_id: string; hold_until: Date | string | null; agent_name: string }>(sql`
+    SELECT ar.artifact_id, ar.hold_until, a.name AS agent_name
+    FROM approval_requests ar
+    JOIN agent_credentials c ON c.workspace_id = ar.workspace_id AND (
+      (c.kind = 'api_token' AND ar.requested_by_client = 'token:' || c.credential_id)
+      OR (c.kind = 'oauth_client' AND ar.requested_by_client = c.credential_id))
+    JOIN agents a ON a.workspace_id = c.workspace_id AND a.id = c.agent_id
+    WHERE ar.workspace_id = ${workspaceId}
+      AND ar.status = 'pending' AND ar.requested_by_type = 'agent'
+      AND ar.artifact_id IN (${sql.join(
+        ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+      AND a.id <> ${agentId}
+    ORDER BY ar.created_at`);
+  const conflicts: string[] = [];
+  const seen = new Set<string>();
+  for (const row of pending.rows) {
+    const key = `${row.artifact_id}:${row.agent_name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const label = names.get(row.artifact_id) ? `“${names.get(row.artifact_id)}”` : row.artifact_id;
+    const until = row.hold_until ? new Date(row.hold_until) : null;
+    const what =
+      until && until > new Date()
+        ? `a hold until ${until.toISOString()}`
+        : until
+          ? 'a hold whose veto window has ended and now waits for a person'
+          : 'an open approval request';
+    conflicts.push(`${label} already has ${what} from agent ${row.agent_name}.`);
+  }
+  return { ownership, conflicts };
+}
+
+/**
+ * The policy decision for one agent write (ADR-0006): the workspace settings, the agent's active
+ * mandate, its counters and what other agents have on the same artifacts. Used by the executor for
+ * every command. Holds a per-agent transaction lock first, so two concurrent requests from the same
+ * agent cannot both read counters below a limit and both run.
+ */
 export async function agentPolicy(
   tx: Tx,
   services: Services,
@@ -513,19 +629,31 @@ export async function agentPolicy(
 ): Promise<PolicyOutcome> {
   const agent = principal.agent;
   if (!agent) throw new Error('agentPolicy needs an agent principal');
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${principal.workspaceId}:${agent.id}`}, 0))`);
+  await lockAgentPolicy(tx, principal.workspaceId, agent.id);
   const [ws] = await tx.select({ settings: schema.workspaces.settings }).from(schema.workspaces);
   const mandate = req.actionClass === 'read' ? null : ((await services.activeMandate?.(tx, agent.id)) ?? null);
   const counters = (await services.agentCounters?.(tx, agent.id)) ?? { changes: 0 };
-  return decide({
+  const coordination = await coordinationFor(tx, principal.workspaceId, agent.id, req.actionClass, req.impact);
+  const policy = decide({
     command: req.command,
     actionClass: req.actionClass,
     impact: req.impact,
     settings: autonomySettings(ws?.settings),
     counters,
     approvable: req.approvable,
+    ...(coordination.ownership ? { ownership: coordination.ownership } : {}),
+    ...(coordination.conflicts.length ? { conflicts: coordination.conflicts } : {}),
     ...(mandate ? { mandate: mandate.view } : {}),
   });
+  // Holds and veto windows arrive in Phase 7. Until then an L2 decision keeps its level and reasons
+  // but is degraded to an ordinary approval request, so nothing runs without a person.
+  if (policy.decision === 'hold') return { ...policy, decision: 'ask', reasons: [...policy.reasons, 'Holds arrive in Phase 7.'] };
+  return policy;
+}
+
+/** One policy decision per agent at a time, until the transaction ends. Taking it again in the same transaction is free. */
+async function lockAgentPolicy(tx: Tx, workspaceId: string, agentId: string) {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${workspaceId}:${agentId}`}, 0))`);
 }
 
 /** What the agent said it is doing: an explicit intent, else the reviewer note or reason most commands take. */
@@ -542,14 +670,28 @@ function intentOf(input: unknown): string | null {
  * same row after the snapshot began, and the snapshot cannot see the winner. Run the read again
  * in a fresh snapshot, which does: twice at most.
  */
-async function retrySnapshotConflicts<T>(isRead: boolean, run: () => Promise<T>): Promise<T> {
+export async function retrySnapshotConflicts<T>(isRead: boolean, run: () => Promise<T>, retryDeadlock = isRead): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await run();
     } catch (err) {
+      // A deadlock victim was rolled back whole, so a command that works only inside its
+      // transaction can run again (`retryOnDeadlock`). Commands take their locks in a fixed order;
+      // this is for the orders nobody thought of. Either way the caller gets a conflict, not a 500.
+      if (isDeadlock(err)) {
+        if (retryDeadlock && attempt < 2) continue;
+        throw new AppError('conflict', 'Another change to the same data was in progress. Nothing was changed; try again.');
+      }
       if (!isRead || attempt >= 2 || !isSerializationFailure(err)) throw err;
     }
   }
+}
+
+/** Postgres SQLSTATE 40P01 (this transaction was chosen as the deadlock victim), directly or as a cause. */
+export function isDeadlock(err: unknown): boolean {
+  for (let e = err as { code?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++)
+    if (e.code === '40P01') return true;
+  return false;
 }
 
 /** Postgres SQLSTATE 40001, directly or as the cause of a Drizzle query error. */

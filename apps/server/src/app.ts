@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { activeMandate } from '@agentic-seo/artifacts';
 import {
   type AuthConfig,
   acceptInvitation,
@@ -76,8 +77,10 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   const services: Services = {
     keyProvider,
     directory,
+    publicUrl: config.publicUrl,
     serverVersion: VERSION,
     strictInputs: config.strictInputs,
+    activeMandate,
     ...agentLedgerServices(),
   };
   const executor = createExecutor(db, services, {

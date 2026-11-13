@@ -148,6 +148,20 @@ export interface PolicyInput {
   approvable: boolean;
   /** The agent's active mandate, if any; without one the approval policy decides as before. */
   mandate?: MandateView;
+  /**
+   * Another agent's ownership of an artifact this action changes, computed by the executor. An
+   * active owner caps the action at level 1 (or asks, without a mandate); a paused or retired owner
+   * is reported but does not block.
+   */
+  ownership?: {
+    agentId: string;
+    agentName: string;
+    active: boolean;
+    artifactId?: string;
+    artifactName?: string;
+  } | null;
+  /** Other agents' pending changes (holds or approval requests) on the same artifacts. */
+  conflicts?: string[];
 }
 
 export interface PolicyOutcome {
@@ -165,6 +179,21 @@ export interface PolicyOutcome {
 const fmt = (n: number) => n.toLocaleString('en-US');
 
 const LEVEL_NAMES = ['observe', 'propose', 'act with veto', 'act within limits', 'run the loop'];
+
+/** How an owned artifact is named in a reason: its name when the executor supplied it, else its id. */
+const ownedLabel = (o: NonNullable<PolicyInput['ownership']>) =>
+  o.artifactName ? `“${o.artifactName}”` : (o.artifactId ?? 'This artifact');
+
+/** The reason an active owner blocks another agent, and the note when the owner is paused or retired. */
+function ownershipReasons(o: NonNullable<PolicyInput['ownership']>) {
+  const reason = `${ownedLabel(o)} is owned by agent ${o.agentName}.`;
+  return o.active
+    ? { block: reason, note: null }
+    : {
+        block: null,
+        note: `${ownedLabel(o)} is owned by agent ${o.agentName}, which is not active; ownership does not block this change.`,
+      };
+}
 
 export function decide(input: PolicyInput): PolicyOutcome {
   const { actionClass, impact, settings, mandate } = input;
@@ -207,6 +236,13 @@ function decideWithoutMandate(
   // Unknown reach always requires approval, never a one-level drop (design §3).
   if (REACH_CLASSES.includes(actionClass) && impact.reach?.kind !== 'known')
     reasons.push(`The traffic at risk is unknown, so this change needs a person. ${impact.reach?.reason ?? ''}`.trim());
+  // Several agents in one workspace: an active owner or another agent's pending change asks a person.
+  if (input.ownership) {
+    const own = ownershipReasons(input.ownership);
+    if (own.block) reasons.push(own.block);
+    if (own.note) reasons.push(own.note);
+  }
+  if (input.conflicts?.length) reasons.push(...input.conflicts);
   if (settings.switch === 'propose_only')
     reasons.push('This workspace is set to propose-only: every agent change beyond a draft needs a person.');
   if (counters.changes >= settings.limits.changesPerDay)
@@ -249,6 +285,14 @@ function decideWithMandate(
       1,
       `This agent made ${fmt(counters.changes)} changes in the last 24 hours, the workspace limit is ${fmt(settings.limits.changesPerDay)}.`,
     );
+
+  // Several agents in one workspace: an active owner or another agent's pending change caps at propose.
+  if (input.ownership) {
+    const own = ownershipReasons(input.ownership);
+    if (own.block) capAt(1, own.block);
+    if (own.note) reasons.push(own.note);
+  }
+  for (const conflict of input.conflicts ?? []) capAt(1, conflict);
 
   if (level <= 0) return out('deny', [...reasons, `The mandate gives this agent level 0 (observe) for ${actionClass}.`], { level });
   if (level === 1) {

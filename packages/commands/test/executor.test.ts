@@ -209,6 +209,49 @@ describe.skipIf(!hasTestDatabase())('the command executor', () => {
     }
   });
 
+  it('forgets what a rolled-back attempt created when a retried command then fails', async () => {
+    const current = await setCurrent();
+    const db = createDb({ adminUrl: current.url.toString(), appUrl: appUrl(current.url), poolSize: 4 });
+    try {
+      let handlerRuns = 0;
+      const creating = defineCommand({
+        name: 'test.createThenFail',
+        title: 'Create',
+        description: 'Creates something on the first run and fails on the second.',
+        input: z.object({}),
+        output: z.object({ id: z.string() }),
+        permission: null,
+        effect: 'write',
+        actionClass: 'draft',
+        retryOnDeadlock: true,
+        auditTarget: (out) => out.id,
+        handler: async () => {
+          if (++handlerRuns > 1) throw new AppError('conflict', 'second attempt refused');
+          return { id: 'created-in-attempt-1' };
+        },
+      });
+      // The first attempt gets as far as its ledger row, then loses a deadlock and is rolled back.
+      let ledgerCalls = 0;
+      const executor = createExecutor(db, {
+        ...services,
+        onAgentAction: async () => {
+          if (++ledgerCalls === 1) throw Object.assign(new Error('deadlock detected'), { code: '40P01' });
+        },
+      });
+      const agent = { id: `agt_${'a'.repeat(32)}`, name: 'Retry agent', status: 'active' as const, statusReason: null };
+      const principal = agentPrincipal(agent as never, 'user_1', 'token:x', current.workspace, 'owner', []);
+      await expect(executor.execute(creating, {}, principal, { surface: 'rest' })).rejects.toThrow('second attempt refused');
+      expect(handlerRuns).toBe(2);
+      const { rows } = await current.db.admin.query<{ target: string | null; ok: boolean }>(
+        "SELECT target, ok FROM audit_log WHERE workspace_id = $1 AND command = 'test.createThenFail'",
+        [current.workspace],
+      );
+      expect(rows).toEqual([{ target: null, ok: false }]);
+    } finally {
+      await db.close();
+    }
+  });
+
   it('keeps the audit log a continuous hash chain, and a tampered row breaks it', async () => {
     const current = await setCurrent();
     const db = createDb({ adminUrl: current.url.toString(), appUrl: appUrl(current.url), poolSize: 4 });

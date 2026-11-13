@@ -1,4 +1,6 @@
 import { AppError } from '@agentic-seo/core';
+import { schema, type Tx } from '@agentic-seo/db';
+import { eq } from 'drizzle-orm';
 import type { CommandContext } from './registry';
 
 // Undo for agent actions (ADR-0006 §5.4): the action ledger records how to reverse what an agent
@@ -38,6 +40,31 @@ export function isUndoable(action: { ok: boolean; decision: string; undo: AgentU
   if (!action.ok || action.decision === 'deny' || action.undoneAt !== null || !action.undo) return false;
   if (action.undo.kind === 'none' || isLegacy(action.undo)) return false;
   return action.undo.kind !== 'group' || action.undo.items.some((item) => item.kind !== 'none');
+}
+
+/**
+ * Why a reversal the ledger offers would be refused now, or null: a newer version of the artifact
+ * went live since, or it is no longer live. The same checks `agents.undo` makes, read without
+ * locks so an activity list can show them without changing anything.
+ */
+export async function undoBlocker(tx: Tx, undo: AgentUndo): Promise<string | null> {
+  if (undo.kind === 'group') {
+    for (const item of undo.items) {
+      const reason = await undoBlocker(tx, item);
+      if (reason) return reason;
+    }
+    return null;
+  }
+  if (undo.kind === 'republish') {
+    const [a] = await tx
+      .select({ publishedVersion: schema.artifacts.publishedVersion })
+      .from(schema.artifacts)
+      .where(eq(schema.artifacts.id, undo.artifactId));
+    if (a?.publishedVersion == null) return 'It is no longer live.';
+    if (a.publishedVersion !== undo.publishedVersion) return `v${a.publishedVersion} was published since; change it by hand.`;
+    return null;
+  }
+  return null;
 }
 
 /** Runs one reversal (or a group of them) in the caller's transaction and returns what happened. */
