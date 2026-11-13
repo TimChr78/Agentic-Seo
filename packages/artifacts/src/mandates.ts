@@ -122,6 +122,11 @@ export async function activeMandate(tx: Tx, agentId: string, now = new Date()): 
 publishValidators.set('agent_mandate', async (content, tx, artifact) => {
   const m = content as AgentMandate;
   const problems: string[] = [];
+  // One mandate publish per agent at a time: two different mandate artifacts lock different rows,
+  // so without this both would read "no active mandate" and both go live.
+  await tx.execute(
+    sql`SELECT pg_advisory_xact_lock(hashtextextended('agent-mandate:' || current_setting('app.workspace_id') || ':' || ${m.agent}, 0))`,
+  );
   const [agent] = await tx.select({ status: schema.agents.status }).from(schema.agents).where(eq(schema.agents.id, m.agent));
   if (!agent) problems.push(`agent ${m.agent} does not exist`);
   else if (agent.status === 'revoked') problems.push(`agent ${m.agent} is revoked`);

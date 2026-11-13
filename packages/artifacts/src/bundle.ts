@@ -3,7 +3,7 @@ import { AppError, canonicalJson, hashValue } from '@agentic-seo/core';
 import { schema } from '@agentic-seo/db';
 import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
-import { author, lockSingleton, requestPublish, updateDraft, validateContent } from './commands';
+import { author, lockArtifacts, lockSingleton, requestPublish, updateDraft, validateContent } from './commands';
 import { diffJson } from './diff';
 import { type ArtifactType, artifactTypeEnum, artifactTypes } from './types';
 
@@ -345,6 +345,45 @@ export const importConfig = defineCommand({
         'Importing workspace settings needs a person with workspace:admin. Import the artifacts without settings, or ask a person.',
       );
     const ws = ctx.principal.workspaceId;
+    // Two entries for one singleton cannot both apply: say so instead of creating both.
+    const seenSingletons = new Map<string, { id: string; type: string; siteId?: string | null }>();
+    for (const item of input.bundle.artifacts) {
+      if (!(item.type in artifactTypes) || !('singleton' in artifactTypes[item.type])) continue;
+      const key = singletonKey(item.type, item.siteId);
+      const first = seenSingletons.get(key);
+      if (first)
+        throw new AppError(
+          'invalid_input',
+          `${first.id} and ${item.id} are both the ${item.type} of the same site. A site has one; remove one of them from the bundle.`,
+        );
+      seenSingletons.set(key, item);
+    }
+    // Locks are taken up front and in a stable order (singletons by key, then artifacts by id), so
+    // two imports of the same artifacts in different orders wait for each other instead of
+    // deadlocking. The workspace is read only after the singleton locks: a singleton another
+    // request created while this one waited is then updated, not inserted a second time.
+    if (!input.dryRun) {
+      for (const key of [...seenSingletons.keys()].sort()) {
+        const item = seenSingletons.get(key)!;
+        await lockSingleton(ctx, item.type, item.siteId);
+      }
+      const singletonIds = seenSingletons.size
+        ? (
+            await ctx.tx
+              .select({ id: schema.artifacts.id, type: schema.artifacts.type, siteId: schema.artifacts.siteId })
+              .from(schema.artifacts)
+              .where(
+                and(
+                  eq(schema.artifacts.workspaceId, ws),
+                  inArray(schema.artifacts.type, [...new Set([...seenSingletons.values()].map((i) => i.type))]),
+                ),
+              )
+          )
+            .filter((row) => seenSingletons.has(singletonKey(row.type, row.siteId)))
+            .map((row) => row.id)
+        : [];
+      await lockArtifacts(ctx, [...new Set([...input.bundle.artifacts.map((item) => item.id), ...singletonIds])]);
+    }
     const existing = await ctx.tx
       .select({ a: schema.artifacts, hash: schema.artifactVersions.contentHash })
       .from(schema.artifacts)
@@ -360,7 +399,6 @@ export const importConfig = defineCommand({
     const singletons = new Map(
       existing.filter((e) => 'singleton' in artifactTypes[e.a.type as ArtifactType]).map((e) => [singletonKey(e.a.type, e.a.siteId), e]),
     );
-    const seenSingletons = new Map<string, string>();
     const changes: z.infer<typeof Change>[] = [];
     const toPublish: { id: string; type: ArtifactType; change: z.infer<typeof Change> }[] = [];
     for (const item of input.bundle.artifacts) {
@@ -376,18 +414,6 @@ export const importConfig = defineCommand({
       const content = await validateContent(item.type, item.content, 'draft');
       // A workspace has one of each singleton type per site, whatever its id.
       const isSingleton = 'singleton' in artifactTypes[item.type];
-      if (isSingleton) {
-        const key = singletonKey(item.type, item.siteId);
-        // Two entries for one singleton cannot both apply: say so instead of creating both.
-        const first = seenSingletons.get(key);
-        if (first)
-          throw new AppError(
-            'invalid_input',
-            `${first} and ${item.id} are both the ${item.type} of the same site. A site has one; remove one of them from the bundle.`,
-          );
-        seenSingletons.set(key, item.id);
-        if (!input.dryRun) await lockSingleton(ctx, item.type, item.siteId);
-      }
       const current = byId.get(item.id) ?? (isSingleton ? singletons.get(singletonKey(item.type, item.siteId)) : undefined);
       if (current && current.a.type !== item.type)
         throw new AppError('conflict', `${item.id} is a ${current.a.type} here, not a ${item.type}.`);

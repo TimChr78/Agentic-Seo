@@ -198,7 +198,7 @@ async function publishVersion(ctx: CommandContext, artifactId: string, number: n
 }
 
 /** Locks artifact rows (in id order) so their latest version cannot change until the transaction ends. */
-async function lockArtifacts(ctx: CommandContext, ids: string[]) {
+export async function lockArtifacts(ctx: CommandContext, ids: string[]) {
   await ctx.tx
     .select({ id: schema.artifacts.id })
     .from(schema.artifacts)
@@ -210,9 +210,13 @@ async function lockArtifacts(ctx: CommandContext, ids: string[]) {
 /** Serialises creation of a workspace's singleton artifact (one per type and site) until the transaction ends. */
 export async function lockSingleton(ctx: CommandContext, type: string, siteId: string | null | undefined) {
   await ctx.tx.execute(
-    sql`SELECT pg_advisory_xact_lock(hashtextextended(${`artifact-singleton:${ctx.principal.workspaceId}:${type}:${siteId ?? ''}`}, 0))`,
+    sql`SELECT pg_advisory_xact_lock(hashtextextended(${singletonLockKey(ctx.principal.workspaceId, type, siteId)}, 0))`,
   );
 }
+
+/** The text the singleton lock hashes; exported so a test can hold the same lock. */
+export const singletonLockKey = (workspaceId: string, type: string, siteId: string | null | undefined) =>
+  `artifact-singleton:${workspaceId}:${type}:${siteId ?? ''}`;
 
 /** Publishes a version through the same checks and listeners as any other publish (agents.undo). */
 export async function publishArtifactVersion(ctx: CommandContext, artifactId: string, number: number) {
