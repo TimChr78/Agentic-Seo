@@ -1,0 +1,1 @@
+- The monorepo, CI and the shared test stack (Postgres 17), with `core` and `telemetry` ported from Agentic Marketing.

@@ -1,0 +1,17 @@
+**/node_modules
+**/dist
+# Tests are not part of the runtime image.
+apps/*/test
+packages/*/test
+.git
+.github
+docs
+e2e
+test-results
+playwright-report
+reports
+*.log
+# Never ship secrets in a layer. The template is the one dotenv file the image needs.
+.env
+.env.*
+!.env.example

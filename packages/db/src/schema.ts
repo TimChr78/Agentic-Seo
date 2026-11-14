@@ -1,0 +1,665 @@
+import { sql } from 'drizzle-orm';
+import {
+  bigint,
+  bigserial,
+  boolean,
+  customType,
+  doublePrecision,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  primaryKey,
+  smallint,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from 'drizzle-orm/pg-core';
+
+// The foundation tables (Phase 0 task B) and the auth, members, token and agent tables (task C);
+// see docs/process/porting.md for what was left out of this port.
+
+const bytea = customType<{ data: Buffer }>({ dataType: () => 'bytea' });
+const ts = (name: string) => timestamp(name, { withTimezone: true });
+
+export type ApprovalPolicy = 'none' | 'agent_changes' | 'all_publishes';
+export type Role = 'owner' | 'admin' | 'editor' | 'approver' | 'viewer';
+export type PolicyDecision = 'allow' | 'hold' | 'ask' | 'deny';
+export type InputWarningPrincipal = 'user' | 'token' | 'oauth_client';
+export type ProviderCallerType = 'person' | 'agent' | 'hosted_run' | 'schedule' | 'system';
+export type ProviderCallState = 'pending' | 'dispatching' | 'submitted' | 'settled' | 'failed' | 'unknown' | 'released';
+
+export const workspaces = pgTable('workspaces', {
+  id: uuid('id').primaryKey(),
+  name: text('name').notNull(),
+  approvalPolicy: text('approval_policy').$type<ApprovalPolicy>().notNull(),
+  /** IANA time zone used to display dates in the UI. */
+  timeZone: text('time_zone').notNull().default('UTC'),
+  /** Workspace settings: autonomy ceilings and the agents switch (ADR-0006); empty means the defaults. */
+  settings: jsonb('settings').$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: ts('created_at').notNull().defaultNow(),
+});
+
+export const workspaceMembers = pgTable(
+  'workspace_members',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    userId: text('user_id').notNull(),
+    role: text('role').$type<Role>().notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.userId] })],
+);
+
+export const auditLog = pgTable('audit_log', {
+  seq: bigserial('seq', { mode: 'number' }).primaryKey(),
+  workspaceId: uuid('workspace_id').notNull(),
+  at: ts('at').notNull().defaultNow(),
+  principalType: text('principal_type').notNull(),
+  principalId: text('principal_id').notNull(),
+  clientId: text('client_id'),
+  surface: text('surface').notNull(),
+  command: text('command').notNull(),
+  effect: text('effect').notNull(),
+  target: text('target'),
+  inputHash: text('input_hash').notNull(),
+  ok: boolean('ok').notNull(),
+  error: text('error'),
+  prevHash: text('prev_hash'),
+  hash: text('hash').notNull(),
+  /** The client IP when the entry did not come from a command (password reset, #191 upstream). */
+  ip: text('ip'),
+});
+
+export const idempotencyKeys = pgTable(
+  'idempotency_keys',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    key: text('key').notNull(),
+    command: text('command').notNull(),
+    inputHash: text('input_hash').notNull(),
+    response: jsonb('response').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.key] })],
+);
+
+export const dataKeys = pgTable(
+  'data_keys',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    kekId: text('kek_id').notNull(),
+    wrappedKey: bytea('wrapped_key').notNull(),
+    active: boolean('active').notNull().default(true),
+    purpose: text('purpose').$type<'secrets' | 'identity' | 'matching'>().notNull().default('secrets'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export const secrets = pgTable(
+  'secrets',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    name: text('name').notNull(),
+    dataKeyId: text('data_key_id').notNull(),
+    iv: bytea('iv').notNull(),
+    ciphertext: bytea('ciphertext').notNull(),
+    authTag: bytea('auth_tag').notNull(),
+    updatedBy: text('updated_by').notNull(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.name] })],
+);
+
+/** Unknown command-input keys a client sent, so strict input mode can be rolled out on evidence. */
+export const inputWarnings = pgTable(
+  'input_warnings',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    principalType: text('principal_type').$type<InputWarningPrincipal>().notNull(),
+    principalId: text('principal_id').notNull(),
+    clientLabel: text('client_label').notNull(),
+    command: text('command').notNull(),
+    keyPath: text('key_path').notNull(),
+    firstSeen: ts('first_seen').notNull().defaultNow(),
+    lastSeen: ts('last_seen').notNull().defaultNow(),
+    count: integer('count').notNull().default(1),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.principalType, t.principalId, t.command, t.keyPath] }),
+    index('input_warnings_last_seen').on(t.workspaceId, t.lastSeen),
+  ],
+);
+
+// --- Auth, members, tokens and agents (Phase 0 task C) ------------------------------------------
+// Better Auth's own tables (user, session, account, verification, jwks and the OAuth provider's
+// tables) are created by migration 0002 and managed by Better Auth itself; they are not modelled
+// here because the auth package talks to them with SQL through the owner connection.
+
+export const invitations = pgTable(
+  'invitations',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    email: text('email').notNull(),
+    role: text('role').$type<Role>().notNull(),
+    tokenHash: text('token_hash').notNull(),
+    invitedBy: text('invited_by').notNull(),
+    status: text('status').$type<'pending' | 'accepted' | 'revoked'>().notNull().default('pending'),
+    acceptedBy: text('accepted_by'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    expiresAt: ts('expires_at').notNull(),
+    decidedAt: ts('decided_at'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    uniqueIndex('invitations_open').on(t.workspaceId, sql`lower(${t.email})`).where(sql`${t.status} = 'pending'`),
+  ],
+);
+
+export const apiTokens = pgTable(
+  'api_tokens',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    userId: text('user_id').notNull(),
+    name: text('name').notNull(),
+    tokenHash: text('token_hash').notNull(),
+    tokenHint: text('token_hint').notNull(),
+    scopes: text('scopes').array().notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    expiresAt: ts('expires_at'),
+    lastUsedAt: ts('last_used_at'),
+    revokedAt: ts('revoked_at'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export const apiTokenChanges = pgTable(
+  'api_token_changes',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    tokenId: text('token_id').notNull(),
+    changedBy: text('changed_by').notNull(),
+    changedAt: ts('changed_at').notNull().defaultNow(),
+    changes: jsonb('changes').$type<Record<string, unknown>>().notNull(),
+    steppedUp: boolean('stepped_up').notNull().default(false),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/**
+ * The workspace a person picked on the OAuth consent page, while the flow is in progress. The
+ * OAuth provider reads it through `consentReferenceId` and stores the workspace on the grant; the
+ * rows are keyed by the Better Auth session and never authorise anything by themselves. One row
+ * per workspace lets the app role write a re-pick under RLS; the consumer takes the latest.
+ */
+export const oauthWorkspaceSelections = pgTable(
+  'oauth_workspace_selections',
+  {
+    sessionId: text('session_id').notNull(),
+    workspaceId: uuid('workspace_id').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.sessionId, t.workspaceId] })],
+);
+
+export type AgentStatus = 'active' | 'paused' | 'revoked';
+export type AgentCredentialKind = 'api_token' | 'oauth_client';
+
+/** Agents as first-class principals (ADR-0006): a sponsor, a status and the credentials they act with. */
+export const agents = pgTable(
+  'agents',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    name: text('name').notNull(),
+    description: text('description').notNull().default(''),
+    sponsorUserId: text('sponsor_user_id').notNull(),
+    status: text('status').$type<AgentStatus>().notNull().default('active'),
+    statusReason: text('status_reason'),
+    statusChangedBy: text('status_changed_by'),
+    statusChangedAt: ts('status_changed_at'),
+    /** Reserved for multi-workspace; a workspace is the tenant, so nothing uses this column. */
+    brand: text('brand'),
+    /** The guardian's cap on the agent until a person clears it (Phase 7); null when it has not acted. */
+    guard: jsonb('guard').$type<Record<string, unknown>>(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export const agentCredentials = pgTable(
+  'agent_credentials',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    kind: text('kind').$type<AgentCredentialKind>().notNull(),
+    credentialId: text('credential_id').notNull(),
+    agentId: text('agent_id').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.kind, t.credentialId] })],
+);
+
+/**
+ * How to reverse an agent action (ADR-0006 §5.4). Recorded in the ledger when the action runs;
+ * `none` says plainly why it cannot be undone.
+ */
+export type AgentUndo =
+  | { kind: 'republish'; artifactId: string; previousVersion: number | null; publishedVersion?: number }
+  | { kind: 'group'; items: AgentUndo[] }
+  | { kind: 'none'; reason: string };
+
+/** The agent action ledger: every agent write with its policy decision. */
+export const agentActions = pgTable(
+  'agent_actions',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: bigserial('id', { mode: 'number' }).notNull(),
+    agentId: text('agent_id').notNull(),
+    command: text('command').notNull(),
+    actionClass: text('action_class').notNull(),
+    decision: text('decision').$type<PolicyDecision>().notNull(),
+    reasons: jsonb('reasons').$type<string[]>().notNull().default([]),
+    impact: jsonb('impact').$type<Record<string, unknown>>().notNull().default({}),
+    ok: boolean('ok').notNull(),
+    error: text('error'),
+    target: text('target'),
+    surface: text('surface').notNull(),
+    mandateId: text('mandate_id'),
+    mandateVersion: integer('mandate_version'),
+    intent: text('intent'),
+    /** The level the policy engine decided at; null without a mandate. */
+    level: smallint('level'),
+    shadow: jsonb('shadow').$type<Record<string, unknown>>(),
+    undo: jsonb('undo').$type<AgentUndo | null>(),
+    undoneAt: ts('undone_at'),
+    undoneBy: text('undone_by'),
+    undoResult: text('undo_result'),
+    at: ts('at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+// Versioned artifacts and their approvals (Phase 0 task C2). See 0004_artifacts.sql.
+
+export type VersionState = 'draft' | 'in_review' | 'published' | 'superseded' | 'rejected';
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'withdrawn';
+export type LearningStatus = 'active' | 'retracted';
+
+export const artifacts = pgTable(
+  'artifacts',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    type: text('type').notNull(),
+    name: text('name').notNull(),
+    /** The site this artifact belongs to, when it is site-scoped; null is workspace-wide. */
+    siteId: uuid('site_id'),
+    latestVersion: integer('latest_version').notNull(),
+    publishedVersion: integer('published_version'),
+    archived: boolean('archived').notNull().default(false),
+    /** The agent that owns this artifact; a missing agent counts as retired, never as active. */
+    ownerAgentId: text('owner_agent_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    index('artifacts_type').on(t.workspaceId, t.type, t.updatedAt),
+    index('artifacts_owner_agent').on(t.workspaceId, t.ownerAgentId),
+    index('artifacts_site').on(t.workspaceId, t.siteId),
+  ],
+);
+
+export const artifactVersions = pgTable(
+  'artifact_versions',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    artifactId: text('artifact_id').notNull(),
+    number: integer('number').notNull(),
+    state: text('state').$type<VersionState>().notNull(),
+    content: jsonb('content').$type<unknown>().notNull(),
+    contentHash: text('content_hash').notNull(),
+    basedOn: integer('based_on'),
+    authorType: text('author_type').$type<'user' | 'agent'>().notNull(),
+    authorId: text('author_id').notNull(),
+    authorClient: text('author_client'),
+    note: text('note'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.artifactId, t.number] }),
+    // Exactly one published version per artifact (#912): `publishVersion` supersedes the old
+    // version before it publishes the new one, so the partial unique index never fires on the
+    // normal path; a writer that skips the lock gets a 23505 the executor answers as a conflict.
+    uniqueIndex('artifact_versions_one_published').on(t.workspaceId, t.artifactId).where(sql`state = 'published'`),
+  ],
+);
+
+export const approvalRequests = pgTable(
+  'approval_requests',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    artifactId: text('artifact_id').notNull(),
+    version: integer('version').notNull(),
+    status: text('status').$type<ApprovalStatus>().notNull(),
+    requestedByType: text('requested_by_type').$type<'user' | 'agent'>().notNull(),
+    requestedById: text('requested_by_id').notNull(),
+    requestedByClient: text('requested_by_client'),
+    note: text('note').notNull(),
+    decidedBy: text('decided_by'),
+    decidedAt: ts('decided_at'),
+    decisionNote: text('decision_note'),
+    /** A bundle is reviewed together: one row per artifact, sharing this id. */
+    bundleId: text('bundle_id'),
+    /** A held agent change runs at this time unless a person vetoes it; holds arrive in Phase 7. */
+    holdUntil: ts('hold_until'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    index('approval_requests_pending').on(t.workspaceId, t.createdAt),
+    index('approval_requests_bundle').on(t.workspaceId, t.bundleId),
+  ],
+);
+
+export type LearningEvidence = {
+  kind: 'change_set' | 'recommendation' | 'report' | 'rank_tracker' | 'ai_visibility_tracker';
+  id: string;
+  summary: string;
+  numbers: Record<string, number>;
+};
+
+export const learnings = pgTable(
+  'learnings',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    siteId: uuid('site_id'),
+    statement: text('statement').notNull(),
+    scope: jsonb('scope').$type<Record<string, unknown>>().notNull().default({}),
+    evidence: jsonb('evidence').$type<LearningEvidence[]>().notNull().default([]),
+    authorType: text('author_type').$type<'user' | 'agent'>().notNull(),
+    authorId: text('author_id').notNull(),
+    agentId: text('agent_id'),
+    status: text('status').$type<LearningStatus>().notNull().default('active'),
+    retractedBy: text('retracted_by'),
+    retractedAt: ts('retracted_at'),
+    retractReason: text('retract_reason'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+// The provider gateway (Phase 0 task E). Amounts are bigint micros; see 0003_providers.sql.
+
+export const providerBudgets = pgTable(
+  'provider_budgets',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    providerId: text('provider_id').notNull(),
+    period: text('period').notNull(),
+    currency: text('currency').notNull(),
+    budgetMicros: bigint('budget_micros', { mode: 'number' }).notNull(),
+    spentMicros: bigint('spent_micros', { mode: 'number' }).notNull().default(0),
+    heldMicros: bigint('held_micros', { mode: 'number' }).notNull().default(0),
+    notifiedThresholds: integer('notified_thresholds').array().$type<number[]>().notNull().default(sql`'{}'::integer[]`),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.providerId, t.period] })],
+);
+
+export const providerCalls = pgTable(
+  'provider_calls',
+  {
+    id: uuid('id').primaryKey(),
+    workspaceId: uuid('workspace_id').notNull(),
+    idempotencyKey: text('idempotency_key').notNull(),
+    callerType: text('caller_type').$type<ProviderCallerType>().notNull(),
+    callerId: text('caller_id').notNull(),
+    purpose: text('purpose').notNull(),
+    siteId: uuid('site_id'),
+    providerId: text('provider_id').notNull(),
+    port: text('port').notNull(),
+    operation: text('operation').notNull(),
+    requestHash: text('request_hash').notNull(),
+    credentialKey: text('credential_key').notNull().default(''),
+    propertyKey: text('property_key').notNull().default(''),
+    market: text('market').notNull().default(''),
+    optionsHash: text('options_hash').notNull().default(''),
+    cacheKey: text('cache_key').notNull(),
+    maxCostMicros: bigint('max_cost_micros', { mode: 'number' }).notNull(),
+    reservedMicros: bigint('reserved_micros', { mode: 'number' }).notNull(),
+    actualCostMicros: bigint('actual_cost_micros', { mode: 'number' }),
+    currency: text('currency').notNull(),
+    providerTaskId: text('provider_task_id'),
+    state: text('state').$type<ProviderCallState>().notNull(),
+    /** The provider charged more than the hold; the actual cost is still recorded in full. */
+    overrun: boolean('overrun').notNull().default(false),
+    rawResponse: jsonb('raw_response').$type<unknown>(),
+    rawExpiresAt: ts('raw_expires_at'),
+    error: text('error'),
+    budgetPeriod: text('budget_period').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    /** When the dispatch intent was committed, before any call to the provider. */
+    dispatchedAt: ts('dispatched_at'),
+    submittedAt: ts('submitted_at'),
+    settledAt: ts('settled_at'),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('provider_calls_workspace_idempotency').on(t.workspaceId, t.idempotencyKey),
+    index('provider_calls_workspace_created').on(t.workspaceId, t.createdAt),
+    index('provider_calls_state').on(t.workspaceId, t.state, t.updatedAt),
+  ],
+);
+
+export const providerCache = pgTable(
+  'provider_cache',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    cacheKey: text('cache_key').notNull(),
+    providerId: text('provider_id').notNull(),
+    port: text('port').notNull(),
+    operation: text('operation').notNull(),
+    credentialKey: text('credential_key').notNull().default(''),
+    propertyKey: text('property_key').notNull().default(''),
+    requestHash: text('request_hash').notNull(),
+    market: text('market').notNull().default(''),
+    optionsHash: text('options_hash').notNull().default(''),
+    response: jsonb('response').notNull(),
+    fetchedAt: ts('fetched_at').notNull().defaultNow(),
+    expiresAt: ts('expires_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.cacheKey] }), index('provider_cache_expiry').on(t.workspaceId, t.expiresAt)],
+);
+
+export const providerRateBuckets = pgTable(
+  'provider_rate_buckets',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    providerId: text('provider_id').notNull(),
+    credentialKey: text('credential_key').notNull().default(''),
+    tokens: doublePrecision('tokens').notNull(),
+    capacity: doublePrecision('capacity').notNull(),
+    refillPerSecond: doublePrecision('refill_per_second').notNull(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.providerId, t.credentialKey] })],
+);
+
+// Sites, their markets and their competitors (Phase 0 task I). See 0005_sites.sql. Site ids are
+// uuids like workspace ids: artifacts, learnings and provider_calls already store a uuid site_id,
+// and their composite foreign keys point at (workspace_id, id) here.
+
+export type BusinessType = 'saas' | 'local' | 'ecommerce' | 'publisher' | 'agency' | 'other';
+export type SiteVerificationMethod = 'dns' | 'meta';
+export type CompetitorSource = 'manual' | 'detected';
+
+export const sites = pgTable(
+  'sites',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: uuid('id').notNull(),
+    name: text('name').notNull(),
+    /** Lower-case ASCII domain without scheme, path, port or trailing dot (IDNA/punycode). */
+    primaryDomain: text('primary_domain').notNull(),
+    /** Extra hosts the site answers on, e.g. www.example.com; the primary domain is not repeated. */
+    hosts: text('hosts').array().$type<string[]>().notNull().default(sql`'{}'::text[]`),
+    /** Confirmed business type; null until a person or agent sets it. */
+    businessType: text('business_type').$type<BusinessType>(),
+    isLocalBusiness: boolean('is_local_business').notNull().default(false),
+    /** Published in a DNS TXT record or a home page meta tag; never rotated silently. */
+    verificationToken: text('verification_token').notNull(),
+    verificationMethod: text('verification_method').$type<SiteVerificationMethod>(),
+    verifiedAt: ts('verified_at'),
+    verifiedBy: text('verified_by'),
+    lastCheckAt: ts('last_check_at'),
+    lastCheckError: text('last_check_error'),
+    archived: boolean('archived').notNull().default(false),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    // One active site per domain; archived sites stay for the rows that point at them.
+    uniqueIndex('sites_active_domain').on(t.workspaceId, t.primaryDomain).where(sql`archived = false`),
+  ],
+);
+
+export const markets = pgTable(
+  'markets',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: uuid('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    /** DataForSEO location code, e.g. 2840 for the United States. */
+    locationCode: integer('location_code').notNull(),
+    languageCode: text('language_code').notNull(),
+    /** ISO 3166-1 alpha-3 country for Search Console, when it is known. */
+    gscCountry: text('gsc_country'),
+    name: text('name').notNull(),
+    isDefault: boolean('is_default').notNull().default(false),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    uniqueIndex('markets_target').on(t.workspaceId, t.siteId, t.locationCode, t.languageCode),
+    // At most one default market per site.
+    uniqueIndex('markets_one_default').on(t.workspaceId, t.siteId).where(sql`is_default`),
+  ],
+);
+
+export const competitors = pgTable(
+  'competitors',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: uuid('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    /** Normalised like a site domain. */
+    domain: text('domain').notNull(),
+    name: text('name'),
+    source: text('source').$type<CompetitorSource>().notNull().default('manual'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] }), uniqueIndex('competitors_site_domain').on(t.workspaceId, t.siteId, t.domain)],
+);
+
+// The LLM gateway (Phase 0 task J). See 0006_ai.sql.
+
+/** The capabilities a provider can serve; each has one provider at a time. */
+export type AiUse = 'agents' | 'answer_engines';
+export type AiProviderKind = 'openai-compatible' | 'anthropic-compatible';
+/** What a logged call was for: a choice, generated text, or a prompt test run. */
+export type AiCallKind = 'decide' | 'generate' | 'test';
+export type AiCallStatus = 'pending' | 'running' | 'done' | 'fallback' | 'failed';
+
+export const aiProviders = pgTable(
+  'ai_providers',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    name: text('name').notNull(),
+    kind: text('kind').$type<AiProviderKind>().notNull(),
+    /** An https origin whose host resolves to a public address; packages/fetch's guard enforces it. */
+    baseUrl: text('base_url').notNull(),
+    models: jsonb('models').$type<{ default: string; fast?: string }>().notNull(),
+    structuredOutputs: boolean('structured_outputs').notNull().default(true),
+    useFor: text('use_for').array().$type<AiUse[]>().notNull().default([]),
+    monthlyTokenBudget: bigint('monthly_token_budget', { mode: 'number' }),
+    region: text('region').notNull().default(''),
+    /** The sealed API key; a command never returns it, only whether one is set. */
+    secrets: bytea('secrets'),
+    secretsKeyId: text('secrets_key_id'),
+    enabled: boolean('enabled').notNull().default(true),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/** A call's estimated tokens, held against the provider's monthly budget while the model runs. */
+export const aiTokenReservations = pgTable(
+  'ai_token_reservations',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    providerId: text('provider_id').notNull(),
+    /** The ai_calls attempt this hold covers; a recovered stale attempt keeps its hold counted. */
+    callId: text('call_id'),
+    tokens: integer('tokens').notNull(),
+    expiresAt: ts('expires_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/** Every model call, with what it was asked, what it answered, its tokens and latency. */
+export const aiCalls = pgTable(
+  'ai_calls',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    kind: text('kind').$type<AiCallKind>().notNull(),
+    status: text('status').$type<AiCallStatus>().notNull(),
+    /** Set while a worker runs a queued call; an expired lease makes it claimable again. */
+    leaseUntil: ts('lease_until'),
+    attempts: integer('attempts').notNull().default(0),
+    idempotencyKey: text('idempotency_key'),
+    providerId: text('provider_id'),
+    model: text('model'),
+    promptId: text('prompt_id'),
+    promptVersion: integer('prompt_version'),
+    input: jsonb('input').$type<Record<string, unknown>>().notNull().default({}),
+    output: jsonb('output').$type<unknown>(),
+    rationale: text('rationale'),
+    error: text('error'),
+    inputTokens: integer('input_tokens').notNull().default(0),
+    outputTokens: integer('output_tokens').notNull().default(0),
+    latencyMs: integer('latency_ms'),
+    principalId: text('principal_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    finishedAt: ts('finished_at'),
+    /**
+     * When the call settled (billed, or given up). Usage is charged to this month, not to the month
+     * of `createdAt`; falls back to `createdAt` until the call is settled.
+     */
+    billedAt: ts('billed_at'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    uniqueIndex('ai_calls_workspace_idempotency').on(t.workspaceId, t.idempotencyKey),
+    index('ai_calls_recent').on(t.workspaceId, t.createdAt),
+    index('ai_calls_usage').on(t.workspaceId, t.providerId, sql`coalesce(${t.billedAt}, ${t.createdAt})`),
+  ],
+);

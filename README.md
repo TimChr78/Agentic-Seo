@@ -16,6 +16,23 @@ Every capability is a command that works the same over REST, MCP (for AI agents)
 
 It aims at feature parity with [OpenSEO](https://github.com/every-app/open-seo), takes the depth of [claude-seo](https://github.com/AgriciDaniel/claude-seo)'s specialist audits, and adds the closed agentic loop. See the [feature-parity matrix](docs/architecture/feature-parity.md).
 
+## Quick start
+
+Docker with the Compose plugin, from a checkout:
+
+```bash
+git clone https://github.com/TimChr78/Agentic-Seo.git && cd Agentic-Seo
+corepack pnpm install
+corepack pnpm cli init                                             # writes .env with fresh secrets
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+docker compose exec app aseo bootstrap --email you@example.com --workspace 'My site'
+docker compose exec app aseo doctor
+```
+
+The admin UI and the REST API are then on <http://localhost:3000>. `docker-compose.yml` alone pulls
+the release image; the second `-f` builds this checkout until the first release exists. See
+[Docker Compose](docs/deployment/compose.md) for the environment, upgrades and backups.
+
 ## Documentation
 
 - [Architecture](docs/architecture/README.md): overview, domain model, crawler and audits, data providers, agents and autonomy, security, tech stack, and the [ADRs](docs/architecture/adr/).

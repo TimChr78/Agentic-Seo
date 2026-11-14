@@ -1,0 +1,350 @@
+@import "tailwindcss";
+
+/* Design tokens (docs/design/DESIGN.md). Light is the default; `data-theme="dark"` on <html> switches,
+   and an inline script in index.html sets it before first paint (system / light / dark). */
+:root {
+  /* v2 warm stone neutrals and the blue interaction accent (DESIGN.md → Colour tokens). */
+  --bg: #f7f6f2;
+  --surface: #ffffff;
+  --surface-2: #f0efeb;
+  --surface-3: #e6e5df;
+  --line: #deded7;
+  --line-strong: #c5c6bf;
+  --control: #7c807a;
+  --fg: #202521;
+  --fg-2: #4c554e;
+  --muted: #606860;
+  --accent: #2457d6;
+  --accent-hover: #1e4bbb;
+  --accent-fg: #ffffff;
+  --accent-soft: #eaf0fd;
+  --good: #18794a;
+  --good-soft: #e7f4ed;
+  --warn: #9a5400;
+  --warn-soft: #fcf0df;
+  --bad: #c0282d;
+  --bad-soft: #fcebeb;
+  --scrim: rgb(10 12 16 / 0.45);
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.06), 0 4px 16px rgb(0 0 0 / 0.08);
+  --shadow-2: 0 12px 40px rgb(0 0 0 / 0.18);
+
+  /* Data visualisation: categorical (stable order), sequential and diverging ramps. Never state colours. */
+  --viz-1: #2457a7;
+  --viz-2: #087d80;
+  --viz-3: #996000;
+  --viz-4: #8256a8;
+  --viz-5: #ba472b;
+  --viz-6: #59636e;
+  --seq-1: #e2f3f1;
+  --seq-2: #acd9d6;
+  --seq-3: #6bb8b4;
+  --seq-4: #268e8e;
+  --seq-5: #09666c;
+  --div-1: #9a4c0c;
+  --div-2: #cb8b48;
+  --div-3: #f0d0aa;
+  --div-4: #f0efeb;
+  --div-5: #b6d9d7;
+  --div-6: #5faaa9;
+  --div-7: #086f73;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --font-display: var(--font-sans);
+
+  /* Type roles: size / line height / weight (DESIGN.md → Typography and geometry). */
+  --text-page: 24px;
+  --text-page--line-height: 32px;
+  --text-title: 16px;
+  --text-title--line-height: 24px;
+  --text-display: 32px;
+  --text-display--line-height: 40px;
+  --text-body: 14px;
+  --text-body--line-height: 22px;
+  --text-ui: 13px;
+  --text-ui--line-height: 20px;
+  --text-table: 13px;
+  --text-table--line-height: 20px;
+  --text-sm: 12px;
+  --text-sm--line-height: 18px;
+  --text-xs: 11px;
+  --text-xs--line-height: 16px;
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  --radius-sm: 4px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 12px;
+  --radius-pill: 999px;
+
+  --duration-fast: 120ms;
+  --duration-enter: 180ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-feedback: cubic-bezier(0, 0, 0.2, 1);
+
+  /* Spacing increments; no other values. */
+  --space-2: 2px;
+  --space-4: 4px;
+  --space-6: 6px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-20: 20px;
+  --space-24: 24px;
+  --space-32: 32px;
+  --space-40: 40px;
+  --space-48: 48px;
+  --space-64: 64px;
+
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  /* Tonal fills separate content: canvas → surface → inset/hover → pressed. */
+  --bg: #111512;
+  --surface: #191f1b;
+  --surface-2: #222a24;
+  --surface-3: #2c352e;
+  --line: #343e36;
+  --line-strong: #49554b;
+  --control: #87958a;
+  --fg: #edf0e9;
+  --fg-2: #c0c9bf;
+  --muted: #a0aca1;
+  --accent: #8baafa;
+  --accent-hover: #a5bdfb;
+  --accent-fg: #111512;
+  --accent-soft: #222f4a;
+  --good: #70d29b;
+  --good-soft: #193526;
+  --warn: #f0b665;
+  --warn-soft: #392c18;
+  --bad: #ff9292;
+  --bad-soft: #422427;
+  --scrim: rgb(0 0 0 / 0.6);
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4), 0 6px 20px rgb(0 0 0 / 0.35);
+  --shadow-2: 0 16px 48px rgb(0 0 0 / 0.55);
+
+  --viz-1: #8eb5ff;
+  --viz-2: #59c8c6;
+  --viz-3: #e8b653;
+  --viz-4: #c3a1e5;
+  --viz-5: #ff9d80;
+  --viz-6: #b6c1cc;
+  --seq-1: #213c3c;
+  --seq-2: #2b5e5d;
+  --seq-3: #378782;
+  --seq-4: #55b2aa;
+  --seq-5: #8cddd0;
+  --div-1: #f5c48a;
+  --div-2: #ce985e;
+  --div-3: #7c5a35;
+  --div-4: #2c352e;
+  --div-5: #305c5a;
+  --div-6: #52a09a;
+  --div-7: #8cddd0;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-control: var(--control);
+  --color-fg: var(--fg);
+  --color-fg-2: var(--fg-2);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-good: var(--good);
+  --color-good-soft: var(--good-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-viz-1: var(--viz-1);
+  --color-viz-2: var(--viz-2);
+  --color-viz-3: var(--viz-3);
+  --color-viz-4: var(--viz-4);
+  --color-viz-5: var(--viz-5);
+  --color-viz-6: var(--viz-6);
+  --color-seq-1: var(--seq-1);
+  --color-seq-2: var(--seq-2);
+  --color-seq-3: var(--seq-3);
+  --color-seq-4: var(--seq-4);
+  --color-seq-5: var(--seq-5);
+  --color-div-1: var(--div-1);
+  --color-div-2: var(--div-2);
+  --color-div-3: var(--div-3);
+  --color-div-4: var(--div-4);
+  --color-div-5: var(--div-5);
+  --color-div-6: var(--div-6);
+  --color-div-7: var(--div-7);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-display: var(--font-display);
+  /* Every implicit Tailwind transition uses the shared fast token, never a hidden 150 ms default. */
+  --default-transition-duration: var(--duration-fast);
+  --default-transition-timing-function: var(--ease);
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 12px;
+  --radius-pill: 999px;
+  --shadow-1: var(--shadow-1);
+  --shadow-2: var(--shadow-2);
+  --text-xs: 11px;
+  --text-xs--line-height: 16px;
+  --text-sm: 12px;
+  --text-sm--line-height: 18px;
+  --text-ui: 13px;
+  --text-ui--line-height: 20px;
+  --text-table: 13px;
+  --text-table--line-height: 20px;
+  --text-body: 14px;
+  --text-body--line-height: 22px;
+  --text-title: 16px;
+  --text-title--line-height: 24px;
+  --text-page: 24px;
+  --text-page--line-height: 32px;
+  --text-display: 32px;
+  --text-display--line-height: 40px;
+}
+
+/* Element defaults sit in the base layer so utilities (text-accent, outline-…) win. */
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    max-width: 100%;
+    overflow-x: clip;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 20px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  h1 {
+    text-wrap: balance;
+    letter-spacing: -0.02em;
+  }
+  h2,
+  h3 {
+    text-wrap: balance;
+    letter-spacing: 0;
+  }
+  a {
+    color: inherit;
+  }
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+  .eyebrow {
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--accent) 25%, transparent);
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .focus-inset:focus-visible {
+    outline-offset: -2px;
+  }
+}
+
+/* Motion: short, purposeful and static where it is decoration (#555). Durations come only from
+   --duration-fast (120ms) and --duration-enter (180ms); nothing repeats. Loading shapes are static. */
+@keyframes as-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes as-slide-in-right {
+  from {
+    transform: translateX(16px);
+    opacity: 0;
+  }
+}
+@keyframes as-rise {
+  from {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+}
+.as-fade-in {
+  animation: as-fade-in var(--duration-enter) var(--ease);
+}
+.as-drawer-in {
+  animation: as-slide-in-right var(--duration-enter) var(--ease);
+}
+.as-rise {
+  animation: as-rise var(--duration-enter) var(--ease);
+}
+/* Explicit token transitions. Use these instead of bare Tailwind `transition-*` classes. */
+.as-motion-colors {
+  transition-property: color, background-color, border-color, outline-color, fill, stroke;
+  transition-duration: var(--duration-fast);
+  transition-timing-function: var(--ease-feedback);
+}
+.as-motion-transform {
+  transition-property: transform;
+  transition-duration: var(--duration-fast);
+  transition-timing-function: var(--ease);
+}
+.as-skeleton {
+  background: var(--surface-3);
+  border-radius: var(--radius-sm);
+}
+/* A static progress glyph: the shape and the object-specific label carry the state, motion does not. */
+.as-progress {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    /* biome-ignore lint/complexity/noImportantStyles: must override component-level animation declarations for reduced motion */
+    animation: none !important;
+    /* biome-ignore lint/complexity/noImportantStyles: must override component-level transition declarations for reduced motion */
+    transition-duration: 0ms !important;
+    /* biome-ignore lint/complexity/noImportantStyles: must override component-level transition delays for reduced motion */
+    transition-delay: 0ms !important;
+    /* biome-ignore lint/complexity/noImportantStyles: must override component-level animation delays for reduced motion */
+    animation-delay: 0ms !important;
+    /* biome-ignore lint/complexity/noImportantStyles: must override component-level scroll behaviour for reduced motion */
+    scroll-behavior: auto !important;
+  }
+  .as-fade-in,
+  .as-drawer-in,
+  .as-rise {
+    /* biome-ignore lint/complexity/noImportantStyles: entering transforms are removed, not shortened, under reduced motion */
+    transform: none !important;
+  }
+}
+
+/* Touch layouts (DESIGN.md → Typography and geometry): every button is at least 40 px high below
+   768 px and on coarse pointers, including one-off buttons that are not the Button component. */
+@media (max-width: 767px), (pointer: coarse) {
+  button {
+    min-height: 40px;
+    min-width: 40px;
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "@agentic-seo/fetch",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "robots-parser": "3.0.1",
+    "undici": "8.12.4"
+  }
+}

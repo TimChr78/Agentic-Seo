@@ -1,0 +1,88 @@
+# Self-hosted single node: the app and Postgres 17. That is the whole stack (ADR-0003); the
+# optional renderer sidecar arrives in a later phase as its own image.
+#
+# Never edit this file. Put site-specific changes (an external network, bind mounts, resource
+# limits) in compose.override.yaml, which Compose reads automatically. Upgrading then means
+# replacing this file with the new release's copy and bumping ASEO_VERSION, with no merge to resolve.
+#
+# Copy .env.example to .env first: `aseo init` writes one with fresh secrets.
+services:
+  postgres:
+    # Pinned by digest: a pull never changes the database's patch version behind your back.
+    image: postgres:17-alpine@sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aseo
+      # Interpolated raw into DATABASE_URL below: Compose cannot percent-encode, so this password
+      # must be hex (`openssl rand -hex 32`, as `aseo init` does), never base64.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: aseo
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aseo -d aseo"]
+      interval: 5s
+      retries: 10
+
+  app:
+    # Pull the release image; docker-compose.build.yml builds this checkout from source instead.
+    image: ghcr.io/timchr78/agentic-seo:${ASEO_VERSION:-0.0.0}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Every variable in apps/server/src/config.ts is passed here. Keep the explicit list (rather
+      # than env_file) so Compose's own settings and the fixed service URL below cannot leak into
+      # the app container. An unset or empty value is not set: loadConfig() ignores '' and applies
+      # the documented default.
+      ROLE: ${ROLE:-all}
+      PORT: 3000
+      SKIP_MIGRATIONS: ${SKIP_MIGRATIONS:-false}
+      STRICT_INPUTS: ${STRICT_INPUTS:-false}
+      MCP_TEXT_CONTENT: ${MCP_TEXT_CONTENT:-json}
+      MCP_TOOL_NAME_STYLE: ${MCP_TOOL_NAME_STYLE:-dotted}
+      LOG_LEVEL: ${LOG_LEVEL:-}
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3000}
+      WEB_DIST: ${WEB_DIST:-}
+      CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
+      TRUSTED_ORIGINS: ${TRUSTED_ORIGINS:-}
+      DATABASE_URL: postgres://aseo:${POSTGRES_PASSWORD}@postgres:5432/aseo
+      APP_DB_ROLE: ${APP_DB_ROLE:-}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}
+      AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET in .env}
+      KEY_PROVIDER: ${KEY_PROVIDER:-}
+      MASTER_KEY: ${MASTER_KEY:-}
+      MASTER_KEY_PREVIOUS: ${MASTER_KEY_PREVIOUS:-}
+      OPENBAO_ADDR: ${OPENBAO_ADDR:-}
+      OPENBAO_TOKEN: ${OPENBAO_TOKEN:-}
+      OPENBAO_TOKEN_FILE: ${OPENBAO_TOKEN_FILE:-}
+      OPENBAO_TRANSIT_MOUNT: ${OPENBAO_TRANSIT_MOUNT:-}
+      OPENBAO_TRANSIT_KEY: ${OPENBAO_TRANSIT_KEY:-}
+      OPENBAO_NAMESPACE: ${OPENBAO_NAMESPACE:-}
+      AWS_KMS_KEY_ID: ${AWS_KMS_KEY_ID:-}
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_KMS_ENDPOINT: ${AWS_KMS_ENDPOINT:-}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-}
+      WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-}
+      JOB_TICK_MS: ${JOB_TICK_MS:-}
+    volumes:
+      # Reserved for the local filesystem blob driver (ADR-0003): page snapshots, screenshots and
+      # reports. Phase 0 has no storage module yet, so nothing writes here; S3-compatible storage
+      # will be configuration instead of this volume.
+      - appdata:/data
+    ports:
+      # Loopback only by default: nothing on the network reaches the app until you decide it should.
+      # Put a tunnel or reverse proxy in front (compose.override.example.yaml), or set ASEO_BIND to
+      # another host address.
+      - "${ASEO_BIND:-127.0.0.1}:${ASEO_PORT:-3000}:3000"
+
+volumes:
+  pgdata:
+  appdata:

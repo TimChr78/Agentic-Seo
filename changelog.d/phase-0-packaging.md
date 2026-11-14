@@ -1,0 +1,5 @@
+- Add the production `Dockerfile`: Node 24, pnpm from corepack, the built admin UI, the server run through tsx, a non-root user, an `aseo` executable on `PATH` and a `/readyz` healthcheck.
+- Add `docker-compose.yml` (app and Postgres 17, named volumes, migration on start), `docker-compose.build.yml` for source builds and `compose.override.example.yaml` with tunnel, bind-mount, proxy and resource-limit examples.
+- Add `scripts/smoke.sh`: builds the image, migrates, bootstraps, runs `aseo doctor`, checks the health endpoints, `/openapi.json` and the UI, signs in, creates an API token and calls `/v1/whoami`; works with or without the Compose plugin and cleans up after itself.
+- Add a CI `image` job that builds the image and runs the smoke test.
+- Add deployment documentation for Compose and a quick start to the README.

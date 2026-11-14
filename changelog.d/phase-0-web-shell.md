@@ -1,0 +1,6 @@
+- The admin UI shell and design system: the ported tokens, UI primitives, themes, router, command palette and sign-in, with the SEO navigation, site switcher and Home setup checklist. The API is a typed interface backed by a demo implementation until the server client lands.
+- The first site created from the switcher opens the app straight away instead of staying on "No sites yet".
+- Home keys its read by site, so switching sites shows the loading or error state rather than the previous site's numbers.
+- Settings entries and deep links follow the server's role matrix: Site needs `sites:write`, workspace configuration needs `workspace:admin`, API tokens stay account-accessible and the approval policy needs `artifacts:read`. Site creation is offered only to roles with `sites:write`.
+- The average position tile treats a lower position as better.
+- The New site dialog submits through its form, so required fields and Enter both work.
