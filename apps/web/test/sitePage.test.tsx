@@ -155,4 +155,49 @@ describe('the site verification screen', () => {
     expect(await screen.findByText(lastError)).toBeTruthy();
     expect(screen.getByText('The last check did not verify this site')).toBeTruthy();
   });
+
+  it('never shows a check of the previous site after switching, finished or still running', async () => {
+    const other: Site = { ...SITE, id: 'site_oresund', name: 'Oresund Live', domain: 'oresund.live' };
+    const verified: VerifyResult = { siteId: SITE.id, verified: true, method: 'dns', checkedAt: '2026-11-14T10:00:00.000Z', error: null };
+    let finish: (value: VerifyResult) => void = () => {};
+    const verifySite = vi
+      .fn<(siteId: string) => Promise<VerifyResult>>()
+      .mockResolvedValueOnce(verified)
+      .mockImplementationOnce(() => new Promise<VerifyResult>((resolve) => (finish = resolve)));
+    setApiClient({
+      ...createDemoApi(),
+      getVerification: async (siteId: string) =>
+        siteId === other.id ? verification({ siteId: other.id, domain: other.domain }) : verification(),
+      verifySite,
+    });
+    const onSite = (site: Site): SessionValue => ({ ...session(), sites: [SITE, other], site });
+    const view = renderPage(onSite(SITE));
+
+    // A finished check on the first site.
+    await userEvent.click(await screen.findByRole('button', { name: 'Check now' }));
+    expect((await screen.findAllByText('Verified')).length).toBeGreaterThan(0);
+    view.rerender(
+      <SessionContext.Provider value={onSite(other)}>
+        <SitePage />
+      </SessionContext.Provider>,
+    );
+    expect((await screen.findAllByText('Not verified')).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText('Verified')).toHaveLength(0);
+
+    // A check still running on the first site when the person switches away.
+    view.rerender(
+      <SessionContext.Provider value={onSite(SITE)}>
+        <SitePage />
+      </SessionContext.Provider>,
+    );
+    await userEvent.click(await screen.findByRole('button', { name: 'Check now' }));
+    view.rerender(
+      <SessionContext.Provider value={onSite(other)}>
+        <SitePage />
+      </SessionContext.Provider>,
+    );
+    finish(verified);
+    await waitFor(() => expect(screen.getAllByText('Not verified').length).toBeGreaterThan(0));
+    expect(screen.queryAllByText('Verified')).toHaveLength(0);
+  });
 });

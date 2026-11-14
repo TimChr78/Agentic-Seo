@@ -91,6 +91,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
     // The workspaces the person belongs to. A signed-in person without one has been invited but has
     // not accepted yet; the server says so with a 401 rather than an empty list.
+    // Asked without the stored workspace: a workspace the person has left would make the server
+    // refuse the request (401) and hide the memberships they still have.
+    const saved = getWorkspaceId();
+    setWorkspaceId(null, { persist: false });
     let memberships: Awaited<ReturnType<typeof api.getMemberships>>;
     try {
       memberships = await api.getMemberships();
@@ -99,7 +103,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       return setStatus('offline');
     }
     // The workspace used last on this device, when the person still belongs to it; else their first.
-    const chosen = memberships.find((membership) => membership.id === getWorkspaceId()) ?? memberships[0];
+    const chosen = memberships.find((membership) => membership.id === saved) ?? memberships[0];
     if (!chosen) return setStatus('no-workspace');
     setWorkspaceId(chosen.id);
     setDemo(await apiIsDemo());

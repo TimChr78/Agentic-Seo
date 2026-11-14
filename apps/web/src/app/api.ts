@@ -535,10 +535,14 @@ export function setApiClient(client: Api | null): () => void {
 }
 
 /** True when the API server answers; a dev server with no backend behind its proxy does not. */
-async function serverReachable(): Promise<boolean> {
+export async function serverReachable(): Promise<boolean> {
   try {
     const response = await fetch('/healthz', { credentials: 'include' });
-    return response.ok;
+    if (!response.ok) return false;
+    // Without a backend, a dev server can answer any path with its HTML fallback and a 200: only the
+    // API's own JSON answer counts.
+    const body = (await response.json().catch(() => null)) as { ok?: unknown } | null;
+    return body?.ok === true;
   } catch {
     return false;
   }

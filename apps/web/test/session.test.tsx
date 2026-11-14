@@ -1,7 +1,16 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { type Api, type CreateSiteInput, createDemoApi, type Site, setApiClient } from '../src/app/api';
+import {
+  type Api,
+  ApiError,
+  type CreateSiteInput,
+  createDemoApi,
+  getWorkspaceId,
+  type Site,
+  setApiClient,
+  setWorkspaceId,
+} from '../src/app/api';
 import { SessionProvider, useSession } from '../src/app/session';
 
 function Probe() {
@@ -67,5 +76,26 @@ describe('session', () => {
     await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('ready'));
     expect(screen.getByTestId('site').textContent).toBe('Second Site');
     expect(screen.getByTestId('count').textContent).toBe('1');
+  });
+
+  it('finds the remaining workspace when the one saved on this device was left', async () => {
+    const api = firstRunApi();
+    setWorkspaceId('ws_gone');
+    setApiClient({
+      ...api,
+      // As the server does: a request naming a workspace the person is not in is refused outright.
+      getMemberships: async () => {
+        if (getWorkspaceId() === 'ws_gone') throw new ApiError(401, 'unauthorized', 'Not a member of this workspace.');
+        return [{ id: 'ws_2', name: 'Still here', role: 'owner' }];
+      },
+      getIdentity: async () => ({ ...(await api.getIdentity()), workspaceId: 'ws_2' }),
+    });
+    render(
+      <SessionProvider>
+        <Probe />
+      </SessionProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('no-site'));
+    expect(getWorkspaceId()).toBe('ws_2');
   });
 });

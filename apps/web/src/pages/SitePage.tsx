@@ -16,6 +16,13 @@ import { formatDateTime } from '../ui/time';
  */
 export default function SitePage() {
   useCrumbs([{ label: 'Site' }]);
+  const { site } = useSite();
+  // Keyed by site: switching sites remounts the screen, so a finished or still-running check of the
+  // previous site can never show (or later land) as this site's result.
+  return <SiteVerification key={site.id} />;
+}
+
+function SiteVerification() {
   const { site, refresh } = useSite();
   const { can } = useSession();
   // Keyed by site: a check on another site's screen never shows this site's result.

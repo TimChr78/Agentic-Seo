@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { ApiError, type CommandCall, createCommandApi } from '../src/app/api';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ApiError, type CommandCall, createCommandApi, serverReachable } from '../src/app/api';
 
 // The mapping from command outputs to the UI's shapes. Phase 0 has no audit, Search Console or
 // AI-visibility source, so Home must carry nulls with a reason — never a zero that reads as healthy.
@@ -110,5 +110,29 @@ describe('the command mapping', () => {
     const api = createCommandApi(fakeCall({ 'sites.verification': verification }));
 
     expect(await api.getVerification('site_1')).toBe(verification);
+  });
+});
+
+describe('the development reachability probe', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('counts only the API server’s own health answer, not a dev server’s HTML fallback', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('<!doctype html><html></html>', { status: 200, headers: { 'content-type': 'text/html' } })),
+    );
+    expect(await serverReachable()).toBe(false);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ ok: true, version: 'test' })),
+    );
+    expect(await serverReachable()).toBe(true);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('fetch failed');
+      }),
+    );
+    expect(await serverReachable()).toBe(false);
   });
 });
