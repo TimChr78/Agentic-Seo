@@ -27,6 +27,8 @@ erDiagram
 | **Connection** | An OAuth or API-key link to GSC, GA4, Bing Webmaster or a CMS/site connector | Secrets in `secrets`; one per site per kind |
 | **Site context** | The shared memory: business overview, goals, positioning, writing preferences, key pages, research log | A versioned singleton artifact, exposed as `site-context://<site>` (OpenSEO's "project memory", Agentic Marketing's business context) |
 
+Site ids are uuids, like workspace ids, because `artifacts.site_id`, `learnings.site_id` and `provider_calls.site_id` are uuid columns; each has a composite foreign key to `sites (workspace_id, id)`. A site is archived, never deleted, so its artifacts and history stay meaningful. Markets and competitors are ordinary rows of a site's configuration (a site keeps at most one default market); only site memory is an artifact. Ownership is verified by a DNS TXT record or a home page meta tag carrying a token created with the site; a failed re-check records the reason and leaves the site verified in Phase 0.
+
 ## 2. Crawling and checks
 
 ```mermaid

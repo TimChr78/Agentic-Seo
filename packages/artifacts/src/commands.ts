@@ -1,6 +1,6 @@
 import { type CommandContext, defineCommand, lockAgentPolicy } from '@agentic-seo/commands';
 import { AppError, hashValue, newId, redactCredentials } from '@agentic-seo/core';
-import { type AgentUndo, schema, type VersionState } from '@agentic-seo/db';
+import { type AgentUndo, schema, type Tx, type VersionState } from '@agentic-seo/db';
 import { and, asc, count, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { diffJson } from './diff';
@@ -108,6 +108,30 @@ export async function validateContent(type: ArtifactType, content: unknown, mode
   const problems = (await contentValidators.get(type)?.(parsed.data)) ?? [];
   if (problems.length) throw new AppError('invalid_input', `The content is not a valid ${type}: ${problems.join('; ')}`, { problems });
   return parsed.data as Record<string, unknown>;
+}
+
+/**
+ * A site-scoped artifact may only name a site of this workspace that is still active. The composite
+ * foreign key in 0005_sites.sql would refuse an unknown site with a raw 23503, which says nothing a
+ * person or agent can act on; this check also refuses an archived site, because new rows should not
+ * attach to history. Both cases are answered at the command entry point instead.
+ */
+export async function assertActiveSite(tx: Tx, workspaceId: string, siteId: string): Promise<void> {
+  const [site] = await tx
+    .select({
+      id: schema.sites.id,
+      name: schema.sites.name,
+      domain: schema.sites.primaryDomain,
+      archived: schema.sites.archived,
+    })
+    .from(schema.sites)
+    .where(and(eq(schema.sites.workspaceId, workspaceId), eq(schema.sites.id, siteId)));
+  if (!site) throw new AppError('not_found', `Site ${siteId} does not exist in this workspace. Create it with sites.create first.`);
+  if (site.archived)
+    throw new AppError(
+      'conflict',
+      `Site “${site.name}” (${site.domain}) is archived, so nothing new can belong to it. Create a site for that domain again, or name an active site.`,
+    );
 }
 
 async function loadArtifact(ctx: CommandContext, artifactId: string) {
@@ -432,6 +456,7 @@ export const createArtifact = defineCommand({
     const warnings = contentWarnings(input.type, content);
     const id = newId(artifactTypes[input.type].prefix);
     const ws = ctx.principal.workspaceId;
+    if (input.siteId) await assertActiveSite(ctx.tx, ws, input.siteId);
     if ('singleton' in artifactTypes[input.type]) {
       // Two creations of the same singleton wait for each other here, so the second sees the first
       // and gets the conflict below rather than the unique index's error.
