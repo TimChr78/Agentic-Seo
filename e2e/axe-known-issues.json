@@ -1,0 +1,4 @@
+{
+  "$comment": "axe-core violations that are known and deliberately not fixed yet. The phase is done when this list is empty (docs/architecture/roadmap.md, Phase 0 done criteria). Each entry names the axe rule id, the route it appears on (a route name from e2e/routes.mjs, or * for every route) and why it is deferred. Remove an entry when the cause is fixed; the spec fails on any violation that is not listed here.",
+  "issues": []
+}

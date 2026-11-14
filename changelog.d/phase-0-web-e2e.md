@@ -1,0 +1,8 @@
+- Wire the admin UI to the real server through the typed command client: the session and workspace (`whoami`, `workspace.get`, `workspace.memberships`), sites (`sites.list`, `sites.create`), the setup checklist (`sites.checklist`) and Home now read what the server holds. Where Phase 0 has no source — audit health, Search Console clicks and positions, AI citations — Home shows `null` with the reason ("Connect Search Console to collect clicks.") instead of a number.
+- Add Settings → Site: the DNS TXT record and the meta tag to publish, a "Check now" action that calls `sites.verify`, and the result — verified with its method and time, or the server's own reason it failed.
+- A signed-in person without a workspace is a real state the app explains; a refresh keeps the shell mounted instead of flashing the loading screen.
+- Add Playwright with the Phase 0 journey (sign up, sign in, create the first site, open verification from the setup checklist, check ownership, see the checklist confirm it) and axe over every route in light and dark (WCAG 2.1/2.2 A and AA), plus an `e2e` CI job with a disposable database on the test Postgres.
+- Fix the accessibility issues the scan found: the first-run and no-workspace screens now have a level-one heading, and the no-workspace screen is a `main` landmark.
+- A workspace saved on the device that the person has left no longer hides their other workspaces: the memberships request alone is sent without the workspace header, so other commands keep theirs.
+- The verification screen is keyed by site, so a finished or running check of one site never shows on another.
+- `pnpm dev` proxies `/v1` and `/healthz`, and the demo fallback counts only the API's own health answer.

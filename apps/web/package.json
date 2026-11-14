@@ -11,6 +11,7 @@
     "gen:brand": "tsx scripts/gen-brand-assets.ts"
   },
   "devDependencies": {
+    "@agentic-seo/server": "workspace:*",
     "@tailwindcss/vite": "4.3.3",
     "@testing-library/react": "16.3.3",
     "@testing-library/user-event": "14.6.8",
@@ -24,6 +25,7 @@
     "vite": "8.3.5"
   },
   "dependencies": {
+    "@agentic-seo/client": "workspace:*",
     "echarts": "6.1.0",
     "lucide-react": "1.61.0",
     "react": "19.3.1",

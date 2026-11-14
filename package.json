@@ -15,12 +15,15 @@
     "typecheck": "pnpm -r --filter './packages/*' --filter './apps/*' typecheck",
     "test": "vitest run",
     "test:ci": "vitest run --reporter=default --reporter=junit --outputFile.junit=reports/junit.xml",
+    "e2e": "playwright test",
     "cli": "pnpm --filter @agentic-seo/server cli",
     "migrate": "pnpm --filter @agentic-seo/server cli migrate",
     "dev": "pnpm --filter @agentic-seo/server dev"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
     "@biomejs/biome": "2.5.15",
+    "@playwright/test": "1.65.0",
     "@types/node": "^26.6.5",
     "tsx": "4.23.15",
     "typescript": "^7.0.2",

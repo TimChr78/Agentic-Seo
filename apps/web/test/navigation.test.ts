@@ -103,9 +103,13 @@ describe('navigation', () => {
     expect(visibleNav(can, { localBusiness: true }).flatMap((group) => group.items.map((item) => item.label))).toContain('Local');
   });
 
-  it('has a real page for every destination: Home is built, the rest names its phase', () => {
+  it('has a real page for every destination: the built ones render, the rest names its phase', () => {
     for (const path of [...NAV.flatMap((group) => group.items.map((item) => item.path)), ...SETTINGS_ITEMS.map((item) => item.path)]) {
-      if (path === '/') continue;
+      // Home and Settings → Site are built in Phase 0; a planned page would be a lie for them.
+      if (path === '/' || path === '/settings/site') {
+        expect(PLANNED[path], `${path} is built, so it needs no planned page`).toBeUndefined();
+        continue;
+      }
       expect(PLANNED[path], `${path} needs a planned page`).toBeTruthy();
       expect(PLANNED[path].phase).toMatch(/^Phase \d$/);
     }

@@ -120,12 +120,6 @@ export const PLANNED: Record<string, PlannedDestination> = {
     phase: 'Phase 6',
     body: 'Weekly and monthly reports, their evidence and share links arrive with the agent reporting work in Phase 6.',
   },
-  '/settings/site': {
-    title: 'Site',
-    description: 'Site details, markets, competitors and ownership verification.',
-    phase: 'Phase 0',
-    body: 'The sites and verification task adds the editor here. Until it lands, the switcher shows what exists and Home tracks the checklist.',
-  },
   '/settings/connections': {
     title: 'Connections',
     description: 'Search Console, GitHub and the other connectors a site can use.',
