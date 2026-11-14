@@ -9,6 +9,7 @@
  *   "not evaluated" instead of pretending.
  */
 export * from './addresses';
+export * from './egress';
 export * from './errors';
 export * from './limiter';
 export * from './policy';

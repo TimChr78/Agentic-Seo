@@ -1,0 +1,32 @@
+import { newId } from '@agentic-seo/core';
+import { type Db, schema } from '@agentic-seo/db';
+
+// Every model call goes through one log row: a prompt test run now, an agent step or an answer
+// engine call later. Recording it in its own committed transaction keeps the call visible in
+// `ai.calls` and in the provider's monthly usage.
+
+export type AiCallRecord = Omit<typeof schema.aiCalls.$inferInsert, 'workspaceId' | 'id'> & { id?: string };
+
+/**
+ * Writes one ai_calls row for the workspace and returns its id.
+ *
+ * `idempotent` turns a retry with the same id into a no-op: a caller that did not learn whether an
+ * earlier commit landed (a failure after commit) can retry without writing the usage twice. The
+ * row keeps its stable id, so one call is still one row.
+ */
+export async function recordAiCall(
+  db: Db,
+  workspaceId: string,
+  values: AiCallRecord,
+  opts: { idempotent?: boolean } = {},
+): Promise<string> {
+  const { id = newId('aic'), ...rest } = values;
+  // A logged call has already run: its usage belongs to the month it is recorded in unless the
+  // caller says when the provider billed it.
+  const row = { workspaceId, id, ...rest, billedAt: rest.billedAt ?? new Date() };
+  await db.withWorkspace(workspaceId, (tx) => {
+    const insert = tx.insert(schema.aiCalls).values(row);
+    return opts.idempotent ? insert.onConflictDoNothing({ target: [schema.aiCalls.workspaceId, schema.aiCalls.id] }) : insert;
+  });
+  return id;
+}

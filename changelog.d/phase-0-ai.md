@@ -1,0 +1,16 @@
+- Add the `ai` package: the LLM gateway for the workspace's own BYOK keys, over the OpenAI-compatible and Anthropic-compatible wire formats, with the key sealed and never returned.
+- Add `aiProviders.list/create/update/delete`: provider management is a workspace-admin settings change, and each use (`agents` now, `answer_engines` later) is served by one provider at a time.
+- Add the AI decision log and usage: `ai.calls` (every model call with its input, rationale or fallback reason, tokens and latency) and `ai.usage` (tokens, calls, fallbacks and an estimated cost per day, kind and model).
+- Add monthly token budgets per provider with reservations: a call reserves its estimated tokens before the model is asked, so parallel calls cannot overspend, and settles its real usage and the hold in one transaction.
+- Add `prompts.test`, `prompts.testRun` and `prompts.testRuns`: run a prompt artifact's test cases against the agents provider, one queued call per case, and read the answers, checks, latency and tokens.
+- Extend the `prompt` artifact: an answer contract (named text slots with length caps and fallbacks, or one key out of a fixed set), forbidden phrases for generated text, an output-token cap and optional test cases with expected answers.
+- Add migration `0006_ai.sql`: AI providers, the call log and token reservations, with row-level security and app-role grants.
+- Security: a provider base URL goes through the fetch egress guard, so a workspace cannot point an LLM provider at a private, loopback or cloud metadata address, and plain-http or non-443 endpoints are refused.
+- Add the scheduler task `ai_prompt_tests`, which runs queued prompt test cases outside any request or command transaction.
+- Security: a provider connection is pinned to the address the egress guard checked, so a base URL whose name answers public for the check and internal for the connection (DNS rebinding) cannot reach an internal address, with TLS still verified against the configured name.
+- Budget: the month's usage and its live holds are read in one SQL statement, so a settlement committing between two reads cannot be invisible to both and leave the month looking free.
+- Budget: a model answer that fails JSON parsing or schema validation records the usage the provider billed (from the AI SDK's error), and a call whose usage is unknown settles the reservation's estimate instead of zero.
+- Budget: a reservation lasts through the next billing month and names the call attempt it covers, so a worker that dies after the provider billed keeps that budget counted instead of releasing it after five minutes.
+- Budget: usage is charged to the month a call was billed in (new `ai_calls.billed_at`, set at settlement) rather than the month it was queued, so a case queued before UTC month-end counts against the new month in the budget and in `ai.usage`.
+- A valid answer without token counts is billed at the reservation estimate, not as zero.
+- The pinned provider connection may use every checked address, so an unreachable first answer (IPv6 on an IPv4-only network) falls back to the next before any request byte is sent.
