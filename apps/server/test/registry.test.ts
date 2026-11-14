@@ -36,4 +36,19 @@ describe('the command registry', () => {
   it('declares secrets as settings, never autonomous', () => {
     for (const name of ['secrets.set', 'secrets.delete']) expect(commands.find((c) => c.name === name)?.actionClass).toBe('settings');
   });
+
+  it('exposes the provider usage commands, with budgets as a person’s settings decision', () => {
+    const names = commands.map((c) => c.name);
+    for (const name of ['usage.budgets', 'usage.setBudget', 'usage.spend', 'usage.unresolved', 'usage.estimate'])
+      expect(names).toContain(name);
+    expect(commands.find((c) => c.name === 'usage.setBudget')).toMatchObject({
+      permission: 'workspace:admin',
+      effect: 'write',
+      humansOnly: true,
+      actionClass: 'settings',
+    });
+    // The read models serve whoever may spend; none of them is a draft an agent could slip through.
+    for (const name of ['usage.budgets', 'usage.spend', 'usage.unresolved', 'usage.estimate'])
+      expect(commands.find((c) => c.name === name)).toMatchObject({ permission: 'research:spend', effect: 'read' });
+  });
 });

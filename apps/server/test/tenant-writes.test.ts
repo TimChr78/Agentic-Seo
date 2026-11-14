@@ -1,4 +1,4 @@
-import { agentForCredential, chooseOAuthWorkspace, cleanupExpiredOAuthWorkspaceSelections } from '@agentic-seo/auth';
+import { agentForCredential, chooseOAuthWorkspace, cleanupExpiredOAuthWorkspaceSelections, principalFromApiToken } from '@agentic-seo/auth';
 import { newUuid } from '@agentic-seo/core';
 import type { Db } from '@agentic-seo/db';
 import { sql } from 'drizzle-orm';
@@ -64,6 +64,22 @@ describe('tenant writes on the auth path', () => {
       tx.execute<{ id: string }>(sql`SELECT id FROM agents WHERE id = ${agent.id}`),
     );
     expect(rows).toEqual([{ id: agent.id }]);
+  });
+
+  it('records an API token’s last use as the app role, not through the owner pool', async () => {
+    const created = await t.api(owner, ws).call('apiTokens.create', { name: 'Tenant probe', scopes: ['artifacts:read'] });
+    const { db, attempted } = refusingOwnerWrites(t.srv.db);
+    // A fresh token has never been used, so this authentication writes last_used_at.
+    const principal = await principalFromApiToken(db, created.token);
+    expect(principal).toMatchObject({ type: 'agent', workspaceId: ws });
+    expect(attempted).toEqual([]);
+
+    const { rows } = await t.srv.db.withWorkspace(ws, (tx) =>
+      tx.execute<{ last_used_at: string | null }>(
+        sql`SELECT last_used_at::text AS last_used_at FROM api_tokens WHERE workspace_id = ${ws} AND id = ${created.id}`,
+      ),
+    );
+    expect(rows[0]?.last_used_at).not.toBeNull();
   });
 
   it('records a consent workspace choice as the app role', async () => {
