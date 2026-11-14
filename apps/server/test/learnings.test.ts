@@ -30,6 +30,11 @@ beforeAll(async () => {
   t = await startTestServer('test_learnings', testPort(3322));
   owner = await t.signUp(`owner-learnings-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']], 'none');
+  // Learnings may name a site of the workspace; 0005_sites.sql adds the foreign key.
+  await t.srv.db.admin.query(
+    `INSERT INTO sites (workspace_id, id, name, primary_domain, verification_token) VALUES ($1, $2, 'Learning site', 'learning.example', 'seed-token')`,
+    [ws, siteId],
+  );
   const api = t.api(owner, ws);
   // A real recommendation artifact to cite as the source of the result. Recommendation content
   // arrives in Phase 1, so the row is seeded directly; the foreign key shape is what matters.

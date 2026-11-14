@@ -14,6 +14,11 @@ beforeAll(async () => {
   t = await startTestServer('test_artifact_pages', testPort(3510));
   owner = await t.signUp(`pages-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']]);
+  // The site filter names a real site (0005_sites.sql adds the foreign key).
+  await t.srv.db.admin.query(
+    `INSERT INTO sites (workspace_id, id, name, primary_domain, verification_token) VALUES ($1, $2, 'Paged site', 'paged.example', 'seed-token')`,
+    [ws, SITE],
+  );
   // Seeded directly: the boundary is what is under test, and 201 HTTP round trips would only
   // slow the suite down.
   await t.srv.db.admin.query(

@@ -19,6 +19,12 @@ afterAll(() => t?.close());
 const note = (title: string) => ({ title, body: 'Written for the archived-artifact test.' });
 const archive = (ws: string, id: string) =>
   t.srv.db.admin.query('UPDATE artifacts SET archived = true WHERE workspace_id = $1 AND id = $2', [ws, id]);
+/** Sites arrive in task I; an artifact's site_id has to exist in the same workspace. */
+const seedSite = (ws: string, id: string) =>
+  t.srv.db.admin.query(
+    `INSERT INTO sites (workspace_id, id, name, primary_domain, verification_token) VALUES ($1, $2, 'Seeded site', 'seeded-site.example', 'seed-token')`,
+    [ws, id],
+  );
 const artifactRow = async (ws: string, id: string) =>
   (
     await t.srv.db.admin.query<{ archived: boolean; published_version: number | null }>(
@@ -136,6 +142,7 @@ describe('archived singletons (#899)', () => {
   it('lets a site create a new singleton after archiving the live one', async () => {
     const ws = await t.workspaceWith([[owner, 'owner']], 'none');
     const api = t.api(owner, ws);
+    await seedSite(ws, siteId);
     const first = await api.call('artifacts.create', {
       type: 'site_context',
       name: 'Old context',
@@ -159,6 +166,7 @@ describe('archived singletons (#899)', () => {
   it('refuses restoring an archived singleton while an active one exists, naming both', async () => {
     const ws = await t.workspaceWith([[owner, 'owner']], 'none');
     const api = t.api(owner, ws);
+    await seedSite(ws, siteId);
     const retained = await api.call('artifacts.create', { type: 'site_context', name: 'Retained', siteId, content: context });
     await archive(ws, retained.artifactId);
     const active = await api.call('artifacts.create', {
@@ -182,6 +190,7 @@ describe('archived singletons (#899)', () => {
   it('restores an archived singleton unpublished, so its old version does not go live again', async () => {
     const ws = await t.workspaceWith([[owner, 'owner']], 'none');
     const api = t.api(owner, ws);
+    await seedSite(ws, siteId);
     const created = await api.call('artifacts.create', { type: 'site_context', name: 'Context', siteId, content: context });
     const published = await api.call('artifacts.requestPublish', { artifactId: created.artifactId, note: 'v1' });
     expect(published.status).toBe('published');

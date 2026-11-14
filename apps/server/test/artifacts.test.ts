@@ -115,6 +115,15 @@ describe('artifacts: drafts, history and diffs', () => {
   it('makes site_context a singleton per site, not per workspace', async () => {
     const siteA = '11111111-1111-4111-8111-111111111111';
     const siteB = '22222222-2222-4222-8222-222222222222';
+    // A site_context may only name a real site of the workspace (0005_sites.sql adds the foreign key).
+    for (const [id, domain] of [
+      [siteA, 'site-a.example'],
+      [siteB, 'site-b.example'],
+    ] as const)
+      await t.srv.db.admin.query(
+        `INSERT INTO sites (workspace_id, id, name, primary_domain, verification_token) VALUES ($1, $2, 'Site', $3, 'seed-token')`,
+        [ws, id, domain],
+      );
     const context = { businessOverview: 'A SaaS for SEO teams.' };
     const first = await apiOwner.call('artifacts.create', {
       type: 'site_context',

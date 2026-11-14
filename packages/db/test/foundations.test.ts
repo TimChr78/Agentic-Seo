@@ -133,6 +133,24 @@ const SEED: Record<string, { insert: string; appendOnly: boolean }> = {
             VALUES ($1, 'seed-secret', 'dk-seed', '\\x00'::bytea, '\\x01'::bytea, '\\x02'::bytea, 'seed-user')`,
     appendOnly: false,
   },
+  // The site id is a literal, not a parameter: the RLS test below replaces only the first `$1`
+  // with another workspace, and a second placeholder would be left unbound. (workspace_id, id) is
+  // the primary key, so both seeded workspaces can use the same literal id.
+  sites: {
+    insert: `INSERT INTO sites (workspace_id, id, name, primary_domain, verification_token)
+            VALUES ($1, '00000000-0000-4000-8000-000000000001', 'Seed site', 'seed-site.example', 'seed-token')`,
+    appendOnly: false,
+  },
+  markets: {
+    insert: `INSERT INTO markets (workspace_id, id, site_id, location_code, language_code, name)
+            VALUES ($1, gen_random_uuid(), '00000000-0000-4000-8000-000000000001', 2840, 'en', 'Seed market')`,
+    appendOnly: false,
+  },
+  competitors: {
+    insert: `INSERT INTO competitors (workspace_id, id, site_id, domain)
+            VALUES ($1, gen_random_uuid(), '00000000-0000-4000-8000-000000000001', 'rival.example')`,
+    appendOnly: false,
+  },
   workspace_members: {
     insert: `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, 'seed-user', 'viewer')`,
     appendOnly: false,
