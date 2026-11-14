@@ -1,15 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import {
-  type Api,
-  type CreateSiteInput,
-  createDemoApi,
-  getWorkspaceId,
-  type Site,
-  setApiClient,
-  setWorkspaceId,
-} from '../src/app/api';
+import { type Api, type CreateSiteInput, createDemoApi, getWorkspaceId, type Site, setApiClient, setWorkspaceId } from '../src/app/api';
 import { SessionProvider, useSession } from '../src/app/session';
 
 function Probe() {
