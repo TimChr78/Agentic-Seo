@@ -1,3 +1,4 @@
+import { aiCommands } from '@agentic-seo/ai';
 import { artifactCommands, configCommands, learningsCommands, undoAgent } from '@agentic-seo/artifacts';
 import { agentCommands, memberCommands, tokenCommands } from '@agentic-seo/auth';
 import type { AnyCommand } from '@agentic-seo/commands';
@@ -20,6 +21,7 @@ export const commands = [
   ...learningsCommands,
   ...configCommands,
   ...siteCommands,
+  ...aiCommands,
   undoAgent,
   { ...setSecret, actionClass: 'settings' as const },
   listSecrets,

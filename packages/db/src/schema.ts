@@ -575,3 +575,84 @@ export const competitors = pgTable(
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] }), uniqueIndex('competitors_site_domain').on(t.workspaceId, t.siteId, t.domain)],
 );
+
+// The LLM gateway (Phase 0 task J). See 0006_ai.sql.
+
+/** The capabilities a provider can serve; each has one provider at a time. */
+export type AiUse = 'agents' | 'answer_engines';
+export type AiProviderKind = 'openai-compatible' | 'anthropic-compatible';
+/** What a logged call was for: a choice, generated text, or a prompt test run. */
+export type AiCallKind = 'decide' | 'generate' | 'test';
+export type AiCallStatus = 'pending' | 'running' | 'done' | 'fallback' | 'failed';
+
+export const aiProviders = pgTable(
+  'ai_providers',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    name: text('name').notNull(),
+    kind: text('kind').$type<AiProviderKind>().notNull(),
+    /** An https origin whose host resolves to a public address; packages/fetch's guard enforces it. */
+    baseUrl: text('base_url').notNull(),
+    models: jsonb('models').$type<{ default: string; fast?: string }>().notNull(),
+    structuredOutputs: boolean('structured_outputs').notNull().default(true),
+    useFor: text('use_for').array().$type<AiUse[]>().notNull().default([]),
+    monthlyTokenBudget: bigint('monthly_token_budget', { mode: 'number' }),
+    region: text('region').notNull().default(''),
+    /** The sealed API key; a command never returns it, only whether one is set. */
+    secrets: bytea('secrets'),
+    secretsKeyId: text('secrets_key_id'),
+    enabled: boolean('enabled').notNull().default(true),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/** A call's estimated tokens, held against the provider's monthly budget while the model runs. */
+export const aiTokenReservations = pgTable(
+  'ai_token_reservations',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    providerId: text('provider_id').notNull(),
+    tokens: integer('tokens').notNull(),
+    expiresAt: ts('expires_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/** Every model call, with what it was asked, what it answered, its tokens and latency. */
+export const aiCalls = pgTable(
+  'ai_calls',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    kind: text('kind').$type<AiCallKind>().notNull(),
+    status: text('status').$type<AiCallStatus>().notNull(),
+    /** Set while a worker runs a queued call; an expired lease makes it claimable again. */
+    leaseUntil: ts('lease_until'),
+    attempts: integer('attempts').notNull().default(0),
+    idempotencyKey: text('idempotency_key'),
+    providerId: text('provider_id'),
+    model: text('model'),
+    promptId: text('prompt_id'),
+    promptVersion: integer('prompt_version'),
+    input: jsonb('input').$type<Record<string, unknown>>().notNull().default({}),
+    output: jsonb('output').$type<unknown>(),
+    rationale: text('rationale'),
+    error: text('error'),
+    inputTokens: integer('input_tokens').notNull().default(0),
+    outputTokens: integer('output_tokens').notNull().default(0),
+    latencyMs: integer('latency_ms'),
+    principalId: text('principal_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    finishedAt: ts('finished_at'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    uniqueIndex('ai_calls_workspace_idempotency').on(t.workspaceId, t.idempotencyKey),
+    index('ai_calls_recent').on(t.workspaceId, t.createdAt),
+    index('ai_calls_usage').on(t.workspaceId, t.providerId, t.createdAt),
+  ],
+);

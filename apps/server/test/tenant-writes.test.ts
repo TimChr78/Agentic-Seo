@@ -5,7 +5,7 @@ import { sql } from 'drizzle-orm';
 import { parseCrontab } from 'graphile-worker';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { consentWorkspaceId, withConsentRequest } from '../../../packages/auth/src/oauthWorkspace';
-import { CLEANUP_OAUTH_SELECTIONS_TASK, CRONTAB, taskListFor } from '../src/workers';
+import { AI_PROMPT_TESTS_TASK, CLEANUP_OAUTH_SELECTIONS_TASK, CRONTAB, taskListFor } from '../src/workers';
 import { startTestServer, testPort, type User } from './harness';
 
 // Tenant writes on the credential path must run as `aseo_app` with RLS. The owner pool is for the
@@ -129,10 +129,13 @@ describe('tenant writes on the auth path', () => {
     expect(attempted).toEqual([]);
   });
 
-  it('registers the cleanup as an hourly scheduler task, not in the request path', () => {
+  it('registers the cleanup and the prompt tests as scheduler tasks, not in the request path', () => {
     // Graphile Worker must accept the crontab: an invalid task identifier stops the scheduler from starting.
     expect(() => parseCrontab(CRONTAB)).not.toThrow();
-    expect(CRONTAB).toBe(`0 * * * * ${CLEANUP_OAUTH_SELECTIONS_TASK}`);
-    expect(Object.keys(taskListFor(t.srv.db))).toContain(CLEANUP_OAUTH_SELECTIONS_TASK);
+    expect(CRONTAB).toContain(`0 * * * * ${CLEANUP_OAUTH_SELECTIONS_TASK}`);
+    expect(CRONTAB).toContain(`* * * * * ${AI_PROMPT_TESTS_TASK}`);
+    const tasks = Object.keys(taskListFor(t.srv.db, t.srv.keyProvider));
+    expect(tasks).toContain(CLEANUP_OAUTH_SELECTIONS_TASK);
+    expect(tasks).toContain(AI_PROMPT_TESTS_TASK);
   });
 });

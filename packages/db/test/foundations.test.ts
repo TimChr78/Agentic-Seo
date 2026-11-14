@@ -62,6 +62,21 @@ const SEED: Record<string, { insert: string; appendOnly: boolean }> = {
             VALUES ($1, 'not_seed', 'note', 'Seed note', 1)`,
     appendOnly: false,
   },
+  ai_providers: {
+    insert: `INSERT INTO ai_providers (workspace_id, id, name, kind, base_url, models)
+            VALUES ($1, 'aip_seed', 'Seed provider', 'openai-compatible', 'https://api.example.com/v1', '{"default":"m"}'::jsonb)`,
+    appendOnly: false,
+  },
+  ai_calls: {
+    insert: `INSERT INTO ai_calls (workspace_id, id, kind, status)
+            VALUES ($1, 'aic_seed', 'test', 'pending')`,
+    appendOnly: false,
+  },
+  ai_token_reservations: {
+    insert: `INSERT INTO ai_token_reservations (workspace_id, id, provider_id, tokens, expires_at)
+            VALUES ($1, 'rsv_seed', 'aip_seed', 1000, now() + interval '5 minutes')`,
+    appendOnly: false,
+  },
   artifact_versions: {
     insert: `INSERT INTO artifact_versions (workspace_id, artifact_id, number, state, content, content_hash, author_type, author_id)
             VALUES ($1, 'not_seed', 1, 'draft', '{}'::jsonb, 'seed-hash', 'user', 'seed-user')`,

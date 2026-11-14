@@ -184,7 +184,9 @@ const skill = z.object({
 export type Skill = z.output<typeof skill>;
 
 // A prompt is an instruction block with named inputs, versioned so a change is reviewable and an
-// agent can cite the published version it used.
+// agent can cite the published version it used. It also says what a good answer looks like: named
+// text slots with a length cap and a fallback, or one key out of a fixed set. Small test cases let
+// a person try a version and see the answers before anything depends on it.
 const promptVariable = z.object({
   name: z
     .string()
@@ -193,12 +195,79 @@ const promptVariable = z.object({
   description: z.string().max(500).default('').describe('What the value is, for the person filling it in'),
 });
 
-const prompt = z.object({
-  title: z.string().trim().min(1).max(200),
-  instructions: z.string().trim().min(1).max(20_000).describe('The prompt text; reference inputs as {{variable_name}}'),
-  variables: z.array(promptVariable).max(50).default([]),
-  modelTier: z.enum(['fast', 'deep']).default('fast').describe('Default model tier for a run of this prompt'),
+const promptOption = z.object({
+  key: z
+    .string()
+    .regex(/^[a-z][a-z0-9_]{0,63}$/)
+    .describe('The answer value, e.g. "blog_post"'),
+  description: z.string().trim().min(1).max(300),
 });
+
+const promptSlot = z.object({
+  name: z
+    .string()
+    .regex(/^[a-z][a-z0-9_]{0,63}$/)
+    .describe('Answer field the text is keyed by, e.g. "title"'),
+  description: z.string().trim().min(1).max(500),
+  maxLength: z.number().int().min(1).max(8000),
+  fallback: z.string().max(8000).default('').describe('Used when the model’s text fails a check'),
+});
+
+const promptTest = z.object({
+  name: z.string().trim().min(1).max(200),
+  input: z.record(z.string(), z.unknown()).default({}).describe('The input data the prompt sees; supplies each variable'),
+  expect: z
+    .object({
+      option: z.string().max(64).optional().describe('Choice prompts: the key a good answer should pick'),
+      contains: z.array(z.string().trim().min(1).max(500)).max(20).default([]),
+      notContains: z.array(z.string().trim().min(1).max(500)).max(20).default([]),
+    })
+    .strict()
+    .default({ contains: [], notContains: [] }),
+});
+
+const promptOutput = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('text'),
+    slots: z.array(promptSlot).min(1).max(8),
+    forbidden: z
+      .array(z.string().trim().min(1).max(100))
+      .max(50)
+      .default([])
+      .describe('Words and claims a generated text must not contain'),
+  }),
+  z.object({
+    kind: z.literal('choice'),
+    options: z.array(promptOption).min(2).max(20).describe('Exactly one of these is the answer'),
+  }),
+]);
+
+const prompt = z
+  .object({
+    title: z.string().trim().min(1).max(200),
+    instructions: z.string().trim().min(1).max(20_000).describe('The prompt text; reference inputs as {{variable_name}}'),
+    variables: z.array(promptVariable).max(50).default([]),
+    modelTier: z.enum(['fast', 'deep']).default('fast').describe('Default model tier for a run of this prompt'),
+    maxOutputTokens: z.number().int().min(16).max(8000).default(1024).describe('Most tokens one answer may use'),
+    output: promptOutput.default({
+      kind: 'text',
+      slots: [{ name: 'text', description: 'The answer', maxLength: 4000, fallback: '' }],
+      forbidden: [],
+    }),
+    tests: z.array(promptTest).max(20).default([]),
+  })
+  .superRefine((def, ctx) => {
+    if (def.output.kind !== 'choice') return;
+    const keys = new Set(def.output.options.map((o) => o.key));
+    def.tests.forEach((t, index) => {
+      if (t.expect.option !== undefined && !keys.has(t.expect.option))
+        ctx.addIssue({
+          code: 'custom',
+          path: ['tests', index, 'expect', 'option'],
+          message: `Test "${t.name}" expects unknown option "${t.expect.option}"`,
+        });
+    });
+  });
 export type Prompt = z.output<typeof prompt>;
 
 /** A type whose content arrives in a later phase: the schema refuses every value with the reason. */

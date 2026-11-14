@@ -1,0 +1,27 @@
+{
+  "name": "@agentic-seo/ai",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@agentic-seo/artifacts": "workspace:*",
+    "@agentic-seo/commands": "workspace:*",
+    "@agentic-seo/core": "workspace:*",
+    "@agentic-seo/db": "workspace:*",
+    "@agentic-seo/fetch": "workspace:*",
+    "@agentic-seo/secrets": "workspace:*",
+    "@agentic-seo/telemetry": "workspace:*",
+    "@ai-sdk/anthropic": "4.0.102",
+    "@ai-sdk/openai-compatible": "3.0.90",
+    "ai": "7.0.170",
+    "drizzle-orm": "0.45.4",
+    "zod": "4.6.7"
+  }
+}
