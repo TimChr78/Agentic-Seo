@@ -22,6 +22,15 @@ beforeAll(async () => {
   t = await startTestServer('test_agent_coordination', testPort(4260));
   owner = await t.signUp(`coordination-owner-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']], 'none');
+  // Two sites of this workspace: 0005_sites.sql makes artifacts.site_id a real reference.
+  for (const [id, domain] of [
+    [siteA, 'site-a.example'],
+    [siteB, 'site-b.example'],
+  ] as const)
+    await t.srv.db.admin.query(
+      `INSERT INTO sites (workspace_id, id, name, primary_domain, verification_token) VALUES ($1, $2, 'Coordinated site', $3, 'seed-token')`,
+      [ws, id, domain],
+    );
   const api = t.api(owner, ws);
   const tokenA = (
     await api.call('apiTokens.create', {

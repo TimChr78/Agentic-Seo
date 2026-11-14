@@ -220,6 +220,38 @@ describe('SSRF guard: redirects', () => {
     expect(error.kind).toBe('too_many_redirects');
     expect(site.requests).toHaveLength(11);
   });
+
+  it('refuses a redirect the caller’s policy blocks before contacting its target', async () => {
+    const parked = await startSite((_req, res) => ok(res, 'parked', 'text/plain'));
+    const site = await startSite((_req, res) => redirectTo(res, `http://parked.test:${parked.port}/`));
+    const error = await failure(
+      safeFetch(`http://site.test:${site.port}/`, {
+        resolver: tableResolver({ 'site.test': loopback, 'parked.test': loopback }),
+        allow: { privateHosts: ['site.test', 'parked.test'], ports: [site.port, parked.port] },
+        allowRedirect: (url) => (url.hostname === 'site.test' ? true : `refused ${url.hostname}`),
+      }),
+    );
+    expect(error.kind).toBe('blocked_redirect');
+    expect(error.message).toContain('refused parked.test');
+    expect(parked.requests).toHaveLength(0);
+  });
+
+  it('follows a redirect the caller’s policy allows and passes the hop it came from', async () => {
+    const seen: Array<{ from: string; status: number }> = [];
+    const site = await startSite((req, res) => (req.url === '/next' ? ok(res, 'landed', 'text/plain') : redirectTo(res, '/next')));
+    const result = await safeFetch(`http://site.test:${site.port}/`, {
+      resolver: tableResolver({ 'site.test': loopback }),
+      allow: { privateHosts: ['site.test'], ports: [site.port] },
+      allowRedirect: (url, details) => {
+        seen.push(details);
+        return url.pathname === '/next' || 'not the expected path';
+      },
+    });
+    expect(result.text).toBe('landed');
+    expect(result.url).toBe(`http://site.test:${site.port}/next`);
+    expect(seen).toEqual([{ from: `http://site.test:${site.port}/`, status: 302 }]);
+    expect(site.requests).toHaveLength(2);
+  });
 });
 
 describe('SSRF guard: schemes and ports', () => {

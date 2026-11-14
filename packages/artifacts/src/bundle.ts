@@ -4,6 +4,7 @@ import { schema } from '@agentic-seo/db';
 import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import {
+  assertActiveSite,
   author,
   isSingleton,
   lockArtifactIds,
@@ -358,6 +359,10 @@ export const importConfig = defineCommand({
         'Importing workspace settings needs a person with workspace:admin. Import the artifacts without settings, or ask a person.',
       );
     const ws = ctx.principal.workspaceId;
+    // A bundle that names a site this workspace does not have (or has archived) is refused here,
+    // where the message can say which site to create, instead of by the composite foreign key.
+    for (const siteId of [...new Set(input.bundle.artifacts.map((item) => item.siteId).filter((id): id is string => !!id))])
+      await assertActiveSite(ctx.tx, ws, siteId);
     // Two entries for one singleton cannot both apply: say so instead of creating both.
     const seenSingletons = new Map<string, { id: string; type: string; siteId?: string | null }>();
     for (const item of input.bundle.artifacts) {

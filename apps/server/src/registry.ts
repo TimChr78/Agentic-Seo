@@ -2,6 +2,7 @@ import { artifactCommands, configCommands, learningsCommands, undoAgent } from '
 import { agentCommands, memberCommands, tokenCommands } from '@agentic-seo/auth';
 import type { AnyCommand } from '@agentic-seo/commands';
 import { secretCommands } from '@agentic-seo/secrets';
+import { siteCommands } from '@agentic-seo/sites';
 import { getWorkspace, whoami } from './builtinCommands';
 
 // The secrets package predates the registry's action-class rule. Storing or deleting a credential
@@ -18,6 +19,7 @@ export const commands = [
   ...artifactCommands,
   ...learningsCommands,
   ...configCommands,
+  ...siteCommands,
   undoAgent,
   { ...setSecret, actionClass: 'settings' as const },
   listSecrets,

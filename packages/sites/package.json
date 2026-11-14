@@ -1,0 +1,22 @@
+{
+  "name": "@agentic-seo/sites",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@agentic-seo/commands": "workspace:*",
+    "@agentic-seo/core": "workspace:*",
+    "@agentic-seo/db": "workspace:*",
+    "@agentic-seo/fetch": "workspace:*",
+    "drizzle-orm": "0.45.4",
+    "parse5": "8.1.1",
+    "tldts": "7.4.28",
+    "zod": "4.6.7"
+  }
+}

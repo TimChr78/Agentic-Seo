@@ -300,7 +300,7 @@ export const artifacts = pgTable(
     id: text('id').notNull(),
     type: text('type').notNull(),
     name: text('name').notNull(),
-    /** The site this artifact belongs to, when it is site-scoped; sites itself arrives later. */
+    /** The site this artifact belongs to, when it is site-scoped; null is workspace-wide. */
     siteId: uuid('site_id'),
     latestVersion: integer('latest_version').notNull(),
     publishedVersion: integer('published_version'),
@@ -495,4 +495,83 @@ export const providerRateBuckets = pgTable(
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.providerId, t.credentialKey] })],
+);
+
+// Sites, their markets and their competitors (Phase 0 task I). See 0005_sites.sql. Site ids are
+// uuids like workspace ids: artifacts, learnings and provider_calls already store a uuid site_id,
+// and their composite foreign keys point at (workspace_id, id) here.
+
+export type BusinessType = 'saas' | 'local' | 'ecommerce' | 'publisher' | 'agency' | 'other';
+export type SiteVerificationMethod = 'dns' | 'meta';
+export type CompetitorSource = 'manual' | 'detected';
+
+export const sites = pgTable(
+  'sites',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: uuid('id').notNull(),
+    name: text('name').notNull(),
+    /** Lower-case ASCII domain without scheme, path, port or trailing dot (IDNA/punycode). */
+    primaryDomain: text('primary_domain').notNull(),
+    /** Extra hosts the site answers on, e.g. www.example.com; the primary domain is not repeated. */
+    hosts: text('hosts').array().$type<string[]>().notNull().default(sql`'{}'::text[]`),
+    /** Confirmed business type; null until a person or agent sets it. */
+    businessType: text('business_type').$type<BusinessType>(),
+    isLocalBusiness: boolean('is_local_business').notNull().default(false),
+    /** Published in a DNS TXT record or a home page meta tag; never rotated silently. */
+    verificationToken: text('verification_token').notNull(),
+    verificationMethod: text('verification_method').$type<SiteVerificationMethod>(),
+    verifiedAt: ts('verified_at'),
+    verifiedBy: text('verified_by'),
+    lastCheckAt: ts('last_check_at'),
+    lastCheckError: text('last_check_error'),
+    archived: boolean('archived').notNull().default(false),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    // One active site per domain; archived sites stay for the rows that point at them.
+    uniqueIndex('sites_active_domain').on(t.workspaceId, t.primaryDomain).where(sql`archived = false`),
+  ],
+);
+
+export const markets = pgTable(
+  'markets',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: uuid('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    /** DataForSEO location code, e.g. 2840 for the United States. */
+    locationCode: integer('location_code').notNull(),
+    languageCode: text('language_code').notNull(),
+    /** ISO 3166-1 alpha-3 country for Search Console, when it is known. */
+    gscCountry: text('gsc_country'),
+    name: text('name').notNull(),
+    isDefault: boolean('is_default').notNull().default(false),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    uniqueIndex('markets_target').on(t.workspaceId, t.siteId, t.locationCode, t.languageCode),
+    // At most one default market per site.
+    uniqueIndex('markets_one_default').on(t.workspaceId, t.siteId).where(sql`is_default`),
+  ],
+);
+
+export const competitors = pgTable(
+  'competitors',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: uuid('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    /** Normalised like a site domain. */
+    domain: text('domain').notNull(),
+    name: text('name'),
+    source: text('source').$type<CompetitorSource>().notNull().default('manual'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] }), uniqueIndex('competitors_site_domain').on(t.workspaceId, t.siteId, t.domain)],
 );

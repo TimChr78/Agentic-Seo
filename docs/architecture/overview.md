@@ -69,7 +69,7 @@ Packages marked **port** are carried over from Agentic Marketing and adapted ([A
 
 | Package | Origin | Responsibility |
 |---|---|---|
-| `core` | port | IDs (`site_…`, `aud_…`), errors, time, brand constants, config |
+| `core` | port | IDs (uuids for sites, `sct_…`/`aud_…` for other objects), errors, time, brand constants, config |
 | `db` | port | Drizzle schema, migrations, RLS role, partition helpers |
 | `commands` | port | `defineCommand`, the registry, REST/MCP/UI surfaces, policy hooks, idempotency, rate limits |
 | `auth` | port | Better Auth, roles, API tokens, MCP OAuth 2.1, agents as principals, SSO later |

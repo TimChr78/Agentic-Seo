@@ -17,6 +17,7 @@
     "@agentic-seo/core": "workspace:*",
     "@agentic-seo/db": "workspace:*",
     "@agentic-seo/secrets": "workspace:*",
+    "@agentic-seo/sites": "workspace:*",
     "@agentic-seo/telemetry": "workspace:*",
     "@better-auth/mcp": "1.7.22",
     "@better-auth/oauth-provider": "1.7.22",
