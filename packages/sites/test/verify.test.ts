@@ -117,6 +117,11 @@ describe('the meta tag check', () => {
     expect(!result.ok && result.error).toContain(`<meta name="aseo-site-verification" content="${TOKEN}">`);
   });
 
+  it('accepts the page when the site’s own host is served with the DNS root dot', async () => {
+    setSiteFetcher(async () => page({ url: 'https://example.com./', text: head(tag) }));
+    expect(await checkMetaTag('example.com', ['example.com'], TOKEN)).toEqual({ ok: true });
+  });
+
   it('refuses a redirect that ends on another site', async () => {
     setSiteFetcher(async () =>
       page({ url: 'https://parking.example.net/', text: `<meta name="aseo-site-verification" content="${TOKEN}">` }),
@@ -155,6 +160,13 @@ describe('the redirect policy', () => {
     expect(policy(new URL('https://www.example.com/home'))).toBe(true);
     expect(policy(new URL('http://example.com/home'))).toMatch(/not HTTPS/);
     expect(policy(new URL('https://parking.example.net/'))).toMatch(/not one of this site's hosts/);
+  });
+
+  it('treats a host with the DNS root dot as the same host', () => {
+    const policy = siteRedirectPolicy(['example.com']);
+    expect(policy(new URL('https://example.com./'))).toBe(true);
+    expect(policy(new URL('https://EXAMPLE.com./home'))).toBe(true);
+    expect(policy(new URL('https://example.com.evil.net./'))).toMatch(/not one of this site's hosts/);
   });
 
   it('refuses plain HTTP for the first URL before any request', async () => {

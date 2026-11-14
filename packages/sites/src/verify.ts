@@ -59,11 +59,18 @@ export function setSiteFetchSeams(seams: SiteFetchSeams | null): void {
  * calls it with each `Location` before resolving or connecting, so an unrelated host is never
  * contacted and an `https -> http` downgrade never leaves the process.
  */
+/**
+ * One spelling per host for comparison: lower case, without the DNS root's trailing dot. Stored
+ * domains are normalised without it, while a redirect may name `example.com.`, which the fetch
+ * guard and DNS treat as the same host.
+ */
+export const canonicalHost = (host: string): string => host.toLowerCase().replace(/\.$/, '');
+
 export function siteRedirectPolicy(hosts: readonly string[]): (url: URL) => true | string {
-  const allowed = hosts.map((host) => host.toLowerCase());
+  const allowed = hosts.map(canonicalHost);
   return (url) => {
     if (url.protocol !== 'https:') return `${url.href} is not HTTPS. Ownership is checked over HTTPS only.`;
-    const host = url.hostname.toLowerCase();
+    const host = canonicalHost(url.hostname);
     if (!allowed.includes(host)) return `${url.href} is not one of this site's hosts (${allowed.join(', ')}).`;
     return true;
   };
@@ -210,11 +217,11 @@ export async function checkMetaTag(domain: string, hosts: readonly string[], tok
 
   let servedHost: string;
   try {
-    servedHost = new URL(page.url).hostname.toLowerCase();
+    servedHost = canonicalHost(new URL(page.url).hostname);
   } catch {
-    servedHost = domain;
+    servedHost = canonicalHost(domain);
   }
-  if (!allowed.includes(servedHost))
+  if (!allowed.map(canonicalHost).includes(servedHost))
     return {
       ok: false,
       error: `https://${domain}/ redirected to ${servedHost}, which is not one of this site's hosts (${allowed.join(', ')}). Add the host to the site, or serve the tag on the primary domain.`,
