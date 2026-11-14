@@ -35,5 +35,41 @@ describe('endpointOrigin', () => {
     const { endpointOrigin } = await import('../src/index');
     expect(endpointOrigin('https://user:secret@otel.example.com:4318/v1/traces?token=abc')).toBe('https://otel.example.com:4318');
     expect(endpointOrigin('not a url')).toBe('(invalid URL)');
+    // `otel.example:4318` parses as a scheme with no host, whose origin is "null": never echo it.
+    expect(endpointOrigin('otel.example:4318')).toBe('(invalid URL)');
+  });
+});
+
+describe('endpointLocation', () => {
+  it('keeps the origin and path, and drops the userinfo, query and fragment', async () => {
+    const { endpointLocation } = await import('../src/index');
+    expect(endpointLocation('https://user:pw@app.example.com/base?token=x#frag')).toBe('https://app.example.com/base');
+    expect(endpointLocation('https://app.example.com')).toBe('https://app.example.com');
+    expect(endpointLocation('http://localhost:3000/')).toBe('http://localhost:3000');
+  });
+
+  it('says plainly when the public URL is not a URL', async () => {
+    const { endpointLocation } = await import('../src/index');
+    expect(endpointLocation('app.example.com')).toBe('(invalid URL)');
+  });
+});
+
+describe('splitUrlCredentials and endpointFailure', () => {
+  it('moves userinfo into a Basic header and keeps the query', async () => {
+    const { splitUrlCredentials } = await import('../src/index');
+    expect(splitUrlCredentials('https://alice:p%40ss@otel.example:4318/v1/traces?token=abc')).toEqual({
+      url: 'https://otel.example:4318/v1/traces?token=abc',
+      headers: { authorization: `Basic ${Buffer.from('alice:p@ss').toString('base64')}` },
+    });
+    expect(splitUrlCredentials('https://otel.example:4318')).toEqual({ url: 'https://otel.example:4318/', headers: {} });
+  });
+
+  it('reports a failure as the endpoint origin and the cause code, never the message', async () => {
+    const { endpointFailure } = await import('../src/index');
+    const err = new Error('connect ECONNREFUSED https://alice:secret@otel.example:4318/?token=abc', {
+      cause: { code: 'ECONNREFUSED' },
+    });
+    expect(endpointFailure(err, 'https://alice:secret@otel.example:4318/?token=abc')).toBe('https://otel.example:4318 (ECONNREFUSED)');
+    expect(endpointFailure(new TypeError('fetch failed'), 'https://otel.example:4318')).toBe('https://otel.example:4318 (TypeError)');
   });
 });

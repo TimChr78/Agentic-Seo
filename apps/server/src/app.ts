@@ -13,7 +13,7 @@ import {
 import { createExecutor, type Services, userPrincipal } from '@agentic-seo/commands';
 import { AppError, newUuid, remoteAddressFromEnv, resolveClientIp } from '@agentic-seo/core';
 import { createDb } from '@agentic-seo/db';
-import { logger } from '@agentic-seo/telemetry';
+import { endpointLocation, logger } from '@agentic-seo/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
 import { type Context, Hono } from 'hono';
 import { agentLedgerServices } from './agents/ledger';
@@ -33,6 +33,22 @@ import { COMMIT, VERSION } from './version';
 
 // An invitation token is short; the limit runs before the session lookup and the body parse.
 const INVITATION_MAX_BODY = 8 * 1024;
+// A consent form is a decision and the signed authorization query; 16 KB leaves ample room while
+// refusing an unbounded body before Better Auth reads it (#790).
+const CONSENT_MAX_BODY = 16 * 1024;
+
+// The generic /api/auth/* catch-all forwards every other Better Auth POST here. Every POST this app
+// enables, and its largest legitimate body (#932):
+//
+//   | endpoint(s)                                                          | largest body        |
+//   |----------------------------------------------------------------------|---------------------|
+//   | sign-in/up/out, change-password, verify-email, OAuth token/revoke     | under 1 KB          |
+//   | /oauth2/register (dynamic client registration, metadata and JWKS)     | under 64 KB         |
+//
+// No organization, passkey, 2FA or SSO plugin is enabled. 256 KB covers the dynamic client
+// registration documents with room for JSON escaping, while still bounding an unauthenticated body
+// before `auth.handler` buffers it.
+const AUTH_CATCHALL_MAX_BODY = 256 * 1024;
 
 /**
  * The header the app resolves the client IP into before Better Auth reads it. A caller-supplied
@@ -50,7 +66,8 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   const mcpEnabled = isMcpResourceUrlAllowed(config.publicUrl);
   if (!mcpEnabled) {
     logger.warn(
-      { publicUrl: config.publicUrl },
+      // PUBLIC_URL may carry basic-auth userinfo or a query token; never put either in the logs.
+      { publicUrl: endpointLocation(config.publicUrl) },
       'MCP/OAuth client endpoints are disabled because PUBLIC_URL is plain HTTP on a non-loopback host; the admin UI and REST API still work. Use HTTPS (e.g. Tailscale or a Cloudflare Tunnel) to enable MCP.',
     );
   }
@@ -168,19 +185,32 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     withConsentRequest({ query: new URL(c.req.url).search, mode: 'authorize' }, () => auth.handler(withClientIp(c)));
   app.get('/api/auth/oauth2/authorize', authorize);
   app.get('/api/auth/oauth2/authorize/*', authorize);
-  app.post('/api/auth/oauth2/consent', async (c) => {
-    const raw = await c.req.text();
-    let query: string | undefined;
-    try {
-      const body = JSON.parse(raw) as { oauth_query?: unknown };
-      if (typeof body.oauth_query === 'string') query = body.oauth_query;
-    } catch {
-      // Not JSON: Better Auth answers with its own validation error for the replayed request.
-    }
-    const request = new Request(c.req.raw.url, { method: 'POST', headers: c.req.raw.headers, body: raw });
-    return withConsentRequest({ query, mode: 'consent' }, () => auth.handler(withClientIp({ req: { raw: request }, env: c.env })));
-  });
-  app.on(['GET', 'POST'], '/api/auth/*', (c) => auth.handler(withClientIp(c)));
+  app.post(
+    '/api/auth/oauth2/consent',
+    bodyLimit(CONSENT_MAX_BODY, (c) =>
+      c.json({ error: 'payload_too_large', message: `Requests are limited to ${CONSENT_MAX_BODY / 1024} KB.` }, 413),
+    ),
+    async (c) => {
+      const raw = await c.req.text();
+      let query: string | undefined;
+      try {
+        const body = JSON.parse(raw) as { oauth_query?: unknown };
+        if (typeof body.oauth_query === 'string') query = body.oauth_query;
+      } catch {
+        // Not JSON: Better Auth answers with its own validation error for the replayed request.
+      }
+      const request = new Request(c.req.raw.url, { method: 'POST', headers: c.req.raw.headers, body: raw });
+      return withConsentRequest({ query, mode: 'consent' }, () => auth.handler(withClientIp({ req: { raw: request }, env: c.env })));
+    },
+  );
+  app.on(
+    ['GET', 'POST'],
+    '/api/auth/*',
+    bodyLimit(AUTH_CATCHALL_MAX_BODY, (c) =>
+      c.json({ error: 'payload_too_large', message: `Requests are limited to ${AUTH_CATCHALL_MAX_BODY / 1024} KB.` }, 413),
+    ),
+    (c) => auth.handler(withClientIp(c)),
+  );
 
   // OAuth discovery at the root, where MCP clients look (RFC 8414 path insertion included). The MCP
   // plugin answers RFC 9728 protected-resource metadata itself when the root path reaches it.
@@ -273,6 +303,13 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     );
   }
   app.route('/', restApi({ auth, db, executor, origin }));
+
+  // API-owned roots answer JSON on every role, even when nothing below them matched. An unmatched
+  // OAuth path must never become the admin SPA or Hono's text/plain 404 (#751). Registered after
+  // every real route above, so it only catches what nothing else claimed. SCIM is not ported.
+  const apiNotFound = (c: Context) => c.json({ error: 'not_found', message: 'Not found.' }, 404);
+  app.all('/oauth', apiNotFound);
+  app.all('/oauth/*', apiNotFound);
 
   // Last, so every API route above wins. Without a build (packages/tests, server-only install) the
   // middleware is a no-op and the server behaves exactly as before.

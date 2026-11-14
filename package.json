@@ -19,13 +19,6 @@
     "migrate": "pnpm --filter @agentic-seo/server cli migrate",
     "dev": "pnpm --filter @agentic-seo/server dev"
   },
-  "pnpm": {
-    "overrides": {
-      "@better-auth/oauth-provider": "1.7.7",
-      "@better-auth/core": "1.7.7",
-      "better-auth": "1.7.7"
-    }
-  },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
     "@types/node": "^26.6.5",

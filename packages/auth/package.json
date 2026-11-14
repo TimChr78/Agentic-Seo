@@ -13,14 +13,14 @@
     "@agentic-seo/commands": "workspace:*",
     "@agentic-seo/core": "workspace:*",
     "@agentic-seo/db": "workspace:*",
-    "@better-auth/cimd": "1.7.7",
-    "@better-auth/core": "1.7.7",
-    "@better-auth/mcp": "1.7.7",
-    "@better-auth/oauth-provider": "1.7.7",
-    "@better-auth/utils": "0.4.2",
-    "better-auth": "1.7.7",
+    "@better-auth/cimd": "1.7.22",
+    "@better-auth/core": "1.7.22",
+    "@better-auth/mcp": "1.7.22",
+    "@better-auth/oauth-provider": "1.7.22",
+    "@better-auth/utils": "0.5.1",
+    "better-auth": "1.7.22",
     "drizzle-orm": "0.45.4",
-    "jose": "6.2.13",
+    "jose": "6.2.16",
     "zod": "4.6.7"
   }
 }

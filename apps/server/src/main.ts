@@ -1,6 +1,6 @@
 import { migrateAuth } from '@agentic-seo/auth';
 import { createDb, migrate } from '@agentic-seo/db';
-import { initTelemetry, logger, shutdownTelemetry } from '@agentic-seo/telemetry';
+import { endpointLocation, initTelemetry, logger, shutdownTelemetry } from '@agentic-seo/telemetry';
 import { serve } from '@hono/node-server';
 import { createServer } from './app';
 import { ConfigError, loadConfig } from './config';
@@ -41,7 +41,10 @@ const { app, db } = srv;
 const servers: { close: () => void }[] = [];
 if (config.roles.has('api')) {
   servers.push(
-    serve({ fetch: app.fetch, port: config.port }, () => logger.info({ url: config.publicUrl, roles: [...config.roles] }, 'api listening')),
+    serve({ fetch: app.fetch, port: config.port }, () =>
+      // PUBLIC_URL may hold userinfo or a token in its query; the log gets the origin and path.
+      logger.info({ url: endpointLocation(config.publicUrl), roles: [...config.roles] }, 'api listening'),
+    ),
   );
 }
 
