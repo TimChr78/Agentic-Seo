@@ -24,7 +24,7 @@ async function betterAuthMatcher(): Promise<(url: string, pattern: string) => bo
 // differences are kept out of it and asserted below: our `*` cannot cross a `:` (Better Auth's can,
 // so its `https://192.168.*.*` also matches `https://192.168.1.5:8443`), we normalise the spelling
 // of an entry (a trailing slash, upper case) where Better Auth compares it verbatim, and a
-// digit-dot wildcard admits a literal IPv4 address only (see the last test).
+// digit-dot wildcard admits a literal IPv4 address only (Better Auth agrees since 1.7.22; see the last test).
 const patterns = [
   'https://app.example.com',
   'https://*.example.com',
@@ -83,22 +83,19 @@ describe('the CSRF origin matcher agrees with Better Auth (#902)', () => {
     expect(answers).toEqual(new Set([true, false]));
   });
 
-  // The one place the installed Better Auth (1.7.7) is weaker rather than merely different: its
-  // digit-dot wildcard also matches a hostname of the same shape. Our matcher refuses it, so the
-  // CSRF check is already safe; `/api/auth/*` follows Better Auth's answer until the stack moves to
-  // 1.7.22 (#727, which the Agentic Marketing release fixed and which needs the root pnpm overrides
-  // removed — outside this task's files). When that lands, this test should flip to parity and the
-  // two patterns should join the table above.
-  it('refuses a hostname in a digit-dot wildcard, where Better Auth 1.7.7 accepts it (#902, #727)', async () => {
+  // Better Auth 1.7.7 also matched a hostname in a digit-dot wildcard; 1.7.22 (#727) refuses it like
+  // our matcher, so `/api/auth/*` and the CSRF check give the same answer.
+  it('refuses a hostname in a digit-dot wildcard, as Better Auth does (#902, #727)', async () => {
     const betterAuth = await betterAuthMatcher();
     for (const [pattern, origin] of [
       ['https://192.168.*.*', 'https://192.168.evil.com'],
       ['https://10.*', 'https://10.evil.example'],
     ] as const) {
       expect(originPatternMatches(origin, pattern), `${pattern} vs ${origin}`).toBe(false);
-      expect(betterAuth(origin, pattern), `${pattern} vs ${origin}`).toBe(true);
+      expect(betterAuth(origin, pattern), `${pattern} vs ${origin}`).toBe(false);
     }
     // A literal address is still accepted by both.
     expect(originPatternMatches('https://192.168.1.5', 'https://192.168.*.*')).toBe(true);
+    expect(betterAuth('https://192.168.1.5', 'https://192.168.*.*')).toBe(true);
   });
 });
