@@ -4,7 +4,17 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import type { MiddlewareHandler } from 'hono';
 
 // Paths the API owns. They must keep returning JSON (or their own 404), never the SPA shell.
-export const API_PATH_PREFIXES = ['/api', '/v1', '/mcp', '/.well-known', '/healthz', '/readyz', '/metrics', '/openapi.json'] as const;
+export const API_PATH_PREFIXES = [
+  '/api',
+  '/v1',
+  '/mcp',
+  '/oauth',
+  '/.well-known',
+  '/healthz',
+  '/readyz',
+  '/metrics',
+  '/openapi.json',
+] as const;
 
 /**
  * Serves a built single-page app from `root`: real files with their content types, and

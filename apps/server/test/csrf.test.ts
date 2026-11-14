@@ -169,4 +169,49 @@ describe('CSRF on cookie-authenticated writes', () => {
       await other.close();
     }
   });
+
+  // #902: a digit-dot wildcard names an address range, so a hostname of the same shape must not be
+  // admitted by it. Better Auth applies (and normalises) the same list for /api/auth/*.
+  it('refuses a domain that a digit-dot wildcard would otherwise match', async () => {
+    const pattern = 'https://192.168.*.*';
+    const other = await startTestServer('csrf_wildcard', testPort(2511), { TRUSTED_ORIGINS: pattern });
+    try {
+      const user = await other.signUp(`csrf-wildcard-${Date.now()}@example.com`);
+      const workspaceId = await other.workspaceWith([[user, 'owner']]);
+      const call = (origin: string) =>
+        fetch(`${other.base}/v1/workspace.get`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', origin, cookie: user.cookie, 'x-workspace-id': workspaceId },
+          body: '{}',
+        });
+
+      // A literal address in the range is trusted, exactly as the pattern reads.
+      expect((await call('https://192.168.1.5')).status).toBe(200);
+      // A hostname in the same digits-and-dots shape is not an address, so it is refused here. The
+      // parity test in packages/auth records how Better Auth answers each shape.
+      expect((await call('https://192.168.evil.com')).status).toBe(403);
+    } finally {
+      await other.close();
+    }
+  });
+
+  // #902: an entry is matched the way the CSRF check always normalised it (trailing slash, case,
+  // default port), and that normalisation never widens it to another host.
+  it('matches an entry the way it is spelled: trailing slash, case and default port are normalised', async () => {
+    const other = await startTestServer('csrf_normalised', testPort(2513), { TRUSTED_ORIGINS: 'HTTPS://App.Example.Test/' });
+    try {
+      const user = await other.signUp(`csrf-normalised-${Date.now()}@example.com`);
+      const workspaceId = await other.workspaceWith([[user, 'owner']]);
+      const call = (origin: string) =>
+        fetch(`${other.base}/v1/workspace.get`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', origin, cookie: user.cookie, 'x-workspace-id': workspaceId },
+          body: '{}',
+        });
+      expect((await call('https://app.example.test')).status).toBe(200);
+      expect((await call('https://app.example.test.evil.example')).status).toBe(403);
+    } finally {
+      await other.close();
+    }
+  });
 });

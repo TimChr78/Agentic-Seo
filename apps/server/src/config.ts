@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { isIpOrCidr } from '@agentic-seo/core';
+import { isIpOrCidr, originPatternProblem } from '@agentic-seo/core';
 import { z } from 'zod';
 
 // The runtime roles a process can take. `ROLE` is a comma-separated list of these; any other value
@@ -101,7 +101,19 @@ const Env = z.object({
   AWS_ACCESS_KEY_ID: z.string().optional(),
   AWS_SECRET_ACCESS_KEY: z.string().optional(),
   AWS_SESSION_TOKEN: z.string().optional(),
-  AWS_KMS_ENDPOINT: z.url().optional().describe('A VPC endpoint or a test server instead of kms.<region>.amazonaws.com'),
+  AWS_KMS_ENDPOINT: z
+    .url()
+    .refine((value) => {
+      try {
+        const url = new URL(value);
+        return !url.username && !url.password;
+      } catch {
+        // The URL format check reports an unparseable value separately.
+        return true;
+      }
+    }, 'must not contain credentials; AWS KMS signs requests with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY')
+    .optional()
+    .describe('A VPC endpoint or a test server instead of kms.<region>.amazonaws.com'),
   TRUSTED_ORIGINS: z.string().optional().describe('Comma-separated extra origins allowed to call auth endpoints'),
   METRICS_TOKEN: z
     .string()
@@ -186,6 +198,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         ? [...missing(['OPENBAO_ADDR']), ...(e.OPENBAO_TOKEN || e.OPENBAO_TOKEN_FILE ? [] : ['OPENBAO_TOKEN or OPENBAO_TOKEN_FILE'])]
         : missing(['AWS_KMS_KEY_ID', 'AWS_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']);
   if (needed.length) throw new ConfigError(`Configuration is incomplete: KEY_PROVIDER=${e.KEY_PROVIDER} needs ${needed.join(', ')}`);
+  // A wildcard entry is matched by a bounded glob (#902): the limits are checked here so a pattern
+  // that would cost too much to match fails at start-up, naming the entry, not at the first request.
+  // An empty element (a trailing comma, a stray blank) is ignored, as it always was.
+  const trustedOrigins = (e.TRUSTED_ORIGINS?.split(',') ?? []).map((o) => o.trim()).filter(Boolean);
+  for (const entry of trustedOrigins) {
+    const problem = originPatternProblem(entry);
+    if (problem) throw new ConfigError(`Configuration is incomplete: TRUSTED_ORIGINS entry "${entry}" ${problem}`);
+  }
   const appUrl = databaseUrl(e.DATABASE_URL);
   appUrl.username = e.APP_DB_ROLE;
   appUrl.password = e.APP_DB_PASSWORD;
@@ -243,7 +263,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       e.MASTER_KEY_PREVIOUS?.split(',')
         .map((k) => k.trim())
         .filter(Boolean) ?? [],
-    trustedOrigins: e.TRUSTED_ORIGINS?.split(',').map((o) => o.trim()) ?? [],
+    trustedOrigins,
     metricsToken: e.METRICS_TOKEN,
     worker: {
       concurrency: e.WORKER_CONCURRENCY,

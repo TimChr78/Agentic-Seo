@@ -1,39 +1,99 @@
-import type { MiddlewareHandler } from 'hono';
+import type { Context, MiddlewareHandler } from 'hono';
 
 /**
- * Refuse an oversized request before it is buffered. Hono's request body is a stream, so a caller
- * could otherwise send a gigabyte before authentication reads it. `content-length` is checked
- * when present, and a chunked body is counted as it arrives; either way the request is answered
- * with `onTooLarge` and never reaches the route.
+ * The limit a guard enforces, readable from the middleware function itself. The server's route
+ * sweep (`apps/server/test/route-sweep.ts`, #932) walks Hono's registered routes and fails when a
+ * body-accepting route has no guard, so the number travels with the guard instead of a hand-kept
+ * list. Upstream keeps this in `packages/ingest`; our port has no ingest package, so the guard and
+ * its mark live together here.
  */
-export function bodyLimit(limitBytes: number, onTooLarge: (c: Parameters<MiddlewareHandler>[0]) => Response): MiddlewareHandler {
-  return async (c, next) => {
-    const declared = Number(c.req.header('content-length') ?? '');
-    if (Number.isFinite(declared) && declared > limitBytes) return onTooLarge(c);
+export const BODY_LIMIT_BYTES: unique symbol = Symbol.for('agentic-seo.bodyLimitBytes');
 
+export type BodyLimitGuard = MiddlewareHandler & { [BODY_LIMIT_BYTES]?: number };
+
+/**
+ * Reusable request-body guard for the public and API surfaces.
+ *
+ * A declared Content-Length over the limit is refused before any body bytes are touched, but a
+ * length at or below it is not trusted: the body is counted in bytes as it streams in, and the
+ * request is refused as soon as the count crosses the limit, so an understated header cannot
+ * smuggle an oversized body past the guard. The body is buffered while it is counted and then
+ * replayed to the handler, because a Hono request body can only be read once. The remaining request
+ * body is discarded in the background rather than left unread: that keeps the connection healthy
+ * so the caller actually receives the 413 instead of a connection reset. Bodies within the limit
+ * are passed to the handler unchanged.
+ */
+export function bodyLimit(maxSize: number, onTooLarge: (c: Context) => Response | Promise<Response>): BodyLimitGuard {
+  const guard = (async (c, next) => {
     const body = c.req.raw.body;
     if (!body) return next();
-    let received = 0;
-    const counted = body.pipeThrough(
-      new TransformStream<Uint8Array, Uint8Array>({
-        transform(chunk, controller) {
-          received += chunk.byteLength;
-          if (received > limitBytes) throw new Error('payload too large');
-          controller.enqueue(chunk);
+
+    const contentLength = c.req.header('content-length');
+    const hasTransferEncoding = c.req.header('transfer-encoding') !== undefined;
+    if (contentLength !== undefined && !hasTransferEncoding) {
+      const declared = Number.parseInt(contentLength, 10);
+      if (Number.isFinite(declared) && declared > maxSize) {
+        discard(body);
+        return onTooLarge(c);
+      }
+    }
+
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxSize) {
+        discard(reader);
+        return onTooLarge(c);
+      }
+      chunks.push(value);
+    }
+    // Rebuild the request so the handler can still read the body once (Hono requests are one-shot).
+    c.req.raw = new Request(c.req.raw, {
+      body: new ReadableStream({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(chunk);
+          controller.close();
         },
       }),
-    );
+      duplex: 'half',
+    } as RequestInit);
+    return next();
+  }) as BodyLimitGuard;
+  guard[BODY_LIMIT_BYTES] = maxSize;
+  return guard;
+}
+
+/**
+ * How much more of a refused body is read and dropped. Ordinary HTTP clients finish sending before
+ * they read the answer, so cutting the connection early loses them the 413; 16 MB covers any
+ * honest oversized request, and an endless upload is still cut off there.
+ */
+const MAX_DISCARD_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Read and drop what is left, so a caller that finishes sending can read the 413; past
+ * MAX_DISCARD_BYTES the stream is cancelled, so an endless body cannot hold the connection.
+ */
+function discard(source: ReadableStream<Uint8Array> | ReadableStreamDefaultReader<Uint8Array>) {
+  const reader = 'getReader' in source ? source.getReader() : source;
+  void (async () => {
+    let dropped = 0;
     try {
-      c.req.raw = new Request(c.req.raw, { body: counted, duplex: 'half' } as RequestInit);
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        dropped += value?.byteLength ?? 0;
+        if (dropped > MAX_DISCARD_BYTES) {
+          await reader.cancel('request body too large');
+          return;
+        }
+      }
     } catch {
-      // A GET/HEAD request has no body to wrap.
-      return next();
+      // The caller may have stopped sending after reading the 413; nothing left to discard.
     }
-    try {
-      return await next();
-    } catch (err) {
-      if (err instanceof Error && err.message === 'payload too large') return onTooLarge(c);
-      throw err;
-    }
-  };
+  })();
 }

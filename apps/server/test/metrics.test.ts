@@ -3,7 +3,7 @@ import { Hono } from 'hono';
 import { describe, expect, it } from 'vitest';
 import { metricsHandler } from '../src/http/metrics';
 import { consentPage, loginPage } from '../src/http/pages';
-import { createMetricsRegistry } from '../src/metrics';
+import { createMetricsRegistry, routeGroup, statusClass } from '../src/metrics';
 
 // `/metrics` is off unless METRICS_TOKEN is set, and the server-rendered pages carry the product
 // mark. Both are small enough to test without a database.
@@ -35,6 +35,21 @@ describe('GET /metrics', () => {
     expect(body).toContain('aseo_http_requests_total{route="v1",status="2xx"} 1');
     expect(body).toContain('aseo_commands_total{command="workspace.get",effect="read",outcome="ok"} 1');
     expect(body).toContain('aseo_dependency_up{name="postgres"} 1');
+  });
+});
+
+describe('route groups (#752)', () => {
+  it('gives OAuth its own group, so an identity-provider failure is not counted as the admin UI', () => {
+    expect(routeGroup('/oauth/callback')).toBe('oauth');
+    expect(routeGroup('/oauth/token-typo')).toBe('oauth');
+    expect(routeGroup('/oauth')).toBe('oauth');
+    // The line above must not swallow the API's own OAuth routes.
+    expect(routeGroup('/api/auth/oauth2/consent')).toBe('auth');
+    expect(routeGroup('/api/oauth/workspace')).toBe('api');
+    expect(routeGroup('/sites/one')).toBe('ui');
+    expect(statusClass(204)).toBe('2xx');
+    expect(statusClass(418)).toBe('4xx');
+    expect(statusClass(503)).toBe('5xx');
   });
 });
 

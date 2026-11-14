@@ -30,6 +30,9 @@ export function routeGroup(path: string): string {
   if (path === '/login' || path === '/consent' || path === '/invite') return 'pages';
   if (path.startsWith('/.well-known/')) return 'well-known';
   if (path.startsWith('/api/')) return 'api';
+  // The connect/callback edge of connector and MCP OAuth. Its own group, so a failing identity
+  // provider is visible without being counted as the admin UI (#752).
+  if (path === '/oauth' || path.startsWith('/oauth/')) return 'oauth';
   // The admin UI's static files and its client-side routes.
   return 'ui';
 }
