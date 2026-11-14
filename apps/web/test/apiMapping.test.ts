@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, type CommandCall, createCommandApi, serverReachable } from '../src/app/api';
+import { ApiError, type CommandCall, createCommandApi, getWorkspaceId, httpApi, serverReachable, setWorkspaceId } from '../src/app/api';
 
 // The mapping from command outputs to the UI's shapes. Phase 0 has no audit, Search Console or
 // AI-visibility source, so Home must carry nulls with a reason — never a zero that reads as healthy.
@@ -134,5 +134,42 @@ describe('the development reachability probe', () => {
       }),
     );
     expect(await serverReachable()).toBe(false);
+  });
+});
+
+describe('the workspace header', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setWorkspaceId(null, { persist: false });
+  });
+
+  it('is left off the memberships request only, while other commands keep the acting workspace', async () => {
+    const seen: { command: string; workspace: string | null }[] = [];
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => (release = resolve));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input);
+        const command = url.slice(url.lastIndexOf('/') + 1);
+        seen.push({ command, workspace: new Headers(init?.headers).get('x-workspace-id') });
+        if (command === 'workspace.memberships') {
+          await held;
+          return Response.json({ workspaces: [{ id: 'ws_b', name: 'B', role: 'owner' }] });
+        }
+        return Response.json({ sites: [] });
+      }),
+    );
+    setWorkspaceId('ws_b', { persist: false });
+    // Memberships are still on their way when another command is sent.
+    const memberships = httpApi.getMemberships();
+    await httpApi.listSites();
+    release();
+    await memberships;
+    expect(seen).toEqual([
+      { command: 'workspace.memberships', workspace: null },
+      { command: 'sites.list', workspace: 'ws_b' },
+    ]);
+    expect(getWorkspaceId()).toBe('ws_b');
   });
 });

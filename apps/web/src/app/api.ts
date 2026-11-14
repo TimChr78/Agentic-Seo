@@ -388,17 +388,24 @@ const fetchWithWorkspace: typeof fetch = (input, init = {}) => {
 
 const client = createClient<Commands>({ credentials: 'include', fetch: fetchWithWorkspace });
 
+// For `workspace.memberships` only: it lists every workspace the person belongs to, so it must not
+// name one. A saved workspace the person has left would make the server refuse the request (401) and
+// hide the memberships they still have. A separate client, rather than clearing the acting
+// workspace, so every other command dispatched meanwhile keeps its workspace.
+const unscopedClient = createClient<Commands>({ credentials: 'include', fetch: (input, init) => fetch(input, init) });
+
 /** One command call, typed from the command definitions. */
 export type CommandCall = <N extends CommandName>(name: N, input: In<N>) => Promise<Out<N>>;
 
 // The published client types its `call` with the same generics, but TypeScript does not narrow a
 // generic through a wrapper's own type parameter, so the contract is named once here.
 const callCommand = client.call as CommandCall;
+const callUnscoped = unscopedClient.call as CommandCall;
 
 /** One command call; a transport failure becomes the UI error the server could not send. */
-async function rpc<N extends CommandName>(name: N, input: In<N>): Promise<Out<N>> {
+async function rpc<N extends CommandName>(name: N, input: In<N>, call: CommandCall = callCommand): Promise<Out<N>> {
   try {
-    return await callCommand(name, input);
+    return await call(name, input);
   } catch (error) {
     if (error instanceof ApiError) throw error;
     throw new ApiError(0, 'offline', 'The server did not answer. Check that it is running and try again.');
@@ -482,7 +489,7 @@ async function authRequest<T>(path: string, init: RequestInit = {}): Promise<T> 
   return (await response.json()) as T;
 }
 
-const commandApi = createCommandApi(rpc);
+const commandApi = createCommandApi((name, input) => rpc(name, input));
 
 /**
  * The real client. Better Auth's session endpoints are not commands (they are the server's own auth
@@ -490,6 +497,7 @@ const commandApi = createCommandApi(rpc);
  */
 export const httpApi: Api = {
   ...commandApi,
+  getMemberships: async () => (await rpc('workspace.memberships', {}, callUnscoped)).workspaces,
   getSession: async () => {
     let response: Response;
     try {

@@ -3,6 +3,6 @@
 - A signed-in person without a workspace is a real state the app explains; a refresh keeps the shell mounted instead of flashing the loading screen.
 - Add Playwright with the Phase 0 journey (sign up, sign in, create the first site, open verification from the setup checklist, check ownership, see the checklist confirm it) and axe over every route in light and dark (WCAG 2.1/2.2 A and AA), plus an `e2e` CI job with a disposable database on the test Postgres.
 - Fix the accessibility issues the scan found: the first-run and no-workspace screens now have a level-one heading, and the no-workspace screen is a `main` landmark.
-- A workspace saved on the device that the person has left no longer hides their other workspaces: memberships are read without it, then the saved choice is restored only if it is still theirs.
+- A workspace saved on the device that the person has left no longer hides their other workspaces: the memberships request alone is sent without the workspace header, so other commands keep theirs.
 - The verification screen is keyed by site, so a finished or running check of one site never shows on another.
 - `pnpm dev` proxies `/v1` and `/healthz`, and the demo fallback counts only the API's own health answer.
