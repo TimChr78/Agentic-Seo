@@ -1,8 +1,9 @@
-import { AppError, canonicalJson, hashValue, sha256 } from '@agentic-seo/core';
+import { AppError, canonicalJson, hashValue, redactCredentials, safeErrorText, sha256 } from '@agentic-seo/core';
 import { type Db, schema, type Tx } from '@agentic-seo/db';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
+import { IDEMPOTENCY_KEY_MAX, isValidIdempotencyKey } from './idempotency';
 import {
   type ActionClass,
   type AgentCounters,
@@ -23,7 +24,11 @@ import { findUnknownInputKeys, type UnknownInputKey, unknownKeyMessages } from '
 // validation, authorization, idempotency and audit cannot be skipped by any surface.
 
 export type Effect = 'read' | 'write' | 'publish' | 'destructive';
-export type Surface = 'rest' | 'mcp' | 'scim' | 'internal';
+/**
+ * Where a request came in. `internal` is a path with no request behind it (a scheduler job, the
+ * password reset a worker performs); `cli` is an operator running `aseo` on the host (#913).
+ */
+export type Surface = 'rest' | 'mcp' | 'scim' | 'internal' | 'cli';
 
 /** One agent write, recorded in the action ledger; the server wires this once agents land (task C). */
 export interface AgentActionEntry {
@@ -128,9 +133,18 @@ export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType
   target?: (input: z.output<I>) => string | undefined;
   /**
    * What the audit log records as the target when the id is only known after the handler ran, e.g.
-   * a freshly created token or invitation. Falls back to `target` when it returns undefined.
+   * a freshly created token or invitation, or the row a lookup resolved (#763). Falls back to
+   * `target` when it returns undefined.
    */
   auditTarget?: (output: z.output<O>) => string | undefined;
+  /**
+   * For a read that reached many targets (a list of pages, a sample): one audit entry per id, so
+   * `audit.list` can answer "who accessed which row". The audit schema records a single target per
+   * entry and has no details column, so the list becomes its own entries: deduplicated and capped
+   * at {@link MAX_AUDIT_TARGETS} per call. Ignored for writes, whose audit row names what the write
+   * changed.
+   */
+  auditTargets?: (output: z.output<O>) => readonly string[];
   /**
    * Facts about what the handler created, merged into the agent ledger's impact. The ledger is
    * written after the handler so it can link the action to the rows it produced.
@@ -213,6 +227,24 @@ function redact(input: unknown, fields?: readonly string[]) {
 }
 
 /**
+ * How many targets one audited read may name in the audit log (#763). A page is bounded already;
+ * the cap keeps a large unfiltered read from adding an unbounded chain of rows. The first ids in
+ * the output's own order are recorded, so the rows cover what the caller saw.
+ */
+export const MAX_AUDIT_TARGETS = 50;
+
+/** The targets of one audited read: its single target first, then the extras, deduplicated and capped. */
+function auditTargetList(single: string | undefined, extra: readonly string[]): (string | undefined)[] {
+  const out: (string | undefined)[] = [];
+  for (const candidate of [single, ...extra]) {
+    if (candidate === undefined || out.includes(candidate)) continue;
+    if (out.length >= MAX_AUDIT_TARGETS) break;
+    out.push(candidate);
+  }
+  return out.length ? out : [undefined];
+}
+
+/**
  * Appends one entry to a workspace's audit log, keeping its hash chain. The executor calls this for
  * every command; a command that records several items itself calls it directly and declares
  * `auditsItself`.
@@ -224,6 +256,23 @@ function redact(input: unknown, fields?: readonly string[]) {
  */
 export type AuditedError = { code: string; message: string };
 const UNEXPECTED_FAILURE: AuditedError = { code: 'internal', message: 'The command failed with an unexpected error.' };
+
+/**
+ * The sanitised copy of an AppError (#885): its message redacted while it is still complete, so a
+ * command that built it from a provider's answer or an exception cannot leak a credential to the
+ * caller, the audit log or the agent ledger. The executor is the last line of defence: it sanitises
+ * once, here, rather than trusting every message a handler writes. An error with nothing to redact
+ * is returned untouched, so its identity (and a PolicyDeniedError's outcome) survives.
+ */
+export function sanitizeAppError(err: AppError): AppError {
+  const message = redactCredentials(err.message);
+  if (err instanceof PolicyDeniedError) {
+    const reasons = err.outcome.reasons.map(redactCredentials);
+    const changed = message !== err.message || reasons.some((r, i) => r !== err.outcome.reasons[i]);
+    return changed ? new PolicyDeniedError({ ...err.outcome, reasons }) : err;
+  }
+  return message === err.message ? err : new AppError(err.code, message, err.details);
+}
 
 export async function appendAuditEntry(
   tx: Tx,
@@ -289,6 +338,8 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       const input = rawInput ?? {};
       const inputHash = hashValue(redact(input, cmd.sensitive));
       let target: string | undefined;
+      /** Targets an audited read reached besides `target` (#763); one audit row each. */
+      let extraTargets: readonly string[] = [];
       const startedAt = Date.now();
       // Metrics or logging hooks are observers: they must never fail a command or mask its error.
       const report = (outcome: 'ok' | 'error') => {
@@ -302,12 +353,16 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       const unknownMessages = unknownKeyMessages(cmd.name, unknown);
 
       const fail = async (err: AppError): Promise<never> => {
+        // Every AppError leaving the executor is redacted first (#885): the message may have been
+        // assembled from a provider body or an exception, and it is about to be returned to the
+        // caller and written to the audit log.
+        const safe = sanitizeAppError(err);
         // The main transaction rolled back; record the failed attempt in its own.
-        await db.withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target, err));
+        await db.withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target, safe));
         report('error');
-        span.setStatus({ code: SpanStatusCode.ERROR, message: err.code });
+        span.setStatus({ code: SpanStatusCode.ERROR, message: safe.code });
         span.end();
-        throw err;
+        throw safe;
       };
 
       if (unknown.length) {
@@ -360,6 +415,21 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
           ),
         );
 
+      // An empty key is present but means nothing: refuse it instead of silently running without a
+      // key, or a retry could execute twice (#906).
+      if (opts.idempotencyKey !== undefined && !isValidIdempotencyKey(opts.idempotencyKey))
+        return fail(
+          new AppError('invalid_input', `An idempotency key must be 1 to ${IDEMPOTENCY_KEY_MAX} printable characters without spaces.`),
+        );
+
+      // An idempotency key is scoped to the caller as well as the workspace (#906): a person is
+      // their user id (the same across sessions); an agent is its agent record, and an API token or
+      // OAuth connection is its own agent. The audit log keeps the call's `inputHash`; the
+      // idempotency row stores this principal-bound hash instead. Derived here, after the
+      // missing-record guard: a read from such an agent is supported and must not dereference
+      // `principal.agent`, so it is named by its client id and user id instead.
+      const idempotencyHash = opts.idempotencyKey ? hashValue({ principal: callerIdentity(principal), input: inputHash }) : inputHash;
+
       const committed: (() => Promise<void>)[] = [];
       let policy: PolicyOutcome | undefined;
       try {
@@ -374,11 +444,73 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                 policy = undefined;
                 // A rolled-back attempt may have named what it created; that no longer exists.
                 target = inputTarget;
+                extraTargets = [];
+                // The agent-policy lock comes first for every agent write (#907, #922): before a
+                // command's `impact`, which may lock artifacts. See lockAgentPolicy for the one
+                // global order; a path that takes these locks the other way round can deadlock.
+                if (agent && cmd.effect !== 'read') await lockAgentPolicy(tx, principal.workspaceId, agent.id);
+                // The agent was resolved when the request began; a pause or revoke committed since
+                // then stops this command too (#275). Read under the lock above, so a pause that
+                // commits first is seen and one that commits after waits for this command.
+                if (agent) {
+                  const [current] = await tx
+                    .select({ status: schema.agents.status, statusReason: schema.agents.statusReason })
+                    .from(schema.agents)
+                    .where(and(eq(schema.agents.workspaceId, principal.workspaceId), eq(schema.agents.id, agent.id)));
+                  if (current && current.status !== 'active')
+                    throw new AppError(
+                      'forbidden',
+                      `This agent (${agent.name}) is ${current.status}${current.statusReason ? `: ${current.statusReason}` : ''}. ${
+                        current.status === 'paused' ? 'A person can resume it in Settings → Agents.' : 'Its credentials no longer work.'
+                      }`,
+                    );
+                }
+                // The idempotency replay comes before the policy engine (#930). A retry of a write
+                // that already ran must answer the stored response: re-deciding would count the
+                // first action against the limits, could refuse the retry, and would bill a second
+                // check. Authentication, permission, the missing-record guard, input validation and
+                // this agent's status (under the lock above) still ran, so a paused or revoked agent
+                // gets its usual refusal instead of a replay.
+                if (opts.idempotencyKey) {
+                  // Serialise retries of one (workspace, key) before the lookup. Two concurrent
+                  // requests must not both miss and both run the handler: the second waits here,
+                  // then sees the response the first committed. Keyed by workspace + key only
+                  // (#906): every caller presenting one key serialises before any handler runs, or
+                  // two callers could both run handlers and the loser's external effects would
+                  // survive its rolled-back transaction. The caller is still bound by
+                  // `idempotencyHash`: after the lock, another caller's row is a reused conflict.
+                  await tx.execute(
+                    sql`SELECT pg_advisory_xact_lock(hashtextextended(${`idempotency:${principal.workspaceId}:${opts.idempotencyKey}`}, 0))`,
+                  );
+                  const [hit] = await tx
+                    .select()
+                    .from(schema.idempotencyKeys)
+                    .where(
+                      and(
+                        eq(schema.idempotencyKeys.workspaceId, principal.workspaceId),
+                        eq(schema.idempotencyKeys.key, opts.idempotencyKey),
+                      ),
+                    );
+                  if (hit) {
+                    // `idempotencyHash` binds the caller too, so another principal presenting the
+                    // key is a conflict, never the first caller's stored response.
+                    if (hit.command !== cmd.name || hit.inputHash !== idempotencyHash)
+                      throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.', {
+                        reason: 'idempotency_key_reused',
+                      });
+                    const replay = hit.response as z.output<C['output']>;
+                    // A replay returns before the handler, so computing targets only on the handler
+                    // path left the replay's audit row without them (#905). Compute them from the
+                    // stored response the same way. Every audited read stores its full output: the
+                    // commands with `auditTarget`/`auditTargets` and a `sensitiveOutput` are writes,
+                    // and the reads' targets are plain ids, so redaction never removes them.
+                    target = cmd.auditTarget?.(replay) ?? target;
+                    if (cmd.effect === 'read' && cmd.auditTargets) extraTargets = cmd.auditTargets(replay);
+                    return replay;
+                  }
+                }
                 // ADR-0006: every agent write passes the policy engine before the handler runs.
                 if (agent && cmd.effect !== 'read') {
-                  // The agent's policy lock comes first, before an impact function locks artifacts:
-                  // every write of one agent then takes its locks in the same order.
-                  await lockAgentPolicy(tx, principal.workspaceId, agent.id);
                   const impact = cmd.impact
                     ? await cmd.impact(parsed.data, { principal, tx, services })
                     : await estimateImpact({
@@ -393,28 +525,6 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                     approvable: cmd.approvable === true,
                   });
                   if (policy.decision === 'deny') throw new PolicyDeniedError(policy);
-                }
-                if (opts.idempotencyKey) {
-                  // Serialise retries of one (workspace, key) before the lookup. Two concurrent
-                  // requests must not both miss and both run the handler: the second waits here,
-                  // then sees the response the first committed.
-                  await tx.execute(
-                    sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${principal.workspaceId}:${opts.idempotencyKey}`}, 0))`,
-                  );
-                  const [hit] = await tx
-                    .select()
-                    .from(schema.idempotencyKeys)
-                    .where(
-                      and(
-                        eq(schema.idempotencyKeys.workspaceId, principal.workspaceId),
-                        eq(schema.idempotencyKeys.key, opts.idempotencyKey),
-                      ),
-                    );
-                  if (hit) {
-                    if (hit.command !== cmd.name || hit.inputHash !== inputHash)
-                      throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.');
-                    return hit.response as z.output<C['output']>;
-                  }
                 }
                 const undo = createUndoCollector();
                 const out = withInputWarnings(
@@ -438,14 +548,29 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                   if (extra) policy = { ...policy, impact: { ...policy.impact, ...extra } };
                 }
                 if (opts.idempotencyKey)
-                  await tx.insert(schema.idempotencyKeys).values({
-                    workspaceId: principal.workspaceId,
-                    key: opts.idempotencyKey,
-                    command: cmd.name,
-                    inputHash,
-                    response: redact(out, cmd.sensitiveOutput) as object,
-                  });
-                if (cmd.effect !== 'read') target = cmd.auditTarget?.(out) ?? target;
+                  try {
+                    await tx.insert(schema.idempotencyKeys).values({
+                      workspaceId: principal.workspaceId,
+                      key: opts.idempotencyKey,
+                      command: cmd.name,
+                      inputHash: idempotencyHash,
+                      response: redact(out, cmd.sensitiveOutput) as object,
+                    });
+                  } catch (err) {
+                    // Two different principals can use one key; the unique (workspace, key) decides
+                    // when they do not serialise after all. The loser's whole transaction rolls back
+                    // and answers the same clean conflict as a sequential reuse, never a 500 or a
+                    // silent second run.
+                    if (isIdempotencyKeyConflict(err))
+                      throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.', {
+                        reason: 'idempotency_key_reused',
+                      });
+                    throw err;
+                  }
+                // A read's target can only come from its output too (#763): a lookup resolves the
+                // thing it found, a list returns the rows it showed.
+                target = cmd.auditTarget?.(out) ?? target;
+                if (cmd.effect === 'read' && cmd.auditTargets) extraTargets = cmd.auditTargets(out);
                 if (cmd.effect !== 'read' && !cmd.auditsItself) await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
                 if (agent && policy && services.onAgentAction)
                   await services.onAgentAction(tx, {
@@ -453,7 +578,9 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                     command: cmd.name,
                     actionClass: policy.actionClass,
                     decision: policy.decision,
-                    reasons: policy.reasons,
+                    // Reasons quote names, inputs and exceptions, and this column is exposed to
+                    // readers, so they are redacted before they are stored (#885).
+                    reasons: policy.reasons.map(redactCredentials),
                     impact: policy.impact,
                     ok: true,
                     error: null,
@@ -476,13 +603,28 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         );
         // An audited read is recorded in its own transaction: the hash chain must be appended under
         // its lock with the latest entries visible, which a snapshot taken earlier would not show.
+        // A read that reached several targets gets one entry per target (#763).
         if (cmd.effect === 'read' && cmd.auditReads)
-          await db.withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target));
+          await db.withWorkspace(principal.workspaceId, async (tx) => {
+            for (const readTarget of auditTargetList(target, extraTargets))
+              await appendAudit(tx, principal, opts.surface, cmd, inputHash, readTarget);
+          });
         for (const fn of committed) await fn().catch((err) => span.recordException(err as Error));
         report('ok');
         span.end();
         return result;
-      } catch (err) {
+      } catch (thrown) {
+        // A known scheduling conflict takes the AppError path once, so the ledger and the audit log
+        // record the readable conflict instead of an internal failure (#867, #871, #912).
+        const conflict = knownConflict(thrown);
+        if (conflict) span.recordException(thrown as Error);
+        const err = conflict ?? thrown;
+        // An AppError is written for a person; anything else is unexpected and its text may carry
+        // SQL, secrets or driver details, so the ledger stores the same fixed failure as the audit
+        // log. The original exception stays on the span for diagnostics. An AppError's own message
+        // is redacted before it is stored (#885): it may name a credential a provider echoed.
+        const safe = err instanceof AppError ? sanitizeAppError(err) : null;
+        const failure = safe ? safe.message : UNEXPECTED_FAILURE.message;
         // The transaction rolled back: keep the agent's attempt (a refusal or a failed write) in the ledger.
         if (agent && policy && services.onAgentAction)
           await db
@@ -492,10 +634,11 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                 command: cmd.name,
                 actionClass: policy!.actionClass,
                 decision: policy!.decision,
-                reasons: policy!.reasons,
+                reasons: policy!.reasons.map(redactCredentials),
                 impact: policy!.impact,
                 ok: false,
-                error: err instanceof Error ? err.message.slice(0, 1000) : String(err).slice(0, 1000),
+                // Redacted before it is cut (#885): the column is exposed to readers.
+                error: safeErrorText(failure, 1000),
                 target: target ?? null,
                 surface: opts.surface,
                 level: policy!.level ?? null,
@@ -506,7 +649,7 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
               }),
             )
             .catch((e) => span.recordException(e as Error));
-        if (err instanceof AppError) return fail(err);
+        if (safe) return fail(safe);
         // An unexpected exception is audited too (as a sanitized internal failure): a write that
         // failed must leave a trace whatever the cause.
         await db
@@ -647,12 +790,57 @@ export async function agentPolicy(
   });
   // Holds and veto windows arrive in Phase 7. Until then an L2 decision keeps its level and reasons
   // but is degraded to an ordinary approval request, so nothing runs without a person.
-  if (policy.decision === 'hold') return { ...policy, decision: 'ask', reasons: [...policy.reasons, 'Holds arrive in Phase 7.'] };
-  return policy;
+  if (policy.decision === 'hold')
+    return redactPolicyReasons({ ...policy, decision: 'ask', reasons: [...policy.reasons, 'Holds arrive in Phase 7.'] });
+  return redactPolicyReasons(policy);
 }
 
-/** One policy decision per agent at a time, until the transaction ends. Taking it again in the same transaction is free. */
-async function lockAgentPolicy(tx: Tx, workspaceId: string, agentId: string) {
+/**
+ * The policy with its reasons credential-redacted. Reasons quote names, inputs and exceptions, and
+ * they leave here for a successful response, the approval note and the agent ledger, none of which
+ * pass through AppError sanitising, so they are redacted once, where the policy is made (#885).
+ * Unchanged when clean.
+ */
+export function redactPolicyReasons(policy: PolicyOutcome): PolicyOutcome {
+  const reasons = policy.reasons.map(redactCredentials);
+  return reasons.some((r, i) => r !== policy.reasons[i]) ? { ...policy, reasons } : policy;
+}
+
+/**
+ * The caller an idempotency key belongs to (#906): a person is their user id (the same across
+ * sessions); an agent is its agent record, and an API token or OAuth connection is its own agent.
+ * A read from an agent without a record (supported) is named by its client id and user id.
+ */
+export function callerIdentity(principal: Principal) {
+  if (principal.type === 'user') return { kind: 'user' as const, userId: principal.userId };
+  // A surface may build an agent principal without its record (the executor refuses its writes but
+  // supports its reads), which the union does not model; read the fields defensively.
+  const agent = principal.agent as { id: string } | undefined;
+  if (agent) return { kind: 'agent' as const, agentId: agent.id };
+  const unregistered = principal as { clientId?: string; userId?: string };
+  // Named fields, never one joined string: an unregistered agent's client id and user id are
+  // separate values, so `{userId: 'alice'}` cannot hash like `{clientId: 'alice', userId: 'bob'}`.
+  return { kind: 'agent-unregistered' as const, clientId: unregistered.clientId ?? null, userId: unregistered.userId ?? null };
+}
+
+/**
+ * The per-agent transaction lock that serialises every decision about one agent's writes: the
+ * policy engine and a person's pause/resume/revoke, so a pause or a refusal committed by one is
+ * visible to the other and cannot interleave with it (#240, #907).
+ *
+ * THE ONE LOCK ORDER on these paths, everywhere:
+ *   1. this agent-policy lock,
+ *   2. approval_requests rows (`lockApproval`),
+ *   3. artifact rows in id order (`lockArtifacts`, `coordinationFor`),
+ *   4. the mandate validator's agent-mandate lock (taken inside `publishVersion`).
+ * Take it before a command's `impact`, before any status read that gates a write, and before
+ * approval or artifact locks. The executor (agent writes), `approvals.approve` (an agent's request)
+ * and `agents.pause`/`resume`/`revoke` follow this order; a path that needs two of these locks must
+ * not take them the other way round.
+ *
+ * Transaction-scoped and reentrant; the key string must stay identical everywhere.
+ */
+export async function lockAgentPolicy(tx: Tx, workspaceId: string, agentId: string) {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${workspaceId}:${agentId}`}, 0))`);
 }
 
@@ -699,4 +887,56 @@ export function isSerializationFailure(err: unknown): boolean {
   for (let e = err as { code?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++)
     if (e.code === '40001') return true;
   return false;
+}
+
+/**
+ * A caught failure the executor answers as a readable conflict rather than an internal failure. A
+ * deadlock is a scheduling conflict, not a server fault (#871): the work rolled back and the same
+ * request can safely run again, so it is retried where the command allows it and answered as a
+ * conflict otherwise. A singleton writer or a publish that raced another still reaches the partial
+ * unique indexes (#867, #912): answer conflict, not a 500, and say what to do next. Mapped before
+ * the ledger and audit so both record the readable conflict once, like any other AppError.
+ */
+function knownConflict(err: unknown): AppError | null {
+  if (isDeadlock(err))
+    return new AppError('conflict', 'Another change locked the same artifacts at the same time. Retry this action; nothing was written.', {
+      retryable: true,
+    });
+  if (isSingletonConflict(err))
+    return new AppError(
+      'conflict',
+      'This workspace already has an artifact of that type: another change created it at the same time. Nothing was written; retry and edit the existing artifact.',
+    );
+  if (isOnePublishedConflict(err))
+    return new AppError(
+      'conflict',
+      'This artifact already has a published version: another change published one at the same time. Nothing was written; retry, then edit and publish the latest draft.',
+    );
+  return null;
+}
+
+/** Postgres 23505 on the unique index `index`, directly or as the cause of a query error. */
+function uniqueViolationOn(err: unknown, index: string): boolean {
+  for (
+    let e = err as { code?: unknown; constraint?: unknown; cause?: unknown } | undefined, depth = 0;
+    e && depth < 5;
+    e = e.cause as typeof e, depth++
+  )
+    if (e.code === '23505' && e.constraint === index) return true;
+  return false;
+}
+
+/** Postgres 23505 on the idempotency primary key, directly or as the cause of a query error. */
+function isIdempotencyKeyConflict(err: unknown): boolean {
+  return uniqueViolationOn(err, 'idempotency_keys_pkey');
+}
+
+/** Postgres 23505 on the singleton partial unique index, directly or as the cause of a query error. */
+export function isSingletonConflict(err: unknown): boolean {
+  return uniqueViolationOn(err, 'artifacts_singleton_type');
+}
+
+/** Postgres 23505 on the one-published-version partial unique index (#912). */
+export function isOnePublishedConflict(err: unknown): boolean {
+  return uniqueViolationOn(err, 'artifact_versions_one_published');
 }

@@ -1,3 +1,4 @@
+export * from './idempotency';
 export * from './policy';
 export * from './principal';
 export * from './registry';

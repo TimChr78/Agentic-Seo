@@ -1,5 +1,5 @@
 import { type Auth, inAuthTransaction } from '@agentic-seo/auth';
-import { appendAuditEntry, type Principal, type Surface } from '@agentic-seo/commands';
+import { appendAuditEntry, type Principal } from '@agentic-seo/commands';
 import { sha256 } from '@agentic-seo/core';
 import type { Db } from '@agentic-seo/db';
 import { logger } from '@agentic-seo/telemetry';
@@ -47,10 +47,7 @@ export async function recordPasswordResetAudit(
       appendAuditEntry(
         tx,
         principal,
-        // Upstream adds `cli` to the commands `Surface` union in the same commit. packages/commands
-        // is task S2's file, so the cast keeps this change inside task S1; replace it with the union
-        // member when S2 lands `Surface = … | 'cli'`.
-        'cli' as Surface,
+        'cli',
         { name: entry.command, effect: 'write' },
         // What happened and from where, never the token or the password.
         sha256(`${entry.command}:${userId}:${entry.ip}:${entry.outcome}`),
