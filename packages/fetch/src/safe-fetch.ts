@@ -129,6 +129,13 @@ export interface SafeFetchOptions {
    */
   truncate?: boolean;
   maxRedirects?: number;
+  /**
+   * A per-hop policy for redirect targets. `safeFetch` resolves each `Location` against the URL
+   * that returned it, then calls this before that hop is resolved or connected to. Return `true`
+   * to follow it, or `false` and a string reason to refuse it with a `blocked_redirect` error.
+   * The first URL is not passed: callers check it before they call `safeFetch`.
+   */
+  allowRedirect?: (url: URL, details: { from: string; status: number }) => boolean | string;
   connectTimeoutMs?: number;
   totalTimeoutMs?: number;
   resolver?: HostResolver;
@@ -683,6 +690,16 @@ export async function safeFetch(target: string | URL, options: SafeFetchOptions 
           next = new URL(location, current);
         } catch (error) {
           throw new SafeFetchError('invalid_url', `${location} is not a valid redirect target`, { url: current.href, cause: error });
+        }
+        // The policy runs before the next hop is resolved or connected to, so a refused target is
+        // never contacted (and an https -> http downgrade never leaves the process).
+        const verdict = options.allowRedirect?.(next, { from: current.href, status: hop.status });
+        if (verdict !== undefined && verdict !== true) {
+          throw new SafeFetchError(
+            'blocked_redirect',
+            typeof verdict === 'string' ? verdict : `${next.href} is not an allowed redirect target`,
+            { url: current.href },
+          );
         }
         if (hop.status === 303 || ((hop.status === 301 || hop.status === 302) && method === 'POST')) {
           method = 'GET';

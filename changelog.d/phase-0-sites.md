@@ -4,3 +4,7 @@
 - Add `sites.checklist`, which reads the setup facts from what exists: verification, competitor count, zero audits until the crawler lands, and whether a `dataforseo.login` credential is stored.
 - Add migration `0005_sites.sql`: sites, markets and competitors with row-level security and app-role grants, and composite foreign keys from `artifacts`, `learnings` and `provider_calls` to `sites (workspace_id, id)`. `artifacts.create` answers an unknown or archived site with a readable error instead of an FK violation.
 - Register `sites.*`, `markets.*` and `competitors.*` in the server registry, so REST, MCP and the UI client serve the same commands under `sites:read` and `sites:write`.
+- Parse the home page with parse5 for the meta check instead of scanning text: only a `<meta name="aseo-site-verification">` that is a direct child of the parsed head counts, so a comment, another element's attribute value, a script/noscript/template body or a tag the parser moved to the body cannot spoof it.
+- Require HTTPS on the meta check's first URL and on every redirect hop, and add `allowRedirect` to `safeFetch` so `sites` refuses an unrelated redirect host before it is resolved or contacted.
+- Refuse a domain that is itself a public suffix (ICANN or private) with tldts, for site domains, competitor domains and extra hosts; a real site below one (`blog.example.co.uk`, `user.github.io`) still works.
+- Exercise the production fetcher in the verification tests by injecting only its DNS resolver, and make the server test call `sites.verify` and assert the verified state.

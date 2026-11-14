@@ -1,7 +1,6 @@
 import { type AnyCommand, createExecutor, userPrincipal } from '@agentic-seo/commands';
 import { newUuid } from '@agentic-seo/core';
 import { createDb, type Db, schema } from '@agentic-seo/db';
-import { safeFetch } from '@agentic-seo/fetch';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { z } from 'zod';
 import { APP_ROLE, createDisposableDb, type DisposableDb, hasTestDatabase } from '../../db/test/disposable';
@@ -17,6 +16,7 @@ import {
   removeCompetitor,
   removeMarket,
   setSiteFetcher,
+  setSiteFetchSeams,
   setTxtResolver,
   siteChecklist,
   siteVerification,
@@ -64,6 +64,7 @@ describe.skipIf(!hasTestDatabase())('site commands', () => {
   afterEach(() => {
     setTxtResolver(null);
     setSiteFetcher(null);
+    setSiteFetchSeams(null);
   });
 
   const owner = (workspace = disposable.workspace) => userPrincipal('user_owner', workspace, 'owner');
@@ -254,11 +255,20 @@ describe.skipIf(!hasTestDatabase())('site commands', () => {
     setTxtResolver(async () => {
       throw Object.assign(new Error('queryTxt ENODATA'), { code: 'ENODATA' });
     });
-    // The real guard, with only its resolver seam replaced: it must refuse before a socket opens.
-    setSiteFetcher((url) => safeFetch(url, { resolver: async () => [{ address: '127.0.0.1', family: 4 }] }));
+    // The production adapter, with only its resolver seam replaced: it must refuse before a socket opens.
+    setSiteFetchSeams({ resolver: async () => [{ address: '127.0.0.1', family: 4 }] });
     const result = await run(verifySite, { siteId: site.id });
     expect(result.verified).toBe(false);
     expect(result.error).toContain('private, loopback or metadata');
+  });
+
+  it('refuses a public suffix as a competitor domain', async () => {
+    const site = await create('suffix.example');
+    await expect(run(addCompetitor, { siteId: site.id, domain: 'co.uk' })).rejects.toMatchObject({
+      code: 'invalid_input',
+      message: expect.stringContaining('public suffix'),
+    });
+    await expect(run(addCompetitor, { siteId: site.id, domain: 'github.io' })).rejects.toMatchObject({ code: 'invalid_input' });
   });
 
   it('reports the checklist facts from what exists, not from a guess', async () => {

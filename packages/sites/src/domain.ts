@@ -1,6 +1,7 @@
 import { isIP } from 'node:net';
 import { domainToASCII } from 'node:url';
 import { AppError } from '@agentic-seo/core';
+import { parse as parseSuffix } from 'tldts';
 
 // Domain normalisation for sites and competitors. A site is identified by its registrable domain,
 // so the stored form is the one every provider and the crawler can use: lower-case ASCII (IDNA /
@@ -61,6 +62,12 @@ export function normalizeDomain(raw: string): string {
   if (/^\d+$/.test(labels[labels.length - 1]!)) throw invalid(IP_HINT);
   if (INTERNAL_SUFFIXES.some((suffix) => ascii.endsWith(suffix)))
     throw invalid(`${ascii} ends in a reserved or private suffix, so ownership cannot be verified.`);
+  // A public suffix (`co.uk`, `github.io`) is a registry, not a site: no single owner can publish a
+  // verification record for it. The private section matters too: a bare `github.io` is not a site,
+  // while `user.github.io` below is. tldts carries both sections and knows the current list.
+  const suffix = parseSuffix(ascii, { allowPrivateDomains: true });
+  if (suffix.publicSuffix === ascii && (suffix.isIcann || suffix.isPrivate))
+    throw invalid(`${ascii} is a public suffix, not a domain one site owns. Enter the domain you control, such as yourcompany.${ascii}.`);
 
   return ascii;
 }

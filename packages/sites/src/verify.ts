@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { resolveTxt } from 'node:dns/promises';
-import { type FetchResult, isSafeFetchError, safeFetch } from '@agentic-seo/fetch';
+import { type FetchResult, isSafeFetchError, SafeFetchError, type SafeFetchOptions, safeFetch } from '@agentic-seo/fetch';
+import { parse as parseHtml } from 'parse5';
 
 // Ownership verification for a site (docs/architecture/domain-model.md §1): a DNS TXT record or a
 // meta tag in the home page's head, both carrying the site's own token. A site is only verified
@@ -40,12 +41,47 @@ export function setTxtResolver(resolver: TxtResolver | null): void {
 /** The guarded fetch the meta check uses, narrowed to what it needs. Injectable for tests. */
 export type SiteFetcher = (url: string, options: { hosts: readonly string[] }) => Promise<FetchResult>;
 
-export const safeSiteFetcher: SiteFetcher = (url) =>
-  safeFetch(url, {
+/**
+ * Test-only overrides for the guarded fetch: a resolver (and, for a local test server, an allow list
+ * and CA). Production passes none of them, so the real `safeFetch` guard and redirect policy run.
+ */
+export type SiteFetchSeams = Pick<SafeFetchOptions, 'resolver' | 'allow' | 'ca'>;
+
+let siteFetchSeams: SiteFetchSeams = {};
+
+/** Replace the guarded fetch's resolver/allow-list in tests; `null` restores production defaults. */
+export function setSiteFetchSeams(seams: SiteFetchSeams | null): void {
+  siteFetchSeams = seams ?? {};
+}
+
+/**
+ * The per-hop redirect policy for a site: only HTTPS on one of the site's own hosts. `safeFetch`
+ * calls it with each `Location` before resolving or connecting, so an unrelated host is never
+ * contacted and an `https -> http` downgrade never leaves the process.
+ */
+export function siteRedirectPolicy(hosts: readonly string[]): (url: URL) => true | string {
+  const allowed = hosts.map((host) => host.toLowerCase());
+  return (url) => {
+    if (url.protocol !== 'https:') return `${url.href} is not HTTPS. Ownership is checked over HTTPS only.`;
+    const host = url.hostname.toLowerCase();
+    if (!allowed.includes(host)) return `${url.href} is not one of this site's hosts (${allowed.join(', ')}).`;
+    return true;
+  };
+}
+
+export const safeSiteFetcher: SiteFetcher = (url, { hosts }) => {
+  // The first URL is built as https by this package; requiring it here keeps the whole chain on
+  // HTTPS even if the caller ever changes that.
+  if (new URL(url).protocol !== 'https:')
+    return Promise.reject(new SafeFetchError('blocked_scheme', `${url} is not HTTPS. Ownership is checked over HTTPS only.`, { url }));
+  return safeFetch(url, {
+    ...siteFetchSeams,
     maxBytes: VERIFICATION_BODY_BYTES,
     maxRedirects: 5,
     totalTimeoutMs: 15_000,
+    allowRedirect: siteRedirectPolicy(hosts),
   });
+};
 
 let fetchSite: SiteFetcher = safeSiteFetcher;
 
@@ -91,27 +127,41 @@ export async function checkDnsRecord(domain: string, token: string): Promise<Che
   };
 }
 
-/**
- * The head of an HTML document: everything before `</head>`, or the whole prefix when the tag is
- * missing or the body was cut short. A tolerant scan is enough here; a full DOM parse would add a
- * dependency for one attribute check.
- */
-export function headOf(html: string): string {
-  const end = html.search(/<\/head\s*>/i);
-  return end === -1 ? html : html.slice(0, end);
+/** The subset of parse5's default tree the meta check reads. */
+interface HtmlNode {
+  tagName?: string;
+  attrs?: ReadonlyArray<{ name: string; value: string }>;
+  childNodes?: ReadonlyArray<HtmlNode>;
 }
 
-const ATTRIBUTE = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/g;
+/** ASCII whitespace, the set HTML trims around an attribute value for this check. */
+const ASCII_WHITESPACE_EDGES = /^[\t\n\f\r ]+|[\t\n\f\r ]+$/g;
 
-/** Whether the head contains `<meta name="aseo-site-verification" content="<token>">`. */
+/** The document's `head` element, as the parser placed it (it applies the spec's implicit head end). */
+function headElement(html: string): HtmlNode | undefined {
+  const document = parseHtml(html) as unknown as HtmlNode;
+  const root = document.childNodes?.find((node) => node.tagName === 'html');
+  return root?.childNodes?.find((node) => node.tagName === 'head');
+}
+
+/**
+ * Whether the parsed head has a direct child `<meta name="aseo-site-verification" content="<token>">`.
+ * Parsing, not scanning, is what makes this trustworthy: a comment, another element's attribute
+ * value, a `<script>`/`<noscript>`/`<template>` raw-text body and anything the parser moved to the
+ * body are not meta elements in the head, so none of them can spoof the tag.
+ *
+ * The name is matched ASCII case-insensitively; the content is compared exactly after trimming
+ * ASCII whitespace, so a token with a stray newline from a template still works.
+ */
 export function metaTagPresent(html: string, token: string): boolean {
-  for (const tag of headOf(html).match(/<meta\b[^>]*>/gi) ?? []) {
-    const attributes = new Map<string, string>();
-    for (const match of tag.matchAll(ATTRIBUTE)) {
-      const value = match[2] ?? match[3] ?? match[4] ?? '';
-      attributes.set(match[1]!.toLowerCase(), value);
-    }
-    if (attributes.get('name')?.toLowerCase() === VERIFICATION_NAME && attributes.get('content') === token) return true;
+  const head = headElement(html);
+  if (!head) return false;
+  for (const node of head.childNodes ?? []) {
+    if (node.tagName !== 'meta') continue;
+    const name = node.attrs?.find((attribute) => attribute.name === 'name')?.value;
+    const content = node.attrs?.find((attribute) => attribute.name === 'content')?.value ?? '';
+    if (name?.toLowerCase() !== VERIFICATION_NAME) continue;
+    if (content.replace(ASCII_WHITESPACE_EDGES, '') === token) return true;
   }
   return false;
 }
@@ -126,7 +176,9 @@ function fetchFailure(domain: string, error: unknown): string {
         ? 'Check that the domain resolves, or verify with the DNS record instead.'
         : error.kind === 'tls'
           ? 'Check the certificate on the home page, or verify with the DNS record instead.'
-          : 'Check that the home page loads, then check again.';
+          : error.kind === 'blocked_redirect'
+            ? 'The home page redirects somewhere this check does not follow: only HTTPS on one of the site’s own hosts counts.'
+            : 'Check that the home page loads, then check again.';
   return `https://${domain}/ could not be fetched: ${error.message}. ${advice}`;
 }
 
@@ -137,9 +189,10 @@ function fetchFailure(domain: string, error: unknown): string {
  */
 export async function checkMetaTag(domain: string, hosts: readonly string[], token: string): Promise<CheckResult> {
   const url = `https://${domain}/`;
+  const allowed = hosts.length ? hosts : [domain];
   let page: FetchResult;
   try {
-    page = await fetchSite(url, { hosts });
+    page = await fetchSite(url, { hosts: allowed });
   } catch (error) {
     return { ok: false, error: fetchFailure(domain, error) };
   }
@@ -161,7 +214,6 @@ export async function checkMetaTag(domain: string, hosts: readonly string[], tok
   } catch {
     servedHost = domain;
   }
-  const allowed = hosts.length ? hosts : [domain];
   if (!allowed.includes(servedHost))
     return {
       ok: false,

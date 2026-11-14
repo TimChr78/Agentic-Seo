@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { setTxtResolver } from '@agentic-seo/sites';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { connectAgent, startTestServer, testPort, type User } from './harness';
 
 // The site surface end to end: a person creates and verifies a site over REST, an MCP client reads
@@ -24,8 +25,12 @@ afterAll(async () => {
   await t?.close();
 });
 
+afterEach(() => {
+  setTxtResolver(null);
+});
+
 describe('sites over the command surfaces', () => {
-  it('lets a person create a site, read the instructions and verify it through the meta tag', async () => {
+  it('lets a person create a site, read the instructions and verify it through the DNS record', async () => {
     const api = t.api(owner, ws);
     const { site } = await api.call('sites.create', { name: 'Acme store', domain: 'Example.COM.' });
     expect(site).toMatchObject({ name: 'Acme store', domain: 'example.com', verified: false, archived: false });
@@ -35,6 +40,12 @@ describe('sites over the command surfaces', () => {
     expect(instructions.dns.value).toBe(`aseo-site-verification=${instructions.token}`);
     expect(instructions.meta.instructions).toContain(`<meta name="aseo-site-verification" content="${instructions.token}">`);
     expect(instructions.verified).toBe(false);
+
+    // Publish the record the instructions name, then verify through the command the UI calls.
+    setTxtResolver(async () => [[instructions.dns.value]]);
+    const verified = await api.call('sites.verify', { siteId: site.id });
+    expect(verified).toMatchObject({ siteId: site.id, verified: true, method: 'dns', error: null });
+    expect((await api.call('sites.get', { siteId: site.id })).site).toMatchObject({ verified: true, verificationMethod: 'dns' });
   });
 
   it('returns the active site context artifact with the site', async () => {

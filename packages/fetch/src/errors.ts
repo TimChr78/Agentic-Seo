@@ -13,6 +13,8 @@ export type FetchErrorKind =
   | 'blocked_credentials'
   /** A caller-supplied `Host` or `:authority` header, which would change the TLS identity. */
   | 'blocked_header'
+  /** A redirect the caller's {@link SafeFetchOptions.allowRedirect} policy refused. */
+  | 'blocked_redirect'
   /** A `Content-Encoding` we cannot decode, so the body cannot be read as text. */
   | 'unsupported_encoding'
   /** The URL, or the location of a redirect, does not parse. */

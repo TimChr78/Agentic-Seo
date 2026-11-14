@@ -38,8 +38,19 @@ describe('normalizeDomain', () => {
     expect(() => normalizeDomain('1.2.3.4')).toThrowError(/IP address|cannot be a site/);
   });
 
+  it('refuses a domain that is itself a public suffix, ICANN or private', () => {
+    for (const input of ['co.uk', 'github.io', 'blogspot.com']) expect(() => normalizeDomain(input), input).toThrowError(/public suffix/);
+    expect(() => normalizeDomain('co.uk')).toThrowError(/yourcompany\.co\.uk/);
+  });
+
+  it('allows a real site below a public or private suffix', () => {
+    expect(normalizeDomain('blog.example.co.uk')).toBe('blog.example.co.uk');
+    expect(normalizeDomain('user.github.io')).toBe('user.github.io');
+  });
+
   it('normalises an extra host the same way, and siteHosts lists the primary domain once', () => {
     expect(normalizeHost('WWW.Example.com')).toBe('www.example.com');
+    expect(() => normalizeHost('github.io')).toThrowError(/public suffix/);
     expect(siteHosts({ primaryDomain: 'example.com', hosts: ['www.example.com', 'example.com'] })).toEqual([
       'example.com',
       'www.example.com',
