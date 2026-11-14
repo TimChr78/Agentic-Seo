@@ -1,15 +1,26 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createDemoApi, type Site, setApiClient } from '../src/app/api';
 import { Routes } from '../src/app/routes';
 import { SessionContext, type SessionValue } from '../src/app/session';
 
-function session(role = 'owner', permissions: string[] = []): SessionValue {
+const SITE: Site = {
+  id: 'site_martechsignal',
+  name: 'MartechSignal',
+  domain: 'martechsignal.com',
+  faviconUrl: null,
+  verified: true,
+  isLocalBusiness: false,
+  role: 'owner',
+};
+
+function session(role = 'owner', permissions: string[] = [], site: Site | null = null): SessionValue {
   return {
     status: 'ready',
     user: { id: 'usr_1', name: 'Alex Rivera', email: 'alex@martechsignal.com' },
     workspace: { id: 'ws_1', name: 'Workspace', timeZone: 'UTC', role, permissions },
-    sites: [],
-    site: null,
+    sites: site ? [site] : [],
+    site,
     can: (permission) => permissions.includes(permission),
     refresh: async () => {},
     switchSite: async () => {},
@@ -46,6 +57,9 @@ function renderAt(path: string, value: SessionValue = session('owner', ['workspa
   );
 }
 
+beforeEach(() => setApiClient(createDemoApi()));
+afterEach(() => setApiClient(null));
+
 describe('route table', () => {
   it('gives a built destination its own page and phase', () => {
     renderAt('/inbox');
@@ -62,7 +76,7 @@ describe('route table', () => {
   });
 
   it('opens /settings at the first section', async () => {
-    renderAt('/settings');
+    renderAt('/settings', session('owner', ['workspace:admin', 'sites:write'], SITE));
     await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: 'Site' })).toBeTruthy());
   });
 
@@ -73,9 +87,10 @@ describe('route table', () => {
     expect(screen.queryByRole('navigation', { name: 'Settings' })).toBeNull();
   });
 
-  it('lets an editor open Site but not Providers and budgets or Users and roles', () => {
-    renderAt('/settings/site', session('editor', EDITOR));
-    expect(screen.getByText('Site arrives in Phase 0')).toBeTruthy();
+  it('lets an editor open Site but not Providers and budgets or Users and roles', async () => {
+    renderAt('/settings/site', session('editor', EDITOR, SITE));
+    expect(screen.getByRole('heading', { level: 1, name: 'Site' })).toBeTruthy();
+    await waitFor(() => expect(screen.getAllByText('DNS TXT record').length).toBeGreaterThan(0));
     cleanup();
 
     renderAt('/settings/providers', session('editor', EDITOR));

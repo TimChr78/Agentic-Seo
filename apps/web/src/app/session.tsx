@@ -1,6 +1,6 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { setWorkspaceTimeZone } from '../ui/time';
-import { api, apiIsDemo, errText, type Site, type User, type Workspace } from './api';
+import { ApiError, api, apiIsDemo, errText, getWorkspaceId, type Site, setWorkspaceId, type User, type Workspace } from './api';
 import { setThemeUser } from './theme';
 
 // The signed-in person, their workspace and the site every screen acts in. Loaded once after
@@ -68,7 +68,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [demo, setDemo] = useState(false);
 
   const load = useCallback(async () => {
-    setStatus('loading');
+    // A refresh keeps the shell mounted: only the first load shows the loading screen.
+    setStatus((current) => (current === 'ready' ? current : 'loading'));
     let signedIn: User | null | 'offline';
     try {
       signedIn = await api.getSession();
@@ -88,15 +89,33 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setUser(signedIn);
     setThemeUser(signedIn.id);
 
+    // The workspaces the person belongs to. A signed-in person without one has been invited but has
+    // not accepted yet; the server says so with a 401 rather than an empty list.
+    let memberships: Awaited<ReturnType<typeof api.getMemberships>>;
+    try {
+      memberships = await api.getMemberships();
+    } catch (error) {
+      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) return setStatus('no-workspace');
+      return setStatus('offline');
+    }
+    // The workspace used last on this device, when the person still belongs to it; else their first.
+    const chosen = memberships.find((membership) => membership.id === getWorkspaceId()) ?? memberships[0];
+    if (!chosen) return setStatus('no-workspace');
+    setWorkspaceId(chosen.id);
+    setDemo(await apiIsDemo());
+
     let nextWorkspace: Workspace;
     let nextSites: Site[];
     try {
+      // whoami names the workspace the server actually resolved: a stored id the person has left
+      // falls back to their first membership, and storing that keeps the next visit on the same one.
+      setWorkspaceId((await api.getIdentity()).workspaceId);
       [nextWorkspace, nextSites] = await Promise.all([api.getWorkspace(), api.listSites()]);
-    } catch {
+    } catch (error) {
+      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) return setStatus('no-workspace');
       return setStatus('offline');
     }
 
-    setDemo(await apiIsDemo());
     setWorkspace(nextWorkspace);
     setWorkspaceTimeZone(nextWorkspace.timeZone);
     setSites(nextSites);
@@ -148,6 +167,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           return;
         }
         if (user) writeSiteId(user.id, null);
+        setWorkspaceId(null);
         setWorkspace(null);
         setSites([]);
         setSiteId(null);

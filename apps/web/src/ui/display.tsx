@@ -149,17 +149,24 @@ export function EmptyState({
   action,
   icon,
   compact,
+  titleLevel = 0,
 }: {
   title: string;
   children?: ReactNode;
   action?: ReactNode;
   icon?: ReactNode;
   compact?: boolean;
+  /**
+   * 1 when this empty state is the page itself (a first-run screen): its title is then the page's
+   * level-one heading, so the screen has one for assistive technology and the document outline.
+   */
+  titleLevel?: 0 | 1;
 }) {
+  const Title = titleLevel === 1 ? 'h1' : 'p';
   return (
     <div className={cx('flex flex-col items-center px-6 text-center', compact ? 'py-6' : 'py-12')}>
       {icon && <div className="mb-3 text-muted">{icon}</div>}
-      <p className="text-[16px] leading-6 font-semibold text-fg">{title}</p>
+      <Title className={cx('font-semibold text-fg', titleLevel === 1 ? 'text-[20px] leading-7' : 'text-[16px] leading-6')}>{title}</Title>
       {children && <div className="mt-1 max-w-[440px] text-[14px] leading-[22px] text-muted">{children}</div>}
       {action && <div className="mt-4 flex flex-wrap justify-center gap-2">{action}</div>}
     </div>

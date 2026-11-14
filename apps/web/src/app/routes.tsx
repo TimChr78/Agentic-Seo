@@ -2,6 +2,7 @@ import { ArrowLeft } from 'lucide-react';
 import { useEffect } from 'react';
 import HomePage from '../pages/HomePage';
 import { NotFound, PlannedPage } from '../pages/PlannedPage';
+import SitePage from '../pages/SitePage';
 import { EmptyState, LoadingBlock } from '../ui';
 import { pageWidth } from '../ui/layout';
 import { SettingsLayout } from '../ui/SettingsLayout';
@@ -21,6 +22,9 @@ import { useSession } from './session';
 
 const PLANNED_SETTINGS = new Set(SETTINGS_ITEMS.map((item) => item.path));
 
+/** The Settings sections Phase 0 builds; every other one renders its planned page. */
+const BUILT_SETTINGS = new Set(['/settings/site']);
+
 export function Routes() {
   const { path, search } = useLocation();
   const { can } = useSession();
@@ -36,11 +40,7 @@ export function Routes() {
   if (PLANNED_SETTINGS.has(path)) {
     const item = SETTINGS_ITEMS.find((candidate) => candidate.path === path);
     if (item && !canOpen(item, can)) return <NoAccess />;
-    return (
-      <SettingsLayout>
-        <PlannedPage path={path} />
-      </SettingsLayout>
-    );
+    return <SettingsLayout>{BUILT_SETTINGS.has(path) ? <SitePage /> : <PlannedPage path={path} />}</SettingsLayout>;
   }
   if (path === '/') return <HomePage />;
   if (PLANNED[path])

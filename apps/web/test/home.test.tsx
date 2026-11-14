@@ -176,7 +176,7 @@ describe('Home', () => {
     setApiClient({
       ...demo,
       getHome: async (siteId) => {
-        if (siteId === ORESUND.id) throw new ApiError('That site is not in this workspace.', 404);
+        if (siteId === ORESUND.id) throw new ApiError(404, 'not_found', 'That site is not in this workspace.');
         return demo.getHome(siteId);
       },
     });

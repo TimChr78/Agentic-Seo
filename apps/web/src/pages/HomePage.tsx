@@ -215,7 +215,7 @@ function SetupChecklist({ data, siteName }: { data: { checklist: ChecklistFacts 
       detail: 'Confirm ownership of the primary domain.',
       done: facts.siteVerified,
       to: '/settings/site',
-      action: 'Verify site',
+      action: 'Verify ownership',
     },
     {
       key: 'searchConsole',

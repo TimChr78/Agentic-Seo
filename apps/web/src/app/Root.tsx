@@ -48,7 +48,8 @@ function Gate() {
   if (status === 'no-workspace')
     return (
       <Centered>
-        <Alert tone="warn" title="You're not in a workspace yet">
+        <h1 className="text-[20px] leading-7 font-semibold">You're not in a workspace yet</h1>
+        <Alert tone="warn" className="mt-4">
           {user?.email} is signed in but is not a member of any workspace. Ask an admin to invite you, then open the link in the invitation.
         </Alert>
         <Button className="mt-4" onClick={() => void signOut()}>
@@ -84,6 +85,7 @@ export function NoSite() {
       <div className="mx-auto w-full max-w-[520px] px-4 pt-[12vh]">
         <EmptyState
           title="No sites yet"
+          titleLevel={1}
           icon={<span className="text-[28px] font-semibold">+</span>}
           action={
             <Button
@@ -107,6 +109,7 @@ export function NoSite() {
   );
 }
 
+/** A signed-in state with no shell yet; it is still the page, so it is the main landmark. */
 function Centered({ children }: { children: React.ReactNode }) {
-  return <div className="mx-auto max-w-[480px] px-4 pt-[18vh]">{children}</div>;
+  return <main className="mx-auto max-w-[480px] px-4 pt-[18vh]">{children}</main>;
 }
