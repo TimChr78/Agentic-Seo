@@ -1,5 +1,5 @@
 import { type AgentUndo, agentPolicy, autonomySettings, defineCommand, PolicyDeniedError } from '@agentic-seo/commands';
-import { AppError, canonicalJson, hashValue, safeErrorText } from '@agentic-seo/core';
+import { AppError, canonicalJson, hashValue, redactCredentials, safeErrorText } from '@agentic-seo/core';
 import { schema } from '@agentic-seo/db';
 import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
@@ -593,7 +593,9 @@ export const importConfig = defineCommand({
         } catch (err) {
           if (!(err instanceof AppError)) throw err;
           p.change.publish = 'failed';
-          p.change.problem = err.message;
+          // The import returns normally, so the executor never sanitises this message: redact it
+          // here before it reaches the response and the stored idempotency replay (#885).
+          p.change.problem = redactCredentials(err.message);
           // A refusal by the agent policy is final; other failures may need another artifact first.
           if (!(err instanceof PolicyDeniedError)) failed.push(p);
         }

@@ -76,7 +76,13 @@ describe('an archived artifact cannot be published (#900)', () => {
     );
     const api = t.api(owner, ws);
     const approverApi = t.api(approver, ws);
-    const created = await api.call('artifacts.create', { type: 'note', name: 'Pending note', content: note('Body') });
+    // The name carries a credential: the rejection reason quotes it, and is returned and stored
+    // without passing the executor's error sanitising (#885).
+    const created = await api.call('artifacts.create', {
+      type: 'note',
+      name: 'Pending note password=review_dummy_secret',
+      content: note('Body'),
+    });
     const request = await api.call('artifacts.requestPublish', { artifactId: created.artifactId, note: 'Review me' });
     expect(request.status).toBe('in_review');
 
@@ -87,6 +93,7 @@ describe('an archived artifact cannot be published (#900)', () => {
     expect(out.status).toBe('rejected');
     expect(out.published).toEqual([]);
     expect(out.reason).toContain(created.artifactId);
+    expect(out.reason).not.toContain('review_dummy_secret');
     expect(await artifactRow(ws, created.artifactId)).toMatchObject({ archived: true, published_version: null });
 
     const { rows } = await t.srv.db.admin.query<{ status: string; decision_note: string | null }>(
@@ -95,6 +102,7 @@ describe('an archived artifact cannot be published (#900)', () => {
     );
     expect(rows[0]?.status).toBe('rejected');
     expect(rows[0]?.decision_note).toMatch(/archived/);
+    expect(rows[0]?.decision_note).not.toContain('review_dummy_secret');
     const { rows: versions } = await t.srv.db.admin.query<{ state: string }>(
       'SELECT state FROM artifact_versions WHERE workspace_id = $1 AND artifact_id = $2 AND number = $3',
       [ws, created.artifactId, request.version],

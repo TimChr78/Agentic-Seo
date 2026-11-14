@@ -4,7 +4,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { APP_ROLE, createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
 import { agentPrincipal, ROLE_PERMISSIONS, userPrincipal } from '../src';
-import { createExecutor, defineCommand } from '../src/registry';
+import { createExecutor, defineCommand, lockAgentPolicy } from '../src/registry';
 
 // #906, #930 and #905: an idempotency key is bound to its caller, an empty key is refused, a
 // replayed agent write never reaches the policy engine again, and a replayed audited read keeps the
@@ -52,6 +52,22 @@ const agentWrite = defineCommand({
     return {};
   },
   handler: async () => ({ ok: true }),
+});
+
+const LOCK_AGENT = `agt_${'d'.repeat(32)}`;
+const personPause = defineCommand({
+  name: 'test.personPause',
+  title: 'Person pause',
+  description: 'A person-only write that takes the agent-policy lock in its handler, as agents.pause does.',
+  input: z.object({}),
+  output: z.object({ ok: z.boolean() }),
+  permission: null,
+  effect: 'write',
+  humansOnly: true,
+  handler: async (_input, ctx) => {
+    await lockAgentPolicy(ctx.tx, ctx.principal.workspaceId, LOCK_AGENT);
+    return { ok: true };
+  },
 });
 
 const auditedRead = defineCommand({
@@ -166,6 +182,55 @@ describe.skipIf(!hasTestDatabase())('an idempotency key is bound to its caller (
       // The replay returns before the handler, so its target comes from the stored response.
       expect(rows.map((row) => row.target)).toEqual(['not_abc', 'not_abc']);
     } finally {
+      await db.close();
+    }
+  });
+
+  it('takes the key lock before the agent-policy lock, so a person and an agent sharing a key cannot deadlock', async () => {
+    const { current, db } = await setup();
+    const holder = await current.db.admin.connect();
+    try {
+      const executor = createExecutor(db, services);
+      const agent = agentPrincipal(
+        { id: LOCK_AGENT, name: 'Lock agent', status: 'active', statusReason: null },
+        'user_1',
+        'token:z',
+        current.workspace,
+        'editor',
+        ROLE_PERMISSIONS.editor,
+      );
+      const person = userPrincipal('user_alice', current.workspace, 'owner');
+      const waiting = async (n: number) => {
+        for (let i = 0; i < 200; i++) {
+          const { rows } = await current.db.admin.query<{ n: number }>(
+            "SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'",
+          );
+          if ((rows[0]?.n ?? 0) >= n) return;
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        throw new Error(`fewer than ${n} sessions ever waited on a lock`);
+      };
+      // Stall the agent write at its status read, after the locks it takes first.
+      await holder.query('BEGIN');
+      await holder.query('LOCK TABLE agents IN ACCESS EXCLUSIVE MODE');
+      const agentRun = executor.execute(agentWrite, {}, agent, { surface: 'mcp', idempotencyKey: 'shared-lock-key' });
+      await waiting(1);
+      // The person's command needs the agent-policy lock in its handler, with the same key.
+      const personRun = executor.execute(personPause, {}, person, { surface: 'rest', idempotencyKey: 'shared-lock-key' }).then(
+        () => null,
+        (err: AppError) => err,
+      );
+      await waiting(2);
+      await holder.query('COMMIT');
+      // Agent-policy before the key lock would let the person hold the key while waiting for the
+      // agent's policy lock, and the agent wait for the key: a deadlock that aborts one of them.
+      // In the one order the agent finishes first and the person's reuse of its key is refused.
+      expect(await agentRun).toEqual({ ok: true });
+      const err = await personRun;
+      expect(err?.code).toBe('conflict');
+      expect(err?.message).toContain('already used for a different request');
+    } finally {
+      holder.release();
       await db.close();
     }
   });

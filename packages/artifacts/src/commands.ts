@@ -1,5 +1,5 @@
 import { type CommandContext, defineCommand, lockAgentPolicy } from '@agentic-seo/commands';
-import { AppError, hashValue, newId } from '@agentic-seo/core';
+import { AppError, hashValue, newId, redactCredentials } from '@agentic-seo/core';
 import { type AgentUndo, schema, type VersionState } from '@agentic-seo/db';
 import { and, asc, count, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -1559,7 +1559,9 @@ export const approve = defineCommand({
       if (problem) problems.push(problem);
     }
     if (problems.length) {
-      const reason = problems.join(' ');
+      // A normal return, so the executor's AppError sanitising never sees it: the reason names the
+      // artifacts and is stored as the decision note, so it is redacted here (#885).
+      const reason = redactCredentials(problems.join(' '));
       await closeRejected(ctx, members, reason);
       return { status: 'rejected' as const, artifactId: r.artifactId, version: r.version, published: [], reason };
     }

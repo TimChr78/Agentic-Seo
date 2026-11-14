@@ -445,6 +445,21 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                 // A rolled-back attempt may have named what it created; that no longer exists.
                 target = inputTarget;
                 extraTargets = [];
+                // The idempotency key's lock is the first lock any command takes. It serialises
+                // retries of one (workspace, key) before the lookup: two concurrent requests must
+                // not both miss and both run the handler; the second waits here, then sees the
+                // response the first committed. Keyed by workspace + key only (#906): every caller
+                // presenting one key serialises before any handler runs, or two callers could both
+                // run handlers and the loser's external effects would survive its rolled-back
+                // transaction. The caller is still bound by `idempotencyHash`: after the lock,
+                // another caller's row is a reused conflict. It comes before the agent-policy lock
+                // below because handlers (agents.pause, approvals.approve) take agent-policy locks
+                // themselves: taking this one later would let an agent write and a person's command
+                // sharing a key lock in opposite orders and deadlock.
+                if (opts.idempotencyKey)
+                  await tx.execute(
+                    sql`SELECT pg_advisory_xact_lock(hashtextextended(${`idempotency:${principal.workspaceId}:${opts.idempotencyKey}`}, 0))`,
+                  );
                 // The agent-policy lock comes first for every agent write (#907, #922): before a
                 // command's `impact`, which may lock artifacts. See lockAgentPolicy for the one
                 // global order; a path that takes these locks the other way round can deadlock.
@@ -472,16 +487,6 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                 // this agent's status (under the lock above) still ran, so a paused or revoked agent
                 // gets its usual refusal instead of a replay.
                 if (opts.idempotencyKey) {
-                  // Serialise retries of one (workspace, key) before the lookup. Two concurrent
-                  // requests must not both miss and both run the handler: the second waits here,
-                  // then sees the response the first committed. Keyed by workspace + key only
-                  // (#906): every caller presenting one key serialises before any handler runs, or
-                  // two callers could both run handlers and the loser's external effects would
-                  // survive its rolled-back transaction. The caller is still bound by
-                  // `idempotencyHash`: after the lock, another caller's row is a reused conflict.
-                  await tx.execute(
-                    sql`SELECT pg_advisory_xact_lock(hashtextextended(${`idempotency:${principal.workspaceId}:${opts.idempotencyKey}`}, 0))`,
-                  );
                   const [hit] = await tx
                     .select()
                     .from(schema.idempotencyKeys)
@@ -829,10 +834,12 @@ export function callerIdentity(principal: Principal) {
  * visible to the other and cannot interleave with it (#240, #907).
  *
  * THE ONE LOCK ORDER on these paths, everywhere:
+ *   0. the idempotency key's lock (the executor, before anything else),
  *   1. this agent-policy lock,
  *   2. approval_requests rows (`lockApproval`),
- *   3. artifact rows in id order (`lockArtifacts`, `coordinationFor`),
- *   4. the mandate validator's agent-mandate lock (taken inside `publishVersion`).
+ *   3. singleton and artifact-id advisory locks, each sorted (`config.import`, `artifacts.create`),
+ *   4. artifact rows in id order (`lockArtifacts`, `coordinationFor`),
+ *   5. agent-mandate locks, sorted (`lockMandateAgents`, also inside `publishVersion`).
  * Take it before a command's `impact`, before any status read that gates a write, and before
  * approval or artifact locks. The executor (agent writes), `approvals.approve` (an agent's request)
  * and `agents.pause`/`resume`/`revoke` follow this order; a path that needs two of these locks must
