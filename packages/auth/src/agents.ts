@@ -1,4 +1,4 @@
-import { type CommandContext, defineCommand, type Principal } from '@agentic-seo/commands';
+import { type CommandContext, defineCommand, lockAgentPolicy, type Principal } from '@agentic-seo/commands';
 import { AppError, newId } from '@agentic-seo/core';
 import { type AgentCredentialKind, type AgentStatus, type Db, schema, type Tx } from '@agentic-seo/db';
 import { and, desc, eq, gte, inArray, lt, sql } from 'drizzle-orm';
@@ -228,6 +228,10 @@ const setStatus = <N extends 'agents.pause' | 'agents.resume' | 'agents.revoke'>
     humansOnly: true,
     target: (i) => i.id,
     handler: async (input, ctx) => {
+      // The agent-policy lock first: a manual pause, resume or revoke must not commit between an
+      // agent write's status check and its change. The one order is documented at lockAgentPolicy;
+      // the lock is also what makes the read below current.
+      await lockAgentPolicy(ctx.tx, ctx.principal.workspaceId, input.id);
       const [a] = await ctx.tx.select().from(schema.agents).where(eq(schema.agents.id, input.id));
       if (!a) throw new AppError('not_found', `Agent ${input.id} not found.`);
       if (a.status === 'revoked') throw new AppError('conflict', 'This agent is revoked and cannot change status.');

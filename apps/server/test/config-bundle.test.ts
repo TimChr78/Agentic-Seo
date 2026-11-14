@@ -1,3 +1,4 @@
+import { publishValidators } from '@agentic-seo/artifacts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { rejects, startTestServer, testPort, type User } from './harness';
 
@@ -161,6 +162,47 @@ describe('config bundles', () => {
     const rows = await ledger(contextId);
     expect(rows).toHaveLength(2);
     expect(rows[1]).toMatchObject({ decision: 'deny', ok: false });
+  });
+
+  it('redacts the problem of a failed publish in the response and the stored replay (#885)', async () => {
+    // A publish refusal can quote content; the import returns normally, so the executor's error
+    // sanitising never sees the problem text.
+    publishValidators.set('note', async (content) =>
+      (content as { body?: string }).body?.includes('leak') ? ['the body quotes password=review_dummy_secret'] : [],
+    );
+    try {
+      const exported = await api.call('config.export', {});
+      const id = `not_${'7'.repeat(32)}`;
+      const res = await fetch(`${t.base}/v1/config.import`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: owner.cookie,
+          origin: t.base,
+          'x-workspace-id': ws,
+          'idempotency-key': 'import-redaction',
+        },
+        body: JSON.stringify({
+          bundle: { ...exported, artifacts: [{ id, type: 'note', name: 'Leaky note', content: { title: 'Leaky', body: 'leak' } }] },
+          dryRun: false,
+          publish: true,
+        }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { changes: { id: string; publish?: string; problem?: string }[] };
+      const change = body.changes.find((c) => c.id === id);
+      expect(change?.publish).toBe('failed');
+      expect(change?.problem).toContain('cannot be published yet');
+      expect(change?.problem).not.toContain('review_dummy_secret');
+      const { rows } = await t.srv.db.admin.query<{ response: unknown }>(
+        "SELECT response FROM idempotency_keys WHERE workspace_id = $1 AND key = 'import-redaction'",
+        [ws],
+      );
+      expect(rows).toHaveLength(1);
+      expect(JSON.stringify(rows[0]?.response)).not.toContain('review_dummy_secret');
+    } finally {
+      publishValidators.delete('note');
+    }
   });
 
   it('refuses an unknown artifact type in a bundle', async () => {

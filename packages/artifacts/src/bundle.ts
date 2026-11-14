@@ -1,9 +1,18 @@
 import { type AgentUndo, agentPolicy, autonomySettings, defineCommand, PolicyDeniedError } from '@agentic-seo/commands';
-import { AppError, canonicalJson, hashValue } from '@agentic-seo/core';
+import { AppError, canonicalJson, hashValue, redactCredentials, safeErrorText } from '@agentic-seo/core';
 import { schema } from '@agentic-seo/db';
 import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
-import { author, lockArtifactIds, lockArtifacts, lockSingleton, requestPublish, updateDraft, validateContent } from './commands';
+import {
+  author,
+  isSingleton,
+  lockArtifactIds,
+  lockArtifacts,
+  lockSingleton,
+  requestPublish,
+  updateDraft,
+  validateContent,
+} from './commands';
 import { diffJson } from './diff';
 import { lockMandateAgents, mandateAgentsOf } from './mandates';
 import { type ArtifactType, artifactTypeEnum, artifactTypes } from './types';
@@ -243,9 +252,11 @@ export const driftConfig = defineCommand({
         ),
       );
     const byId = new Map(existing.map((entry) => [entry.a.id, entry]));
+    // Archived rows never resolve as the workspace's current singleton: the import archives
+    // duplicates and leaves them behind as history (#899). An explicit id still matches through byId.
     const singletons = new Map(
       existing
-        .filter((entry) => 'singleton' in artifactTypes[entry.a.type as ArtifactType])
+        .filter((entry) => isSingleton(entry.a.type) && !entry.a.archived)
         .map((entry) => [singletonKey(entry.a.type, entry.a.siteId), entry]),
     );
     const drift: z.infer<typeof Drift>[] = [];
@@ -404,9 +415,26 @@ export const importConfig = defineCommand({
         ),
       );
     const byId = new Map(existing.map((e) => [e.a.id, e]));
+    // Archived rows stay in byId, for an explicit id the bundle names, but they never resolve as the
+    // workspace's singleton: the import archives duplicates and leaves them behind (#899).
     const singletons = new Map(
-      existing.filter((e) => 'singleton' in artifactTypes[e.a.type as ArtifactType]).map((e) => [singletonKey(e.a.type, e.a.siteId), e]),
+      existing.filter((e) => isSingleton(e.a.type) && !e.a.archived).map((e) => [singletonKey(e.a.type, e.a.siteId), e]),
     );
+    // An explicit id that names an archived singleton is handled deterministically: restore it only
+    // when the workspace has no active singleton; otherwise keep the one active row and refuse,
+    // naming both ids, rather than creating a second active singleton.
+    const resolve = (item: { id: string; type: string; siteId?: string | null }) => {
+      const match = byId.get(item.id);
+      if (match && match.a.type !== item.type) throw new AppError('conflict', `${item.id} is a ${match.a.type} here, not a ${item.type}.`);
+      if (!isSingleton(item.type)) return match;
+      const active = singletons.get(singletonKey(item.type, item.siteId));
+      if (match?.a.archived && active && active.a.id !== match.a.id)
+        throw new AppError(
+          'conflict',
+          `${match.a.id} is an archived ${item.type}, but this workspace already has the active ${item.type} ${active.a.id}. A workspace can have only one active ${item.type}; use ${active.a.id}, or archive it before restoring ${match.a.id}.`,
+        );
+      return match ?? active;
+    };
     const changes: z.infer<typeof Change>[] = [];
     const toPublish: { id: string; type: ArtifactType; change: z.infer<typeof Change> }[] = [];
     for (const item of input.bundle.artifacts) {
@@ -421,12 +449,12 @@ export const importConfig = defineCommand({
         throw new AppError('forbidden', `${item.id} is a ${item.type}: only people can import it.`);
       const content = await validateContent(item.type, item.content, 'draft');
       // A workspace has one of each singleton type per site, whatever its id.
-      const isSingleton = 'singleton' in artifactTypes[item.type];
-      const current = byId.get(item.id) ?? (isSingleton ? singletons.get(singletonKey(item.type, item.siteId)) : undefined);
-      if (current && current.a.type !== item.type)
-        throw new AppError('conflict', `${item.id} is a ${current.a.type} here, not a ${item.type}.`);
+      const current = resolve(item);
       const id = current?.a.id ?? item.id;
-      const action = !current ? 'create' : current.hash !== hashValue(content) || current.a.name !== item.name ? 'update' : 'unchanged';
+      const differs = !!current && (current.hash !== hashValue(content) || current.a.name !== item.name);
+      // Restoring an archived singleton is a write even when its content is already identical.
+      const restore = !!current && isSingleton(item.type) && current.a.archived;
+      const action = !current ? 'create' : differs || restore ? 'update' : 'unchanged';
       const change: z.infer<typeof Change> = { id, type: item.type, name: item.name, action };
       changes.push(change);
       if (input.dryRun || action === 'unchanged') continue;
@@ -449,7 +477,45 @@ export const importConfig = defineCommand({
           note: input.note,
           ...author(ctx),
         });
-      } else await updateDraft.handler({ artifactId: id, content, name: item.name, note: input.note }, ctx);
+      } else {
+        if (restore) {
+          // Restore it unpublished: the version that was live before it was archived must not go
+          // live again on its own. Only this import's publish step, which follows the approval
+          // policy, can put a version live. The old version is superseded rather than turned back
+          // into a draft, so the next edit starts a new version instead of rewriting it.
+          const [row] = await ctx.tx
+            .select({ publishedVersion: schema.artifacts.publishedVersion })
+            .from(schema.artifacts)
+            .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, id)));
+          if (row?.publishedVersion != null)
+            await ctx.tx
+              .update(schema.artifactVersions)
+              .set({ state: 'superseded', updatedAt: new Date() })
+              .where(
+                and(
+                  eq(schema.artifactVersions.workspaceId, ws),
+                  eq(schema.artifactVersions.artifactId, id),
+                  eq(schema.artifactVersions.number, row.publishedVersion),
+                ),
+              );
+          await ctx.tx
+            .update(schema.artifacts)
+            .set({ archived: false, publishedVersion: null, updatedAt: new Date() })
+            .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, id)));
+        }
+        // A restored row with identical content still needs a draft when publishing: its latest
+        // version may be the published one, and requestPublish only accepts a draft.
+        if (differs || (restore && input.publish))
+          await updateDraft.handler({ artifactId: id, content, name: item.name, note: input.note }, ctx);
+      }
+      // Keep the map current as rows are inserted or updated, so a later entry resolving the same
+      // singleton edits the row this import just wrote instead of creating a second one.
+      const entry = byId.get(id);
+      if (entry) {
+        entry.hash = hashValue(content);
+        entry.a = { ...entry.a, name: item.name, archived: false };
+        if (isSingleton(item.type)) singletons.set(singletonKey(item.type, item.siteId), entry);
+      }
       if (input.publish) toPublish.push({ id, type: item.type, change });
     }
     // Settings go in after the drafts and before publishing, so a clone publishes under the copied
@@ -497,7 +563,7 @@ export const importConfig = defineCommand({
           mandateVersion: recorded.mandate?.version ?? null,
         });
       if (policy.decision === 'deny') {
-        await record(policy, false, policy.reasons.join(' ').slice(0, 1000), null);
+        await record(policy, false, safeErrorText(policy.reasons.join(' '), 1000), null);
         throw new PolicyDeniedError(policy);
       }
       // Each publish sets its own reversal; a held step leaves the collector empty.
@@ -507,7 +573,8 @@ export const importConfig = defineCommand({
         out = await requestPublish.handler(request, { ...ctx, policy });
       } catch (err) {
         // The import carries on with the other artifacts, so this refusal is not recorded by the executor.
-        if (err instanceof AppError) await record(policy, false, err.message.slice(0, 1000), null);
+        // Redacted before it is cut (#885): the import's ledger rows are exposed to readers too.
+        if (err instanceof AppError) await record(policy, false, safeErrorText(err.message, 1000), null);
         throw err;
       }
       // The same facts the executor adds after requestPublish, e.g. the approval it created.
@@ -526,7 +593,9 @@ export const importConfig = defineCommand({
         } catch (err) {
           if (!(err instanceof AppError)) throw err;
           p.change.publish = 'failed';
-          p.change.problem = err.message;
+          // The import returns normally, so the executor never sanitises this message: redact it
+          // here before it reaches the response and the stored idempotency replay (#885).
+          p.change.problem = redactCredentials(err.message);
           // A refusal by the agent policy is final; other failures may need another artifact first.
           if (!(err instanceof PolicyDeniedError)) failed.push(p);
         }

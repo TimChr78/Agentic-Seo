@@ -59,7 +59,8 @@ export function outsideWorkingHours(
 
 /**
  * The active mandates of several agents in one grouped read, newest artifact first per agent.
- * Same terms as `activeMandate`: published, not archived, for the agent, not expired.
+ * Same terms as `activeMandate`: published, not archived, for the agent, not expired. Ties on
+ * `updated_at` are broken by the artifact id, so the answer is deterministic (#911).
  */
 export async function activeMandates(tx: Tx, agentIds: string[], now = new Date()): Promise<Map<string, ActiveMandate>> {
   const out = new Map<string, ActiveMandate>();
@@ -90,7 +91,7 @@ export async function activeMandates(tx: Tx, agentIds: string[], now = new Date(
         )})`,
       ),
     )
-    .orderBy(desc(schema.artifacts.updatedAt));
+    .orderBy(desc(schema.artifacts.updatedAt), desc(schema.artifacts.id));
   const [w] = await tx.select({ timeZone: schema.workspaces.timeZone }).from(schema.workspaces);
   for (const r of rows) {
     const parsed = artifactTypes.agent_mandate.content.safeParse(r.content);

@@ -31,9 +31,10 @@ CREATE INDEX artifacts_owner_agent ON artifacts (workspace_id, owner_agent_id) W
 CREATE INDEX artifacts_site ON artifacts (workspace_id, site_id) WHERE site_id IS NOT NULL;
 -- A site has one site context, and a workspace one that belongs to no site. The commands check this
 -- first; the index is what holds when two requests race. NULLS NOT DISTINCT makes the site-less
--- one unique too.
-CREATE UNIQUE INDEX artifacts_singleton ON artifacts (workspace_id, type, site_id) NULLS NOT DISTINCT
-  WHERE type = 'site_context';
+-- one unique too. Archived rows are excluded, so a workspace can archive its live singleton and
+-- create a new one (#899). NULLS NOT DISTINCT plus a partial predicate needs Postgres 15+.
+CREATE UNIQUE INDEX artifacts_singleton_type ON artifacts (workspace_id, type, site_id) NULLS NOT DISTINCT
+  WHERE archived = false AND type = 'site_context';
 
 CREATE TABLE artifact_versions (
   workspace_id uuid NOT NULL,
@@ -52,6 +53,13 @@ CREATE TABLE artifact_versions (
   PRIMARY KEY (workspace_id, artifact_id, number),
   FOREIGN KEY (workspace_id, artifact_id) REFERENCES artifacts (workspace_id, id) ON DELETE CASCADE
 );
+
+-- Exactly one published version per artifact (#912). `publishVersion` supersedes the old version
+-- before it publishes the new one, so this never fires on the normal path; a writer that skips the
+-- publish lock gets a 23505 the executor answers as a conflict. Phase 0 has not shipped, so no
+-- legacy data needs repairing before the index is created.
+CREATE UNIQUE INDEX artifact_versions_one_published ON artifact_versions (workspace_id, artifact_id)
+  WHERE state = 'published';
 
 CREATE TABLE approval_requests (
   workspace_id uuid NOT NULL,
