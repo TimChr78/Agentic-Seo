@@ -57,26 +57,38 @@ CREATE TABLE ai_calls (
   principal_id text,
   created_at timestamptz NOT NULL DEFAULT now(),
   finished_at timestamptz,
+  -- When the call settled: the provider billed it, or the attempt was given up. Its usage is
+  -- charged to this month (billed_at), not to the month the row was queued in, so a case queued
+  -- before UTC month-end does not escape the new month's budget. Null until the call is settled;
+  -- usage falls back to created_at while it is.
+  billed_at timestamptz,
   PRIMARY KEY (workspace_id, id),
   UNIQUE (workspace_id, idempotency_key)
 );
 CREATE INDEX ai_calls_queue ON ai_calls (created_at) WHERE status IN ('pending', 'running');
 CREATE INDEX ai_calls_recent ON ai_calls (workspace_id, created_at DESC);
-CREATE INDEX ai_calls_usage ON ai_calls (workspace_id, provider_id, created_at);
+CREATE INDEX ai_calls_usage ON ai_calls (workspace_id, provider_id, billed_at);
 CREATE INDEX ai_calls_prompt ON ai_calls (workspace_id, prompt_id, created_at DESC) WHERE prompt_id IS NOT NULL;
 
 -- A call's estimated tokens, held against the provider's monthly budget before the model is asked.
 -- A reservation ends with its call, or expires if the call died; usage plus live holds is what the
--- month has spent, so parallel calls cannot together overshoot the budget.
+-- month has spent, so parallel calls cannot together overshoot the budget. A hold lasts through the
+-- next billing month by default: a process that dies after the provider billed keeps its coverage
+-- instead of releasing tokens the provider has already charged for.
 CREATE TABLE ai_token_reservations (
   workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
   id text NOT NULL,
   provider_id text NOT NULL,
+  -- The call attempt this hold covers; a stale attempt's hold stays counted when the attempt is
+  -- recovered, and the row's own counters say how often it has run.
+  call_id text,
   tokens integer NOT NULL CHECK (tokens > 0),
   expires_at timestamptz NOT NULL,
-  PRIMARY KEY (workspace_id, id)
+  PRIMARY KEY (workspace_id, id),
+  FOREIGN KEY (workspace_id, call_id) REFERENCES ai_calls (workspace_id, id) ON DELETE CASCADE
 );
 CREATE INDEX ai_token_reservations_provider ON ai_token_reservations (workspace_id, provider_id, expires_at);
+CREATE INDEX ai_token_reservations_call ON ai_token_reservations (workspace_id, call_id);
 
 ALTER TABLE ai_providers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ai_providers FORCE ROW LEVEL SECURITY;

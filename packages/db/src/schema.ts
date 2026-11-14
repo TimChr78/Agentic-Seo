@@ -616,6 +616,8 @@ export const aiTokenReservations = pgTable(
     workspaceId: uuid('workspace_id').notNull(),
     id: text('id').notNull(),
     providerId: text('provider_id').notNull(),
+    /** The ai_calls attempt this hold covers; a recovered stale attempt keeps its hold counted. */
+    callId: text('call_id'),
     tokens: integer('tokens').notNull(),
     expiresAt: ts('expires_at').notNull(),
   },
@@ -648,11 +650,16 @@ export const aiCalls = pgTable(
     principalId: text('principal_id'),
     createdAt: ts('created_at').notNull().defaultNow(),
     finishedAt: ts('finished_at'),
+    /**
+     * When the call settled (billed, or given up). Usage is charged to this month, not to the month
+     * of `createdAt`; falls back to `createdAt` until the call is settled.
+     */
+    billedAt: ts('billed_at'),
   },
   (t) => [
     primaryKey({ columns: [t.workspaceId, t.id] }),
     uniqueIndex('ai_calls_workspace_idempotency').on(t.workspaceId, t.idempotencyKey),
     index('ai_calls_recent').on(t.workspaceId, t.createdAt),
-    index('ai_calls_usage').on(t.workspaceId, t.providerId, t.createdAt),
+    index('ai_calls_usage').on(t.workspaceId, t.providerId, t.billedAt),
   ],
 );

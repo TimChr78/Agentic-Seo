@@ -119,7 +119,10 @@ export const aiUsage = defineCommand({
   effect: 'read',
   handler: async (input, ctx) => {
     const c = schema.aiCalls;
-    const day = sql<string>`to_char(date_trunc('day', ${c.createdAt} AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`;
+    // Usage belongs to the month (and the day) the provider billed it, not to the day the call was
+    // queued: a test case queued before UTC midnight is charged where its tokens were spent.
+    const billed = sql`coalesce(${c.billedAt}, ${c.createdAt})`;
+    const day = sql<string>`to_char(date_trunc('day', ${billed} AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`;
     const rows = await ctx.tx
       .select({
         day,
@@ -131,7 +134,7 @@ export const aiUsage = defineCommand({
         outputTokens: sql<number>`coalesce(sum(${c.outputTokens}), 0)::int`,
       })
       .from(c)
-      .where(gte(c.createdAt, new Date(Date.now() - input.days * 86_400_000)))
+      .where(gte(billed, new Date(Date.now() - input.days * 86_400_000)))
       .groupBy(day, c.kind, c.model)
       .orderBy(day, c.kind);
     return { days: rows.map((r) => ({ ...r, cost: estimatedCost(r.model, r.inputTokens, r.outputTokens) })) };

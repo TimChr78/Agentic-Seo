@@ -27,8 +27,8 @@ export interface FakeRequest {
 }
 
 export type FakeReply =
-  | { text: string; inputTokens?: number; outputTokens?: number }
-  | { toolCalls: { name: string; input: unknown }[]; inputTokens?: number; outputTokens?: number }
+  | { text: string; inputTokens?: number; outputTokens?: number; omitUsage?: boolean }
+  | { toolCalls: { name: string; input: unknown }[]; inputTokens?: number; outputTokens?: number; omitUsage?: boolean }
   | { status: number; error: string };
 
 const textOf = (c: unknown): string =>
@@ -102,6 +102,8 @@ function encode(api: FakeRequest['api'], model: string, reply: FakeReply) {
           : { type: 'error', error: { type: 'api_error', message: reply.error } },
     };
   const usage = { input: reply.inputTokens ?? 100, output: reply.outputTokens ?? 20 };
+  // A provider that reports no tokens at all (some local servers, some error paths).
+  const withUsage = !reply.omitUsage;
   if (api === 'openai')
     return {
       status: 200,
@@ -128,7 +130,9 @@ function encode(api: FakeRequest['api'], model: string, reply: FakeReply) {
             finish_reason: 'text' in reply ? 'stop' : 'tool_calls',
           },
         ],
-        usage: { prompt_tokens: usage.input, completion_tokens: usage.output, total_tokens: usage.input + usage.output },
+        usage: withUsage
+          ? { prompt_tokens: usage.input, completion_tokens: usage.output, total_tokens: usage.input + usage.output }
+          : undefined,
       },
     };
   return {
@@ -143,7 +147,7 @@ function encode(api: FakeRequest['api'], model: string, reply: FakeReply) {
           ? [{ type: 'text', text: reply.text }]
           : reply.toolCalls.map((t, i) => ({ type: 'tool_use', id: `${id}_${i}`, name: t.name, input: t.input })),
       stop_reason: 'text' in reply ? 'end_turn' : 'tool_use',
-      usage: { input_tokens: usage.input, output_tokens: usage.output },
+      usage: withUsage ? { input_tokens: usage.input, output_tokens: usage.output } : undefined,
     },
   };
 }

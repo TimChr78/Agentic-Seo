@@ -21,8 +21,11 @@ export async function recordAiCall(
   opts: { idempotent?: boolean } = {},
 ): Promise<string> {
   const { id = newId('aic'), ...rest } = values;
+  // A logged call has already run: its usage belongs to the month it is recorded in unless the
+  // caller says when the provider billed it.
+  const row = { workspaceId, id, ...rest, billedAt: rest.billedAt ?? new Date() };
   await db.withWorkspace(workspaceId, (tx) => {
-    const insert = tx.insert(schema.aiCalls).values({ workspaceId, id, ...rest });
+    const insert = tx.insert(schema.aiCalls).values(row);
     return opts.idempotent ? insert.onConflictDoNothing({ target: [schema.aiCalls.workspaceId, schema.aiCalls.id] }) : insert;
   });
   return id;

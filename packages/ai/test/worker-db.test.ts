@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { artifactTypes } from '@agentic-seo/artifacts';
 import type { CommandContext } from '@agentic-seo/commands';
 import { userPrincipal } from '@agentic-seo/commands';
 import { type KeyProvider, localKeyProvider, sealJson } from '@agentic-seo/secrets';
@@ -6,7 +7,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { createDisposableDb, type DisposableDb, hasTestDatabase } from '../../db/test/disposable';
 import { listAiCalls } from '../src/commands';
 import { testPrompt, testRunResults } from '../src/prompts';
-import { createAiProvider, listAiProviders } from '../src/providers';
+import { createAiProvider, estimateTokens, listAiProviders } from '../src/providers';
 import { fakeLlm } from '../src/testing';
 import { runQueuedPromptTests } from '../src/worker';
 
@@ -134,6 +135,90 @@ describe.skipIf(!hasTestDatabase())('queued prompt tests', () => {
       await llm.close();
     }
   });
+
+  // The model answered (and was billed) with something its schema refused. The usage is on the AI
+  // SDK's error; a call that reports none settles the reservation's estimate instead of zero.
+  it('records the usage of an answer that does not parse, and releases the hold', async () => {
+    const d = await createDisposableDb('ai_bad_json');
+    open.push(d);
+    const kp = newKeyProvider();
+    const llm = await fakeLlm(() => ({ text: 'Sorry, here is a title', inputTokens: 50, outputTokens: 7 }));
+    try {
+      await seedProvider(d, kp, { baseUrl: llm.baseUrl, monthlyTokenBudget: null });
+      const artifactId = `prm_${randomBytes(16).toString('hex')}`;
+      await seedPrompt(d, artifactId);
+
+      const queued = await d.db.withWorkspace(d.workspace, (tx) => testPrompt.handler({ artifactId }, context(d, kp, tx)));
+      expect(await runQueuedPromptTests(d.db, { kp, fetch: loopbackFetch })).toBe(1);
+
+      const run = await d.db.withWorkspace(d.workspace, (tx) => testRunResults.handler({ runId: queued.runId }, context(d, kp, tx)));
+      expect(run).toMatchObject({ status: 'done', passed: 0, failed: 1, inputTokens: 50, outputTokens: 7 });
+      expect(run.cases[0]?.problems.join(' ')).toContain('model call failed');
+      expect(await holdCount(d)).toBe(0);
+    } finally {
+      await llm.close();
+    }
+  });
+
+  it('settles the reservation estimate when the provider reports no usage at all', async () => {
+    const d = await createDisposableDb('ai_no_usage');
+    open.push(d);
+    const kp = newKeyProvider();
+    const llm = await fakeLlm(() => ({ text: 'Sorry, here is a title', omitUsage: true }));
+    try {
+      await seedProvider(d, kp, { baseUrl: llm.baseUrl, monthlyTokenBudget: null });
+      const artifactId = `prm_${randomBytes(16).toString('hex')}`;
+      await seedPrompt(d, artifactId);
+      const def = artifactTypes.prompt.content.parse(promptContent);
+      const estimate = estimateTokens({ def, test: def.tests[0] }, def.maxOutputTokens);
+
+      const queued = await d.db.withWorkspace(d.workspace, (tx) => testPrompt.handler({ artifactId }, context(d, kp, tx)));
+      expect(await runQueuedPromptTests(d.db, { kp, fetch: loopbackFetch })).toBe(1);
+
+      const run = await d.db.withWorkspace(d.workspace, (tx) => testRunResults.handler({ runId: queued.runId }, context(d, kp, tx)));
+      expect(run).toMatchObject({ status: 'done', passed: 0, failed: 1 });
+      // Never zero: the hold the provider was charged against stands in for the missing count.
+      expect(estimate).toBeGreaterThan(0);
+      expect(run.inputTokens + run.outputTokens).toBe(estimate);
+      expect(await holdCount(d)).toBe(0);
+    } finally {
+      await llm.close();
+    }
+  });
+
+  it('holds the reservation for its attempt, durably, while the model is being asked', async () => {
+    const d = await createDisposableDb('ai_hold_live');
+    open.push(d);
+    const kp = newKeyProvider();
+    const holds: { call_id: string | null; tokens: number; expires_at: Date }[] = [];
+    // The scripted server runs while the call is in flight: what the budget sees then is the hold.
+    const llm = await fakeLlm(async () => {
+      const { rows } = await d.db.admin.query<{ call_id: string | null; tokens: number; expires_at: Date }>(
+        'SELECT call_id, tokens, expires_at FROM ai_token_reservations WHERE workspace_id = $1',
+        [d.workspace],
+      );
+      holds.push(...rows);
+      return { text: JSON.stringify({ slots: { title: 'Pricing that converts' } }), inputTokens: 50, outputTokens: 7 };
+    });
+    try {
+      await seedProvider(d, kp, { baseUrl: llm.baseUrl, monthlyTokenBudget: null });
+      const artifactId = `prm_${randomBytes(16).toString('hex')}`;
+      await seedPrompt(d, artifactId);
+      await d.db.withWorkspace(d.workspace, (tx) => testPrompt.handler({ artifactId }, context(d, kp, tx)));
+      const [call] = (await d.db.admin.query<{ id: string }>('SELECT id FROM ai_calls WHERE workspace_id = $1', [d.workspace])).rows;
+
+      expect(await runQueuedPromptTests(d.db, { kp, fetch: loopbackFetch })).toBe(1);
+
+      expect(holds).toHaveLength(1);
+      expect(holds[0]?.call_id).toBe(call?.id);
+      expect(holds[0]?.tokens).toBeGreaterThan(0);
+      // Past the old five-minute deadline, so a worker that dies here keeps its coverage.
+      expect(holds[0]?.expires_at.getTime()).toBeGreaterThan(Date.now() + 5 * 60_000);
+      expect(await holdCount(d)).toBe(0);
+    } finally {
+      await llm.close();
+    }
+  });
 });
 
 describe.skipIf(!hasTestDatabase())('AI provider commands', () => {
@@ -199,5 +284,32 @@ describe.skipIf(!hasTestDatabase())('AI provider commands', () => {
     const byId = new Map(listed.providers.map((p) => [p.id, p]));
     expect(byId.get(first.id)?.useFor).toEqual([]);
     expect(byId.get(second.id)?.useFor).toEqual(['agents']);
+  });
+});
+
+describe.skipIf(!hasTestDatabase())('the egress guard on the model path', () => {
+  it('sends every request the AI SDK makes through it, so a stored internal base URL is never called', async () => {
+    const d = await createDisposableDb('ai_egress');
+    open.push(d);
+    const kp = newKeyProvider();
+    const llm = await fakeLlm(() => ({ text: JSON.stringify({ slots: { title: 'Never asked' } }) }));
+    try {
+      // The command refuses this base URL. Seeded directly, it stands for one that was saved before
+      // its name started resolving inside the network: the guard at use is the second line.
+      await seedProvider(d, kp, { baseUrl: llm.baseUrl, monthlyTokenBudget: null });
+      const artifactId = `prm_${randomBytes(16).toString('hex')}`;
+      await seedPrompt(d, artifactId);
+
+      const queued = await d.db.withWorkspace(d.workspace, (tx) => testPrompt.handler({ artifactId }, context(d, kp, tx)));
+      // No fetch override: the adapter gets the production guard.
+      expect(await runQueuedPromptTests(d.db, { kp })).toBe(1);
+
+      const run = await d.db.withWorkspace(d.workspace, (tx) => testRunResults.handler({ runId: queued.runId }, context(d, kp, tx)));
+      expect(run.cases[0]?.problems.join(' ')).toContain('only https URLs are allowed');
+      expect(llm.requests).toHaveLength(0);
+      expect(await holdCount(d)).toBe(0);
+    } finally {
+      await llm.close();
+    }
   });
 });

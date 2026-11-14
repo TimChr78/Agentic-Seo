@@ -2,7 +2,7 @@ import { artifactTypes, type Prompt } from '@agentic-seo/artifacts';
 import { defineCommand } from '@agentic-seo/commands';
 import { AppError, newId, safeErrorText } from '@agentic-seo/core';
 import { schema, type Tx } from '@agentic-seo/db';
-import { generateText, Output } from 'ai';
+import { generateText, NoObjectGeneratedError, Output } from 'ai';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { AiUnavailable, modelFor, type ReadyModel } from './providers';
@@ -77,6 +77,20 @@ const usageOf = (u: { inputTokens?: number; outputTokens?: number }): Usage => (
   inputTokens: u.inputTokens ?? 0,
   outputTokens: u.outputTokens ?? 0,
 });
+
+/**
+ * The tokens a failed call was billed, when the model answered but its answer could not be used:
+ * `NoObjectGeneratedError` carries the usage of the response that failed to parse. A provider that
+ * reports no counts at all (or a call that failed before the model answered) has no usage to
+ * recover, and the caller settles its reservation's estimate instead.
+ */
+export function usageFromError(err: unknown): Usage | null {
+  if (!NoObjectGeneratedError.isInstance(err)) return null;
+  const usage = err.usage;
+  if (!usage) return null;
+  if (usage.inputTokens === undefined && usage.outputTokens === undefined) return null;
+  return { inputTokens: usage.inputTokens ?? 0, outputTokens: usage.outputTokens ?? 0 };
+}
 
 /** The model tier a prompt asks for, in the gateway's terms: 'deep' is the provider's default model. */
 export const tierOf = (def: Prompt): 'default' | 'fast' => (def.modelTier === 'fast' ? 'fast' : 'default');
@@ -208,13 +222,15 @@ export async function runTestCase(m: ReadyModel, def: Prompt, t: TestCase) {
   const problems: string[] = [];
   let answer: unknown = null;
   let usage: Usage = { inputTokens: 0, outputTokens: 0 };
+  let usageReported = false;
   try {
     const r = await runPrompt(m, def, t.input);
     usage = r.usage;
+    usageReported = true;
     if (r.kind === 'choice') {
       answer = { option: r.option, rationale: r.rationale };
       if (t.expect.option && r.option !== t.expect.option) problems.push(`chose "${r.option}", expected "${t.expect.option}"`);
-      return { input: t.input, answer, problems, usage };
+      return { input: t.input, answer, problems, usage, usageReported };
     }
     answer = { slots: r.slots, rejected: r.rejected };
     for (const [slot, why] of Object.entries(r.rejected)) problems.push(`slot ${slot} ${why}`);
@@ -222,9 +238,14 @@ export async function runTestCase(m: ReadyModel, def: Prompt, t: TestCase) {
     for (const c of t.expect.contains) if (!all.includes(c.toLowerCase())) problems.push(`does not contain "${c}"`);
     for (const c of t.expect.notContains) if (all.includes(c.toLowerCase())) problems.push(`contains "${c}"`);
   } catch (err) {
+    // The model may have answered, and been billed, with something the schema refused: its usage is
+    // on the error. Without a report the caller settles the reservation's estimate, never zero.
+    const billed = usageFromError(err);
+    usage = billed ?? usage;
+    usageReported = billed !== null;
     problems.push(`model call failed: ${safeErrorText((err as Error).message, 500)}`);
   }
-  return { input: t.input, answer, problems, usage };
+  return { input: t.input, answer, problems, usage, usageReported };
 }
 
 // Test runs are jobs: model calls take seconds each and must not hold a database transaction open.

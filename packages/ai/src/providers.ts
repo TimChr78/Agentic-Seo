@@ -7,7 +7,7 @@ import { logger } from '@agentic-seo/telemetry';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import type { LanguageModel } from 'ai';
-import { and, eq, gte, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 // LLM providers with the workspace's own keys. Two wire formats cover most of the market:
@@ -49,43 +49,77 @@ const Provider = z.object({
   usedThisMonth: z.number().describe('Input and output tokens since the start of the month (UTC)'),
 });
 
-export async function usedThisMonth(tx: Tx, providerId: string): Promise<number> {
-  const [r] = await tx
-    .select({ n: sql<string>`coalesce(sum(${schema.aiCalls.inputTokens} + ${schema.aiCalls.outputTokens}), 0)` })
-    .from(schema.aiCalls)
-    .where(
-      and(
-        eq(schema.aiCalls.providerId, providerId),
-        gte(schema.aiCalls.createdAt, sql`date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`),
-      ),
-    );
-  const [held] = await tx
-    .select({ n: sql<string>`coalesce(sum(${schema.aiTokenReservations.tokens}), 0)` })
-    .from(schema.aiTokenReservations)
-    .where(and(eq(schema.aiTokenReservations.providerId, providerId), gte(schema.aiTokenReservations.expiresAt, sql`now()`)));
-  return Number(r.n) + Number(held.n);
+export async function usedThisMonth(tx: Tx, providerId: string, at?: Date): Promise<number> {
+  // Usage and live holds are one statement on purpose: under READ COMMITTED each statement takes a
+  // fresh snapshot, and a settlement commits as an atomic swap (its usage row inserted, its hold
+  // deleted). Read as two statements, a settlement landing between them would be in neither sum and
+  // the month would look free. One statement sees the hold or the usage, never a gap. Usage is
+  // charged to the month it was billed in, which is what a call queued before month end crosses.
+  const now = at ? sql`${at}::timestamptz` : sql`now()`;
+  const monthStart = sql`date_trunc('month', ${now} AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`;
+  const { rows } = await tx.execute<{ used: string }>(sql`
+    SELECT
+      (SELECT coalesce(sum(c.input_tokens + c.output_tokens), 0)
+         FROM ai_calls c
+        WHERE c.provider_id = ${providerId}
+          AND coalesce(c.billed_at, c.created_at) >= ${monthStart})
+      + (SELECT coalesce(sum(r.tokens), 0)
+           FROM ai_token_reservations r
+          WHERE r.provider_id = ${providerId}
+            AND r.expires_at >= ${now}) AS used`);
+  return Number(rows[0]?.used ?? 0);
 }
 
 /** A rough token count for a request: ~4 characters per token, plus the most the answer may use. */
 export const estimateTokens = (input: unknown, maxOutput: number) => Math.ceil(JSON.stringify(input ?? '').length / 4) + maxOutput;
 
+/** The first instant of the next UTC month: a usage write that failed keeps its hold through the month. */
+export const nextMonthStart = (now = new Date()) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+
+/** Reserve durably before I/O, including the following month for calls crossing UTC month-end.
+ * Successful settlement deletes the hold immediately. A crash/outage keeps conservative budget
+ * coverage until this deadline instead of freeing billed usage after five minutes. */
+export const billingReservationTtlMs = (now = new Date()) => nextMonthStart(nextMonthStart(now)).getTime() - now.getTime();
+
+export interface ReserveOptions {
+  /** How long a hold stays counted when nothing settles it. Default: through the next billing month. */
+  ttlMs?: number;
+  /** The ai_calls attempt this hold covers, so a crashed attempt's hold is traceable. */
+  callId?: string;
+  /** Injected clock, so a test can stand on the far side of a hold's deadline. */
+  now?: Date;
+}
+
 /**
  * Reserves tokens for one call before it is made, in its own committed transaction and under a
  * per-provider lock, so concurrent calls see each other. Throws AiUnavailable('budget') when the
  * month's usage plus reservations would pass the budget. Release it when the call has finished.
+ *
+ * The hold outlives the process by default: a provider bills whether or not the call is settled, so
+ * a hold that expired after five minutes would let a retry spend the same budget again.
  */
-export async function reserveTokens(db: Db, workspaceId: string, providerId: string, tokens: number, ttlMs = 5 * 60_000): Promise<string> {
+export async function reserveTokens(
+  db: Db,
+  workspaceId: string,
+  providerId: string,
+  tokens: number,
+  opts: ReserveOptions = {},
+): Promise<string> {
+  const now = opts.now ?? new Date();
+  const ttlMs = opts.ttlMs ?? billingReservationTtlMs(now);
   return db.withWorkspace(workspaceId, async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`ai-budget:${providerId}`}))`);
     const [row] = await tx.select().from(schema.aiProviders).where(eq(schema.aiProviders.id, providerId));
     if (
       row?.monthlyTokenBudget !== null &&
       row?.monthlyTokenBudget !== undefined &&
-      (await usedThisMonth(tx, providerId)) + tokens > row.monthlyTokenBudget
+      (await usedThisMonth(tx, providerId, opts.now)) + tokens > row.monthlyTokenBudget
     )
       throw new AiUnavailable('budget');
     const id = newId('rsv');
-    await tx.insert(schema.aiTokenReservations).values({ workspaceId, id, providerId, tokens, expiresAt: new Date(Date.now() + ttlMs) });
+    await tx
+      .insert(schema.aiTokenReservations)
+      .values({ workspaceId, id, providerId, tokens, callId: opts.callId ?? null, expiresAt: new Date(now.getTime() + ttlMs) });
     return id;
   });
 }
@@ -96,19 +130,12 @@ export async function releaseTokens(db: Db, workspaceId: string, id: string) {
 
 export type SettleOutcome = 'settled' | 'fallback' | 'held';
 
-/** The first instant of the next UTC month: a usage write that failed keeps its hold through the month. */
-export const nextMonthStart = (now = new Date()) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
-
-/** Reserve durably before I/O, including the following month for calls crossing UTC month-end.
- * Successful settlement deletes the hold immediately. A crash/outage keeps conservative budget
- * coverage until this deadline instead of freeing billed usage after five minutes. */
-export const billingReservationTtlMs = (now = new Date()) => nextMonthStart(nextMonthStart(now)).getTime() - now.getTime();
-
 /**
- * Keeps a reservation counted past its normal five-minute TTL when its usage could not be written.
- * The hold is the only remaining record of tokens the provider billed; letting it expire would let
- * later calls spend that budget again. This extension never shortens the deadline. If the database
- * is unavailable, the original deadline remains valid.
+ * Keeps a reservation counted when its usage could not be written. The hold is the only remaining
+ * record of tokens the provider billed; letting it expire would let later calls spend that budget
+ * again. The deadline moves to the start of the next month and is never shortened; a hold already
+ * durable beyond that (a reserve made with {@link billingReservationTtlMs}) is left alone. If the
+ * database is unavailable, the original deadline remains valid.
  */
 export async function holdReservationForMonth(db: Db, workspaceId: string, reservationId: string, now = new Date()): Promise<boolean> {
   try {
@@ -127,9 +154,9 @@ export async function holdReservationForMonth(db: Db, workspaceId: string, reser
 
 /**
  * Records what a reservation bought and releases the reservation in one transaction. `usedThisMonth`
- * counts the committed `ai_calls` rows plus live reservations, so an atomic swap means a concurrent
- * call never sees neither: it sees the hold, or the usage, but not a gap in which the month looks
- * free.
+ * reads the committed `ai_calls` usage and the live reservations in one statement, so this atomic
+ * swap means a concurrent call never sees neither: it sees the hold, or the usage, but not a gap in
+ * which the month looks free.
  *
  * `write` must persist the call's tokens. When it fails, `fallback` (if given) writes the same
  * usage in its own transaction before the hold is released. If both fail the reservation is kept on

@@ -7,3 +7,8 @@
 - Add migration `0006_ai.sql`: AI providers, the call log and token reservations, with row-level security and app-role grants.
 - Security: a provider base URL goes through the fetch egress guard, so a workspace cannot point an LLM provider at a private, loopback or cloud metadata address, and plain-http or non-443 endpoints are refused.
 - Add the scheduler task `ai_prompt_tests`, which runs queued prompt test cases outside any request or command transaction.
+- Security: a provider connection is pinned to the address the egress guard checked, so a base URL whose name answers public for the check and internal for the connection (DNS rebinding) cannot reach an internal address, with TLS still verified against the configured name.
+- Budget: the month's usage and its live holds are read in one SQL statement, so a settlement committing between two reads cannot be invisible to both and leave the month looking free.
+- Budget: a model answer that fails JSON parsing or schema validation records the usage the provider billed (from the AI SDK's error), and a call whose usage is unknown settles the reservation's estimate instead of zero.
+- Budget: a reservation lasts through the next billing month and names the call attempt it covers, so a worker that dies after the provider billed keeps that budget counted instead of releasing it after five minutes.
+- Budget: usage is charged to the month a call was billed in (new `ai_calls.billed_at`, set at settlement) rather than the month it was queued, so a case queued before UTC month-end counts against the new month in the budget and in `ai.usage`.
