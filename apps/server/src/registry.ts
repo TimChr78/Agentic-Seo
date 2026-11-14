@@ -2,6 +2,7 @@ import { aiCommands } from '@agentic-seo/ai';
 import { artifactCommands, configCommands, learningsCommands, undoAgent } from '@agentic-seo/artifacts';
 import { agentCommands, memberCommands, tokenCommands } from '@agentic-seo/auth';
 import type { AnyCommand } from '@agentic-seo/commands';
+import { providerCommands } from '@agentic-seo/providers';
 import { secretCommands } from '@agentic-seo/secrets';
 import { siteCommands } from '@agentic-seo/sites';
 import { getWorkspace, whoami } from './builtinCommands';
@@ -22,6 +23,7 @@ export const commands = [
   ...configCommands,
   ...siteCommands,
   ...aiCommands,
+  ...providerCommands,
   undoAgent,
   { ...setSecret, actionClass: 'settings' as const },
   listSecrets,

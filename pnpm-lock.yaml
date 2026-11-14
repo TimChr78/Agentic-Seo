@@ -53,6 +53,9 @@ importers:
       '@agentic-seo/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@agentic-seo/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
       '@agentic-seo/secrets':
         specifier: workspace:*
         version: link:../../packages/secrets

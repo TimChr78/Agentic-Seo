@@ -17,6 +17,7 @@
     "@agentic-seo/commands": "workspace:*",
     "@agentic-seo/core": "workspace:*",
     "@agentic-seo/db": "workspace:*",
+    "@agentic-seo/providers": "workspace:*",
     "@agentic-seo/secrets": "workspace:*",
     "@agentic-seo/sites": "workspace:*",
     "@agentic-seo/telemetry": "workspace:*",

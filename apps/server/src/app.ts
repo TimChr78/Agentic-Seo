@@ -13,6 +13,7 @@ import {
 import { createExecutor, type Services, userPrincipal } from '@agentic-seo/commands';
 import { AppError, newUuid, remoteAddressFromEnv, resolveClientIp } from '@agentic-seo/core';
 import { createDb } from '@agentic-seo/db';
+import { createProviderGateway } from '@agentic-seo/providers';
 import { endpointLocation, logger } from '@agentic-seo/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
 import { type Context, Hono } from 'hono';
@@ -91,9 +92,14 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   const directory = authDirectory(db);
   const inputWarnings = createInputWarningRecorder(db);
   const metrics = createMetricsRegistry();
+  // Phase 0 configures no data adapter yet: the gateway is the one route to paid APIs, and a port
+  // without a configured adapter answers with the key that unlocks it instead of faking data.
+  // The usage commands (budgets, spend, unresolved) work without adapters, from the database.
+  const providers = createProviderGateway({ db, adapters: [] });
   const services: Services = {
     keyProvider,
     directory,
+    providers,
     publicUrl: config.publicUrl,
     serverVersion: VERSION,
     strictInputs: config.strictInputs,
