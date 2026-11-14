@@ -103,14 +103,19 @@ export async function resolveEgressHost(url: URL, resolve: EgressResolver = syst
 }
 
 /**
- * The look-up a socket gets: it answers from the one address that was checked, so the connection
+ * The look-up a socket gets: it answers from the addresses that were checked, so the connection
  * cannot resolve the name a second time. A name that answers public for the check and internal for
- * the connection (DNS rebinding) therefore never gets a socket to the internal address.
+ * the connection (DNS rebinding) therefore never gets a socket to the internal address. All checked
+ * addresses are offered, in the resolver's order, so the socket can fall back from an unreachable
+ * one (an IPv6 answer on an IPv4-only network) to the next; that fallback happens while connecting,
+ * before any request byte is sent, so a POST is never replayed.
  */
-export function pinnedLookup(address: EgressAddress): LookupFunction {
+export function pinnedLookup(addresses: EgressAddress | readonly EgressAddress[]): LookupFunction {
+  const list = (Array.isArray(addresses) ? addresses : [addresses]).map((a) => ({ address: a.address, family: a.family }));
+  if (!list.length) throw new EgressError('No checked address to connect to');
   return ((_hostname: string, lookupOptions: { all?: boolean }, callback: (...args: unknown[]) => void) => {
-    if (lookupOptions?.all) callback(null, [{ address: address.address, family: address.family }]);
-    else callback(null, address.address, address.family);
+    if (lookupOptions?.all) callback(null, list);
+    else callback(null, list[0]!.address, list[0]!.family);
   }) as unknown as LookupFunction;
 }
 
@@ -132,14 +137,17 @@ const dispatchers = new Map<string, Agent>();
  * with, never the address the name happened to resolve to. This is the same pinning `safeFetch`
  * uses for crawls (a `connect.lookup` that answers from the checked address plus `servername`).
  */
-export function pinnedDispatcher(url: URL, address: EgressAddress, opts: PinnedDispatcherOptions = {}): Agent {
+export function pinnedDispatcher(url: URL, addresses: EgressAddress | readonly EgressAddress[], opts: PinnedDispatcherOptions = {}): Agent {
+  const list: readonly EgressAddress[] = Array.isArray(addresses) ? addresses : [addresses as EgressAddress];
   const hostname = normalizeHostname(url.hostname);
   // An address literal has no name to verify the certificate against, so it has no SNI name either.
   const servername = isIpAddress(hostname) ? undefined : hostname;
   const build = () =>
     new Agent({
       connect: {
-        lookup: pinnedLookup(address),
+        lookup: pinnedLookup(list),
+        // Try every checked address in turn (Node's connection-level fallback), never a new look-up.
+        autoSelectFamily: true,
         rejectUnauthorized: true,
         ...(servername ? { servername } : {}),
         ...(opts.ca ? { ca: opts.ca } : {}),
@@ -149,7 +157,7 @@ export function pinnedDispatcher(url: URL, address: EgressAddress, opts: PinnedD
     });
   // A test-only trust store is never shared with a production agent for the same endpoint.
   if (opts.ca) return build();
-  const key = `${url.origin} ${address.address}/${address.family}`;
+  const key = `${url.origin} ${list.map((a) => `${a.address}/${a.family}`).join(',')}`;
   const cached = dispatchers.get(key);
   if (cached) return cached;
   const agent = build();
@@ -177,9 +185,9 @@ export async function egressRequest(input: RequestInfo | URL, init?: RequestInit
   const url = new URL(request.url);
   const problem = checkEgressUrl(url.href);
   if (problem) throw new EgressError(problem);
-  const [address] = await resolveEgressAddresses(url, opts.resolve);
+  const addresses = await resolveEgressAddresses(url, opts.resolve);
   // An unresolvable or empty answer was refused above; this only satisfies the type.
-  if (!address) throw new EgressError(`${url.hostname} did not resolve to an address`);
+  if (!addresses.length) throw new EgressError(`${url.hostname} did not resolve to an address`);
 
   // undici's own fetch is paired with undici's own agent: the platform fetch rejects an agent built
   // by the `undici` package, because each bundle has its own dispatcher class.
@@ -190,7 +198,7 @@ export async function egressRequest(input: RequestInfo | URL, init?: RequestInit
     ...(request.body === null ? {} : { body: await request.text() }),
     signal: request.signal,
     redirect: 'error',
-    dispatcher: pinnedDispatcher(url, address, opts),
+    dispatcher: pinnedDispatcher(url, addresses, opts),
   });
   return response as unknown as Response;
 }

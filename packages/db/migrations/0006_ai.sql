@@ -67,7 +67,8 @@ CREATE TABLE ai_calls (
 );
 CREATE INDEX ai_calls_queue ON ai_calls (created_at) WHERE status IN ('pending', 'running');
 CREATE INDEX ai_calls_recent ON ai_calls (workspace_id, created_at DESC);
-CREATE INDEX ai_calls_usage ON ai_calls (workspace_id, provider_id, billed_at);
+-- The budget and ai.usage filter on coalesce(billed_at, created_at), so the index is on that expression.
+CREATE INDEX ai_calls_usage ON ai_calls (workspace_id, provider_id, (coalesce(billed_at, created_at)));
 CREATE INDEX ai_calls_prompt ON ai_calls (workspace_id, prompt_id, created_at DESC) WHERE prompt_id IS NOT NULL;
 
 -- A call's estimated tokens, held against the provider's monthly budget before the model is asked.

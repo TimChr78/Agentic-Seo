@@ -107,6 +107,25 @@ describe('the pinned connection', () => {
     expect(site.requests[0]?.headers.host).toBe(`llm.example.com:${site.port}`);
   });
 
+  it('falls back to the next checked address when the first one refuses the connection', async () => {
+    const credentials = selfSignedCertificate('llm.example.com');
+    const site = await startTlsSite(credentials, (_req, res) => ok(res, '{"data":[]}', 'application/json'));
+    const url = new URL(`https://llm.example.com:${site.port}/v1/models`);
+    // The site listens on 127.0.0.1 only, so 127.0.0.2 (loopback, nothing bound) refuses the socket.
+    const dispatcher = pinnedDispatcher(
+      url,
+      [
+        { address: '127.0.0.2', family: 4 },
+        { address: '127.0.0.1', family: 4 },
+      ],
+      { ca: credentials.cert },
+    );
+    const response = await undiciFetch(url.href, { dispatcher, method: 'POST', body: '{"model":"m"}' });
+    expect(response.status).toBe(200);
+    expect(site.requests).toHaveLength(1);
+    expect(site.servernames).toEqual(['llm.example.com']);
+  });
+
   it('refuses a certificate that does not match the configured name', async () => {
     const credentials = selfSignedCertificate('other.example.com');
     const site = await startTlsSite(credentials, (_req, res) => ok(res, '{"data":[]}', 'application/json'));

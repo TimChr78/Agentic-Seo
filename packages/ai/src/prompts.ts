@@ -21,13 +21,19 @@ export interface Usage {
   outputTokens: number;
 }
 
-export type ChoiceResult = { kind: 'choice'; option: string; rationale: string; usage: Usage };
+/**
+ * `usageReported` says whether the provider sent token counts at all. `usage` is normalised to
+ * numbers for display, so without this flag a response with no counts would read as zero tokens and
+ * be settled as free.
+ */
+export type ChoiceResult = { kind: 'choice'; option: string; rationale: string; usage: Usage; usageReported: boolean };
 export type TextResult = {
   kind: 'text';
   slots: Record<string, string>;
   /** Slots that failed a check and use their fallback, with why. */
   rejected: Record<string, string>;
   usage: Usage;
+  usageReported: boolean;
 };
 export type PromptResult = ChoiceResult | TextResult;
 
@@ -77,6 +83,8 @@ const usageOf = (u: { inputTokens?: number; outputTokens?: number }): Usage => (
   inputTokens: u.inputTokens ?? 0,
   outputTokens: u.outputTokens ?? 0,
 });
+const reported = (u: { inputTokens?: number; outputTokens?: number }): boolean =>
+  u.inputTokens !== undefined || u.outputTokens !== undefined;
 
 /**
  * The tokens a failed call was billed, when the model answered but its answer could not be used:
@@ -115,7 +123,13 @@ export async function runPrompt(
       ...common,
       output: Output.object({ schema: z.object({ option: z.enum(keys), rationale: z.string() }) }),
     });
-    return { kind: 'choice', option: r.output.option, rationale: r.output.rationale.slice(0, 500), usage: usageOf(r.usage) };
+    return {
+      kind: 'choice',
+      option: r.output.option,
+      rationale: r.output.rationale.slice(0, 500),
+      usage: usageOf(r.usage),
+      usageReported: reported(r.usage),
+    };
   }
   const slots = def.output.slots;
   const r = await generateText({
@@ -130,7 +144,7 @@ export async function runPrompt(
     if (problem) rejected[s.name] = problem;
     values[s.name] = problem ? s.fallback : text.trim();
   }
-  return { kind: 'text', slots: values, rejected, usage: usageOf(r.usage) };
+  return { kind: 'text', slots: values, rejected, usage: usageOf(r.usage), usageReported: reported(r.usage) };
 }
 
 /** The `error` of a failed AI call: redacted while it is complete, then cut (#885). */
@@ -226,7 +240,7 @@ export async function runTestCase(m: ReadyModel, def: Prompt, t: TestCase) {
   try {
     const r = await runPrompt(m, def, t.input);
     usage = r.usage;
-    usageReported = true;
+    usageReported = r.usageReported;
     if (r.kind === 'choice') {
       answer = { option: r.option, rationale: r.rationale };
       if (t.expect.option && r.option !== t.expect.option) problems.push(`chose "${r.option}", expected "${t.expect.option}"`);

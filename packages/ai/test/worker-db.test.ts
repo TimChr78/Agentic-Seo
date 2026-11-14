@@ -186,6 +186,31 @@ describe.skipIf(!hasTestDatabase())('queued prompt tests', () => {
     }
   });
 
+  it('settles the estimate for a valid answer that comes without usage', async () => {
+    const d = await createDisposableDb('ai_valid_no_usage');
+    open.push(d);
+    const kp = newKeyProvider();
+    const llm = await fakeLlm(() => ({ text: JSON.stringify({ slots: { title: 'Pricing that converts' } }), omitUsage: true }));
+    try {
+      await seedProvider(d, kp, { baseUrl: llm.baseUrl, monthlyTokenBudget: null });
+      const artifactId = `prm_${randomBytes(16).toString('hex')}`;
+      await seedPrompt(d, artifactId);
+      const def = artifactTypes.prompt.content.parse(promptContent);
+      const estimate = estimateTokens({ def, test: def.tests[0] }, def.maxOutputTokens);
+
+      const queued = await d.db.withWorkspace(d.workspace, (tx) => testPrompt.handler({ artifactId }, context(d, kp, tx)));
+      expect(await runQueuedPromptTests(d.db, { kp, fetch: loopbackFetch })).toBe(1);
+
+      const run = await d.db.withWorkspace(d.workspace, (tx) => testRunResults.handler({ runId: queued.runId }, context(d, kp, tx)));
+      expect(run).toMatchObject({ status: 'done', failed: 0 });
+      // The answer was usable, but a missing count is not a count of zero: the estimate is billed.
+      expect(run.inputTokens + run.outputTokens).toBe(estimate);
+      expect(await holdCount(d)).toBe(0);
+    } finally {
+      await llm.close();
+    }
+  });
+
   it('holds the reservation for its attempt, durably, while the model is being asked', async () => {
     const d = await createDisposableDb('ai_hold_live');
     open.push(d);

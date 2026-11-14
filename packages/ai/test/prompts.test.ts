@@ -89,6 +89,7 @@ describe('runPrompt over the OpenAI-compatible wire format', () => {
       option: 'b',
       rationale: 'Because.',
       usage: { inputTokens: 50, outputTokens: 7 },
+      usageReported: true,
     });
     expect(llm.requests.at(-1)).toMatchObject({
       json: true,

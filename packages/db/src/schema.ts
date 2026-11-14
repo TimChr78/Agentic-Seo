@@ -660,6 +660,6 @@ export const aiCalls = pgTable(
     primaryKey({ columns: [t.workspaceId, t.id] }),
     uniqueIndex('ai_calls_workspace_idempotency').on(t.workspaceId, t.idempotencyKey),
     index('ai_calls_recent').on(t.workspaceId, t.createdAt),
-    index('ai_calls_usage').on(t.workspaceId, t.providerId, t.billedAt),
+    index('ai_calls_usage').on(t.workspaceId, t.providerId, sql`coalesce(${t.billedAt}, ${t.createdAt})`),
   ],
 );

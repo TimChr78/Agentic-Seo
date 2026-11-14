@@ -12,3 +12,5 @@
 - Budget: a model answer that fails JSON parsing or schema validation records the usage the provider billed (from the AI SDK's error), and a call whose usage is unknown settles the reservation's estimate instead of zero.
 - Budget: a reservation lasts through the next billing month and names the call attempt it covers, so a worker that dies after the provider billed keeps that budget counted instead of releasing it after five minutes.
 - Budget: usage is charged to the month a call was billed in (new `ai_calls.billed_at`, set at settlement) rather than the month it was queued, so a case queued before UTC month-end counts against the new month in the budget and in `ai.usage`.
+- A valid answer without token counts is billed at the reservation estimate, not as zero.
+- The pinned provider connection may use every checked address, so an unreachable first answer (IPv6 on an IPv4-only network) falls back to the next before any request byte is sent.
