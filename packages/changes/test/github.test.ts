@@ -227,6 +227,7 @@ describe('GitHub client: pull requests', () => {
   it('lists the PR commits and returns the head SHA to compare with the approved one', async () => {
     const fake = await startFakeServer(
       router({
+        'GET /repos/acme/site/pulls/7': () => ({ body: { head: { sha: 'c2' } } }),
         'GET /repos/acme/site/pulls/7/commits': () => ({
           body: [
             { sha: 'c1', commit: { message: 'First', author: { name: 'A', date: '2026-01-01T00:00:00Z' } } },
@@ -242,6 +243,29 @@ describe('GitHub client: pull requests', () => {
         { sha: 'c2', message: 'Second', authorName: 'B', date: '2026-01-02T00:00:00Z' },
       ],
     });
+  });
+
+  it('takes the head SHA from the PR and reads every commit page', async () => {
+    const fake = await startFakeServer(
+      router({
+        'GET /repos/acme/site/pulls/8': () => ({ body: { head: { sha: 'head-final' } } }),
+        'GET /repos/acme/site/pulls/8/commits': (call) =>
+          call.path.includes('page=2')
+            ? { body: [{ sha: 'c3', commit: { message: 'Third', author: { name: 'C', date: '2026-01-03T00:00:00Z' } } }] }
+            : {
+                body: [
+                  { sha: 'c1', commit: { message: 'First', author: { name: 'A', date: '2026-01-01T00:00:00Z' } } },
+                  { sha: 'c2', commit: { message: 'Second', author: { name: 'B', date: '2026-01-02T00:00:00Z' } } },
+                ],
+                headers: { link: '</repos/acme/site/pulls/8/commits?per_page=100&page=2>; rel="next"' },
+              },
+      }),
+    );
+    const listed = await clientFor(fake.origin).listPullRequestCommits(8);
+    // The head is not the last commit of the first page when the PR has more than one page.
+    expect(listed.headSha).toBe('head-final');
+    expect(listed.commits.map((commit) => commit.sha)).toEqual(['c1', 'c2', 'c3']);
+    expect(fake.calls.filter((call) => call.path.startsWith('/repos/acme/site/pulls/8/commits'))).toHaveLength(2);
   });
 
   it('compares commits', async () => {

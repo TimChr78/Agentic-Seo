@@ -17,6 +17,8 @@ import { buildUserAgent, checkEgressUrl, egressFetch } from '@agentic-seo/fetch'
 
 export const GITHUB_API_ORIGIN = 'https://api.github.com';
 const GITHUB_API_VERSION = '2022-11-28';
+/** A cap on commit-list pagination: 100 pages of 100 is far beyond a reviewable pull request. */
+const MAX_COMMIT_PAGES = 100;
 
 export type GitHubErrorCode =
   | 'unauthorized'
@@ -248,6 +250,17 @@ function retryAtFrom(response: Response): Date | null {
   return null;
 }
 
+/** The `rel="next"` target of a Link header (`<...>; rel="next", <...>; rel="last"`), or null. */
+function nextLink(headers: Record<string, string>): string | null {
+  const link = headers.link;
+  if (!link) return null;
+  for (const part of link.split(',')) {
+    const matched = /<([^>]+)>\s*;\s*rel="?next"?/i.exec(part.trim());
+    if (matched) return matched[1]!;
+  }
+  return null;
+}
+
 function isRateLimited(response: Response, status: number): boolean {
   if (status === 429) return true;
   if (status !== 403) return false;
@@ -362,7 +375,7 @@ export class GitHubClient {
     const text = await response.text();
     const parsed = parseBody(text);
     const responseHeaders: Record<string, string> = {};
-    for (const name of ['retry-after', 'x-ratelimit-remaining', 'x-ratelimit-reset']) {
+    for (const name of ['retry-after', 'x-ratelimit-remaining', 'x-ratelimit-reset', 'link']) {
       const value = headerValue(response, name);
       if (value !== undefined) responseHeaders[name] = value;
     }
@@ -586,23 +599,53 @@ export class GitHubClient {
     return pullRequestFrom(data);
   }
 
-  /** The PR's commits and its head SHA, so a caller can compare with the SHA a person approved. */
+  /**
+   * A page of the PR's commits and its head SHA, so a caller can compare with the SHA a person
+   * approved. The head comes from the pull request itself (`head.sha`), which is authoritative: a
+   * commit list is paginated, and its last entry on the first page is not the head of a PR with
+   * more than 100 commits. The list follows GitHub's `Link: rel="next"` until it runs out.
+   */
   async listPullRequestCommits(number: number): Promise<{ headSha: string; commits: GitHubCommitSummary[] }> {
-    const { data } = await this.get<Array<Record<string, unknown>>>(`/repos/${this.slug}/pulls/${number}/commits?per_page=100`, {
+    const { data: pull } = await this.get<{ head?: { sha?: string } }>(`/repos/${this.slug}/pulls/${number}`, {
       notFound: `pull request #${number}`,
     });
-    const commits = data.map((commit) => {
-      const commitBody = (commit.commit ?? {}) as { message?: string; author?: { name?: string; date?: string } };
-      return {
-        sha: String(commit.sha ?? ''),
-        message: commitBody.message ?? '',
-        authorName: commitBody.author?.name ?? null,
-        date: commitBody.author?.date ?? null,
-      };
-    });
-    const headSha = commits.length ? commits[commits.length - 1]!.sha : '';
-    if (!headSha) throw new GitHubError('invalid', `Pull request #${number} reported no commits.`);
+    const headSha = String(pull.head?.sha ?? '');
+    if (!headSha) throw new GitHubError('invalid', `Pull request #${number} reported no head commit.`);
+
+    const commits: GitHubCommitSummary[] = [];
+    let path: string | null = `/repos/${this.slug}/pulls/${number}/commits?per_page=100`;
+    for (let page = 0; path !== null && page < MAX_COMMIT_PAGES; page += 1) {
+      const result: CallResult<Array<Record<string, unknown>>> = await this.get(path, { notFound: `pull request #${number}` });
+      for (const commit of result.data) {
+        const commitBody = (commit.commit ?? {}) as { message?: string; author?: { name?: string; date?: string } };
+        commits.push({
+          sha: String(commit.sha ?? ''),
+          message: commitBody.message ?? '',
+          authorName: commitBody.author?.name ?? null,
+          date: commitBody.author?.date ?? null,
+        });
+      }
+      const next = nextLink(result.headers);
+      path = next === null ? null : this.nextPagePath(next);
+    }
     return { headSha, commits };
+  }
+
+  /**
+   * The API path of a paginated link, keeping the fixed host: GitHub's Link header is absolute, and
+   * the test seam points at a local server, so only the path and query are trusted.
+   */
+  private nextPagePath(link: string): string {
+    let url: URL;
+    try {
+      url = new URL(link, this.baseUrl);
+    } catch {
+      throw new GitHubError('invalid', 'GitHub returned a page link that is not a URL.');
+    }
+    if (url.origin !== new URL(this.baseUrl).origin) {
+      throw new GitHubError('invalid', 'GitHub returned a page link for a different host; the client does not follow it.');
+    }
+    return `${url.pathname}${url.search}`;
   }
 
   /** Compare two commits; `ahead` means `head` contains `base`. */

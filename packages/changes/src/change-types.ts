@@ -100,6 +100,18 @@ export const ImageAltChange = z.strictObject({
   type: z.literal('image.alt'),
   url: Url,
   src: z.string().min(1).max(MAX_URL).describe('The image src as the page shows it; the absolute URL from PageFacts is accepted'),
+  /**
+   * A relative `src` means what the document's `<base href>` makes it mean, and the crawler records
+   * the absolute URL. PageFacts carries no `<base>`, so the editor reports the absolute URL it
+   * matched here and verification compares against that. A change drafted from PageFacts already
+   * carries an absolute `src` and does not need it.
+   */
+  resolvedSrc: z
+    .string()
+    .min(1)
+    .max(MAX_URL)
+    .optional()
+    .describe('The absolute src the editor resolved from `src` through the page <base href>, for verification'),
   before: z.string().max(MAX_TEXT).nullable().describe('The alt the image has now; null when the attribute is missing'),
   after: z.string().max(MAX_TEXT).describe('The alt to write; an empty string marks a decorative image'),
   sourceHash: SourceHash,
@@ -110,18 +122,25 @@ const RedirectStatus = z.union([z.literal(301), z.literal(302), z.literal(307), 
 /**
  * Why a value cannot be written to a Netlify/Cloudflare Pages redirects file, or null when it can.
  *
- * The format is whitespace-separated with one rule per line and `#` for comments, so a value that
- * carries whitespace or a control character would be read back as extra fields — a target of
- * `/target 301\n/admin https://evil.test 302\n#` writes a second, unreviewed rule — and a `#` would
- * start a comment. The source is a path, never a URL; the target is a path or an absolute http(s)
- * URL (`javascript:` and `data:` are not redirects).
+ * The format is whitespace-separated with one rule per line. A comment starts with `#` at the start
+ * of a line, or after whitespace (an inline comment such as `/a /b 301 # note`), so a `#` inside a
+ * token is not a comment. The source is a path, never a URL or a fragment. The target is a path or
+ * an absolute http(s) URL, and both Cloudflare Pages and Netlify accept a fragment on it
+ * (`/new-page#section`), so `#` is allowed there as long as it is inside the token: whitespace is
+ * rejected outright, which is what makes ` #` an inline comment and `/new#section` a target.
+ *
+ * Whitespace or a control character would be read back as extra fields — a target of
+ * `/target 301\n/admin https://evil.test 302\n#` writes a second, unreviewed rule — so both are
+ * refused. A target of `javascript:` or `data:` is not a redirect either.
  */
 export function redirectTokenProblem(value: string, role: 'from' | 'to'): string | null {
   const what = role === 'from' ? 'source' : 'target';
   if (/[\s\p{Cc}]/u.test(value)) {
     return `The redirect ${what} contains whitespace or a control character, which would split it into extra fields in the redirects file.`;
   }
-  if (value.includes('#')) return `The redirect ${what} contains "#", which starts a comment in a redirects file.`;
+  if (role === 'from' && value.includes('#')) {
+    return 'The redirect source contains "#": a redirect matches a path, and "#" would start a fragment or a comment in the redirects file.';
+  }
   if (value.startsWith('//')) {
     return `The redirect ${what} starts with "//", a protocol-relative URL; give a path ("/...") or an absolute http(s) URL.`;
   }
@@ -150,9 +169,10 @@ const RedirectTo = z
   .min(1)
   .max(MAX_URL)
   .refine((value) => redirectTokenProblem(value, 'to') === null, {
-    message: 'Give a path starting with "/" or an absolute http(s) URL, with no whitespace, control characters or "#".',
+    message:
+      'Give a path starting with "/" or an absolute http(s) URL, with no whitespace or control characters; a fragment such as /new-page#section is allowed.',
   })
-  .describe('The new target: a path or an absolute http(s) URL');
+  .describe('The new target: a path or an absolute http(s) URL, optionally with a fragment');
 
 export const RedirectChange = z
   .strictObject({

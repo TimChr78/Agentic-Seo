@@ -54,7 +54,7 @@ describe('source mapping: the pilot', () => {
     expect(result.path).toBe('content/drafts/claude-seo-benchmark-2026-09-27.md');
     expect(result.editor).toBe('markdown_frontmatter');
     expect(result.confidence).toBe('glob');
-    expect(result.fields.title).toEqual(['seo_title', 'title']);
+    expect(result.fields.title).toEqual(['seo_title']);
     expect(result.fields.description).toEqual(['seo_description']);
     expect(result.dialect).toBe('strip_quotes');
     expect(result.affectedRoutes).toEqual(['/blog/claude-seo-benchmark/']);
@@ -144,6 +144,49 @@ describe('source mapping: the pilot', () => {
     expect(result).toMatchObject({ ok: false, code: 'unsupported' });
     if (result.ok) return;
     expect(result.reason).toContain('site build writes this path');
+  });
+
+  it('refuses a layout whose template the build writes', () => {
+    const custom = parseMapping({
+      rules: [
+        { routes: '/blog/:slug/', source: 'tools/build_blog.py', editor: 'html', layout: true },
+        { routes: '/blog/:slug/', source: 'content/drafts/*.md', editor: 'markdown_frontmatter', resolveBy: 'frontmatter_slug' },
+      ],
+      generated: ['tools/*.py'],
+    });
+    if (!custom.ok) throw new Error(custom.reason);
+    const result = resolveLayout(custom.mapping, '/blog/x/', { routes: ['/blog/x/'] });
+    expect(result).toMatchObject({ ok: false, code: 'unsupported' });
+    if (result.ok) return;
+    expect(result.reason).toContain('overwritten at the next build');
+    expect(result.details).toMatchObject({ path: 'tools/build_blog.py', generated: true });
+  });
+
+  it('refuses a redirects file the build writes', () => {
+    const custom = parseMapping({
+      rules: [{ routes: '/', source: 'index.html', editor: 'html' }],
+      redirects: { file: '_redirects' },
+      generated: ['_redirects'],
+    });
+    if (!custom.ok) throw new Error(custom.reason);
+    const result = resolveRedirects(custom.mapping);
+    expect(result).toMatchObject({ ok: false, code: 'unsupported' });
+    if (result.ok) return;
+    expect(result.details).toMatchObject({ path: '_redirects', generated: true });
+  });
+
+  it('does not read a "# slug:" comment line as the draft slug', async () => {
+    const commented = 'content/drafts/commented-2026-11-15.md';
+    const text = '---\ntitle: The real route\n# slug: ignored\n---\nBody\n';
+    const listCommented = async (prefix: string) => ['index.html', commented].filter((file) => file.startsWith(prefix));
+    const readCommented = async () => text;
+    const found = await resolveSource(mapping, '/blog/the-real-route/', { listFiles: listCommented, readFile: readCommented });
+    expect(found).toMatchObject({ ok: true, path: commented });
+    // Without the anchor the parser reads "slug: ignored" mid-line and resolves the comment's slug.
+    expect(await resolveSource(mapping, '/blog/ignored/', { listFiles: listCommented, readFile: readCommented })).toMatchObject({
+      ok: false,
+      code: 'not_found',
+    });
   });
 
   it('reports a parameterised route as pattern confidence', async () => {

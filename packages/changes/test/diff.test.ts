@@ -38,6 +38,20 @@ describe('renderDiff: files', () => {
     expect(diff.files[0]!.unified).toContain('-a\n\\ No newline at end of file\n+b\n\\ No newline at end of file');
   });
 
+  it('reports a change that is only the final newline', () => {
+    const removed = renderDiff({ files: [{ path: 'a.txt', before: 'a\n', after: 'a' }] });
+    expect(removed.files[0]).toMatchObject({ unified: expect.stringContaining('@@ -1,1 +1,1 @@'), additions: 1, deletions: 1 });
+    expect(removed.files[0]!.unified).toBe('--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-a\n+a\n\\ No newline at end of file\n');
+
+    const added = renderDiff({ files: [{ path: 'a.txt', before: 'a', after: 'a\n' }] });
+    expect(added.files[0]!.unified).toBe('--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-a\n\\ No newline at end of file\n+a\n');
+  });
+
+  it('keeps an unchanged file without a diff regardless of its final newline', () => {
+    expect(renderDiff({ files: [{ path: 'a.txt', before: 'a\n', after: 'a\n' }] }).files[0]!.unified).toBe('');
+    expect(renderDiff({ files: [{ path: 'a.txt', before: 'a', after: 'a' }] }).files[0]!.unified).toBe('');
+  });
+
   it('groups distant changes into separate hunks with three lines of context', () => {
     const before = Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join('\n');
     const after = before.replace('line 2', 'line two').replace('line 18', 'line eighteen');

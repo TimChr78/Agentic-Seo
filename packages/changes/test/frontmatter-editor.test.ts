@@ -42,16 +42,48 @@ describe('frontmatter editor: title', () => {
     expect(frontmatterValue(result.text, 'title')).toBe('Claude SEO benchmark: every score we have earned, and what each one measured');
   });
 
-  it('falls back to title when seo_title is absent', () => {
+  it('inserts seo_title when the draft has none, and never rewrites title', () => {
+    const withoutSeoTitle = draft.replace(/seo_title: .*\n/, '');
+    const result = applyFrontmatterEdit(withoutSeoTitle, {
+      ...title('Claude SEO benchmark: every score we have earned, and what each one measured', 'Claude SEO benchmark: the record'),
+      sourceHash: sourceHashOf(withoutSeoTitle),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The title line is the H1 and, without an explicit slug, the route: it must not move.
+    expect(frontmatterValue(result.text, 'title')).toBe('Claude SEO benchmark: every score we have earned, and what each one measured');
+    expect(frontmatterValue(result.text, 'seo_title')).toBe('Claude SEO benchmark: the record');
+    expect(result.text.startsWith('---\nseo_title: "Claude SEO benchmark: the record"\ntitle:')).toBe(true);
+  });
+
+  it('refuses writing seo_title without a sourceHash instead of falling back to title', () => {
     const withoutSeoTitle = draft.replace(/seo_title: .*\n/, '');
     const result = applyFrontmatterEdit(
       withoutSeoTitle,
       title('Claude SEO benchmark: every score we have earned, and what each one measured', 'Claude SEO benchmark: the record'),
     );
+    expect(result).toMatchObject({ ok: false, code: 'stale' });
+    if (result.ok) return;
+    expect(result.reason).toContain('seo_title');
+    expect(result.reason).toContain('sourceHashOf');
+  });
+
+  it('refuses an edit that would move the route when a mapping names title', () => {
+    const document = '---\ntitle: Old title\n---\nBody\n';
+    const result = applyFrontmatterEdit(document, title('Old title', 'A new title'), { fields: { title: ['title'] } });
+    expect(result).toMatchObject({ ok: false, code: 'conflict' });
+    if (result.ok) return;
+    expect(result.reason).toContain('/blog/old-title/');
+    expect(result.reason).toContain('/blog/a-new-title/');
+    expect(result.details).toMatchObject({ before: 'old-title', after: 'a-new-title' });
+  });
+
+  it('allows a title edit whose route a declared slug pins', () => {
+    const document = '---\ntitle: Old title\nslug: pinned\n---\nBody\n';
+    const result = applyFrontmatterEdit(document, title('Old title', 'A new title'), { fields: { title: ['title'] } });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(frontmatterValue(result.text, 'title')).toBe('Claude SEO benchmark: the record');
-    expect(result.text).not.toContain('seo_title');
+    expect(frontmatterValue(result.text, 'title')).toBe('A new title');
   });
 
   it('refuses a before value the file no longer holds', () => {
@@ -59,13 +91,17 @@ describe('frontmatter editor: title', () => {
     expect(result).toMatchObject({ ok: false, code: 'stale' });
   });
 
-  it('quotes a value that would otherwise change meaning in YAML', () => {
+  it('writes seo_title for a value that would change meaning in YAML', () => {
     const document = '---\ntitle: Old title\n---\nBody\n';
-    const result = applyFrontmatterEdit(document, title('Old title', 'New: title # with a comment marker'));
+    const result = applyFrontmatterEdit(document, {
+      ...title('Old title', 'New: title # with a comment marker'),
+      sourceHash: sourceHashOf(document),
+    });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.text).toContain('title: "New: title # with a comment marker"');
-    expect(frontmatterValue(result.text, 'title')).toBe('New: title # with a comment marker');
+    expect(result.text).toContain('seo_title: "New: title # with a comment marker"');
+    expect(frontmatterValue(result.text, 'seo_title')).toBe('New: title # with a comment marker');
+    expect(frontmatterValue(result.text, 'title')).toBe('Old title');
   });
 
   it('is a no-op when the value already matches', () => {
@@ -198,6 +234,28 @@ describe('frontmatter editor: the pilot dialect', () => {
     }
     const both = write(`It's the "best"`);
     expect(both).toMatchObject({ ok: false, code: 'unsupported' });
+  });
+
+  it('refuses a value with "---" that would close the frontmatter block early', () => {
+    const result = write('A --- title');
+    expect(result).toMatchObject({ ok: false, code: 'unsupported' });
+    if (result.ok) return;
+    expect(result.reason).toContain('---');
+    // Why the refusal exists: the pilot's parser ends the block at the value's dashes and reads
+    // the title as "A", turning the rest of the draft into body text.
+    const damaged = parsePilotFrontmatter('---\nseo_title: "A --- title"\nslug: kept\n---\nBody\n');
+    expect(damaged.meta.seo_title).toBe('A');
+    expect(damaged.body).toContain('slug: kept');
+  });
+
+  it('refuses a bracketed or braced value the pilot would read as a collection', () => {
+    for (const after of ['[New title]', '[draft title', '{New title}']) {
+      expect(write(after), after).toMatchObject({ ok: false, code: 'unsupported' });
+    }
+    // `[New title]` becomes a list after the quotes are stripped, which the build then escapes as
+    // one string and prints as two titles.
+    const damaged = parsePilotFrontmatter('---\nseo_title: "[New title]"\n---\nBody\n');
+    expect(Array.isArray(damaged.meta.seo_title)).toBe(true);
   });
 
   it('reads the current value the way the pilot does when checking before', () => {

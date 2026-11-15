@@ -1,12 +1,15 @@
 import type { MetaDescriptionChange, MetaTitleChange } from '../change-types';
 import { DEFAULT_FIELDS, type FieldMap, type FrontmatterDialect } from '../mapping';
+import { parsePilotFrontmatter, pilotSlug } from '../pilot';
 import { type Refusal, refuse } from '../refusal';
 import { sourceHashRefusal } from '../source';
 
 // The Markdown frontmatter editor. The pilot's blog posts are built by tools/build_blog.py from
 // `content/drafts/<slug>-<date>.md`; `<title>` comes from `seo_title or title` and the description
-// from `seo_description` (falling back to the body excerpt), so a title change edits `seo_title`
-// when it exists and `title` otherwise. See the mapping's `fields`.
+// from `seo_description` (falling back to the body excerpt), so a title change writes `seo_title`
+// and never `title`: `title` is the post's H1, and the build derives the route from `slug` or the
+// slugified `title` when no `slug` is declared. Any edit whose result would move that route is
+// refused, whatever key it used. See the mapping's `fields`.
 //
 // It is a line editor, not a YAML round-trip: flat `key: value` lines are the pilot's shape, and a
 // full parse-and-serialise would reorder keys, drop comments and rewrite quoting. A value that is
@@ -17,7 +20,8 @@ import { sourceHashRefusal } from '../source';
 // scalars with JSON escapes. `strip_quotes` writes for the pilot's own parser, which removes the
 // surrounding quotes and nothing else: it must pick a quote character the value does not contain
 // and refuse values it cannot carry, because JSON-style escapes would reach the live page as
-// backslashes.
+// backslashes. Every strip_quotes value is read back through the pilot's parser before it is
+// written, so a value that would truncate or reshape the frontmatter is refused, not published.
 
 export type FrontmatterEditOutcome = { ok: true; text: string; changed: boolean } | Refusal;
 
@@ -134,6 +138,12 @@ function stripQuotesProblem(value: string): string | null {
   if (/\p{Cc}/u.test(value)) return 'it contains a control character or a line break, which a single-line frontmatter value cannot carry.';
   if (value !== value.trim()) return 'it begins or ends with whitespace, which the parser strips.';
   if (value.startsWith('#')) return 'it begins with "#", which YAML reads as a comment.';
+  // The build closes the frontmatter at the second literal `---` anywhere in the file, so a value
+  // carrying one ends the block early and the rest of the draft is published as body text.
+  if (value.includes('---'))
+    return 'it contains "---", which ends the frontmatter block early and turns the rest of the draft into body text.';
+  if (value.startsWith('[') || value.startsWith('{'))
+    return 'it begins with "[" or "{", the shape of a YAML collection; the build reads a bracketed value as a list, not as the text you mean.';
   if (/^["']|["']$/.test(value))
     return 'it begins or ends with a quote, which the parser strips, so the page would show a different value.';
   if (value.includes('"') && value.includes("'"))
@@ -141,11 +151,20 @@ function stripQuotesProblem(value: string): string | null {
   return null;
 }
 
+/** How the build's parser read a value back, for a refusal message. */
+function readBackDescription(value: string | string[] | undefined): string {
+  if (value === undefined) return 'nothing';
+  if (Array.isArray(value)) return `a list (${value.length} item${value.length === 1 ? '' : 's'})`;
+  return JSON.stringify(value);
+}
+
 /**
  * Quote a value for the pilot's parser: a quote character the value does not contain, so the
- * parser's strip leaves exactly the value behind.
+ * parser's strip leaves exactly the value behind. The result is read back through the ported
+ * parser before it is returned: the checks above name the common cases, and this catches anything
+ * else that would truncate or reshape the block.
  */
-function quoteStripQuotes(value: string): string | Refusal {
+function quoteStripQuotes(value: string, key: string): string | Refusal {
   const problem = stripQuotesProblem(value);
   if (problem)
     return refuse(
@@ -154,11 +173,19 @@ function quoteStripQuotes(value: string): string | Refusal {
     );
   if (value === '') return '""';
   const quote = value.includes('"') ? "'" : '"';
-  return `${quote}${value}${quote}`;
+  const quoted = `${quote}${value}${quote}`;
+  const readBack = parsePilotFrontmatter(`---\n${key}: ${quoted}\n---\n`).meta[key];
+  if (readBack !== value) {
+    return refuse(
+      'unsupported',
+      `The frontmatter cannot carry this value in the site's strip_quotes dialect: the build's parser reads it back as ${readBackDescription(readBack)}. Rephrase it, or teach the site's build to unescape quotes.`,
+    );
+  }
+  return quoted;
 }
 
-function quoteValue(value: string, style: '"' | "'" | null, dialect: FrontmatterDialect): string | Refusal {
-  if (dialect === 'strip_quotes') return quoteStripQuotes(value);
+function quoteValue(value: string, style: '"' | "'" | null, dialect: FrontmatterDialect, key: string): string | Refusal {
+  if (dialect === 'strip_quotes') return quoteStripQuotes(value, key);
   if (style === "'") return `'${value.replaceAll("'", "''")}'`;
   if (style === '"' || needsQuotes(value)) return JSON.stringify(value);
   return value;
@@ -198,6 +225,23 @@ function unsupportedShape(lines: Line[], fm: Frontmatter, key: KeyLine): Refusal
     return refuse('unsupported', `The frontmatter key "${key.key}" continues on indented lines. Edit that nested YAML by hand.`);
   }
   return null;
+}
+
+/**
+ * The refusal for an edit whose result would move the post's route, or null when it would not.
+ * The pilot builds the route from `slug`, else the slugified `title`, so an edit to `title` (or a
+ * title insert) can silently rename the page; a change must not do that by accident.
+ */
+function routeChangeRefusal(beforeText: string, afterText: string): Refusal | null {
+  const beforeSlug = pilotSlug(beforeText);
+  const afterSlug = pilotSlug(afterText);
+  if (beforeSlug === afterSlug) return null;
+  const routeOf = (slug: string | null) => (slug === null ? 'no route (the file has neither a slug nor a title)' : `/blog/${slug}/`);
+  return refuse(
+    'conflict',
+    `This edit would change the post's route from ${routeOf(beforeSlug)} to ${routeOf(afterSlug)}, because the build derives it from the frontmatter. Edit a key that does not set the route, or declare an explicit slug first.`,
+    { before: beforeSlug, after: afterSlug },
+  );
 }
 
 /**
@@ -252,11 +296,14 @@ export function applyFrontmatterEdit(
         { key },
       );
     }
-    const quoted = quoteValue(change.after, null, dialect);
+    const quoted = quoteValue(change.after, null, dialect, key);
     if (typeof quoted !== 'string') return quoted;
     const inserted: Line = { text: `${key}: ${quoted}`, ending: lines[fm.open]!.ending || '\n' };
     const next = [...lines.slice(0, fm.open + 1), inserted, ...lines.slice(fm.open + 1)];
-    return { ok: true, text: fileText(next), changed: true };
+    const nextText = fileText(next);
+    const routeProblem = routeChangeRefusal(text, nextText);
+    if (routeProblem) return routeProblem;
+    return { ok: true, text: nextText, changed: true };
   }
 
   const shape = unsupportedShape(lines, fm, found);
@@ -275,11 +322,14 @@ export function applyFrontmatterEdit(
     );
   }
 
-  const quoted = quoteValue(change.after, current.quote, dialect);
+  const quoted = quoteValue(change.after, current.quote, dialect, found.key);
   if (typeof quoted !== 'string') return quoted;
   const separator = found.separator === '' ? ' ' : found.separator;
   lines[found.index] = { text: `${found.key}:${separator}${quoted}`, ending: lines[found.index]!.ending };
-  return { ok: true, text: fileText(lines), changed: true };
+  const nextText = fileText(lines);
+  const routeProblem = routeChangeRefusal(text, nextText);
+  if (routeProblem) return routeProblem;
+  return { ok: true, text: nextText, changed: true };
 }
 
 /** Read a flat frontmatter key, for a caller that wants to check what the file says. */

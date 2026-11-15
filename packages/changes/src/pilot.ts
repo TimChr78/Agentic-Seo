@@ -8,7 +8,10 @@
 //       s = re.sub(r'[^a-z0-9\s-]', '', s)
 //       s = re.sub(r'\s+', '-', s)
 //       return s.strip('-')
-// and parse_frontmatter reads a flat `key: value` line as `val.strip().strip('"').strip("'")`.
+// and parse_frontmatter reads a flat `key: value` line as `val.strip().strip('"').strip("'")`
+// with `re.match(r'(\w+):\s*(.+)', line)`: anchored at the start of the line, so an indented line
+// or a comment (`# slug: old`) is not a key. Both are ported faithfully, because a reader that
+// matched mid-line would resolve a route the build never writes.
 //
 // The draft's file name is not the route: `content/drafts/<title-slug>-<YYYY-MM-DD>.md` is a
 // convention, and real drafts either carry a `slug` unrelated to the file name or carry none at
@@ -40,7 +43,9 @@ export function parsePilotFrontmatter(text: string): PilotFrontmatter {
   const body = text.slice(close + 3).trim();
   const meta: Record<string, string | string[]> = {};
   for (const line of raw.split('\n')) {
-    const matched = /(\w+):\s*(.+)/.exec(line);
+    // `re.match` anchors at the start; Python's `\w` is Unicode-aware, so letters and digits are
+    // key characters here too. Without the anchor a `# slug: ignored` comment reads as a slug.
+    const matched = /^([\p{L}\p{N}_]+):\s*(.+)/u.exec(line);
     if (!matched) continue;
     const key = matched[1]!;
     const value = matched[2]!.trim().replace(/^"+/, '').replace(/"+$/, '').replace(/^'+/, '').replace(/'+$/, '');

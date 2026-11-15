@@ -53,15 +53,19 @@ same shapes.
   `slug = meta.get('slug') or slugify(title)`, and real drafts either declare a slug unrelated to
   their file name or none at all, so the mapping's `resolveBy: "frontmatter_slug"` rule lists
   `content/drafts/*.md`, reads each draft's slug (falling back to the slugified title) and refuses a
-  slug that zero or several drafts claim rather than guessing. Generated-path protection applies to
-  the file a glob or slug match resolves to, not only to literal paths.
+  slug that zero or several drafts claim rather than guessing. Generated-path protection is one gate
+  (`assertEditable`) that every resolver returns through — a literal path, a glob, a frontmatter-slug
+  match, a layout template or the redirects file — not only the literal route.
 - **Frontmatter quoting follows the build's reader.** `build_blog.py`'s `parse_frontmatter` reads a
   value as `val.strip().strip('"').strip("'")`: it removes surrounding quotes and never unescapes, so
   a JSON-style `\"` written for YAML would reach the live `<title>` as a backslash. The pilot's rule
   therefore sets `frontmatterDialect: "strip_quotes"`, which writes the value inside a quote character
   it does not contain and refuses values that parser cannot carry (both quote kinds, a leading or
-  trailing quote, leading `#`, surrounding whitespace). The default `yaml` dialect keeps standard
-  quoting for sites that read their frontmatter with a YAML parser.
+  trailing quote, leading `#`, surrounding whitespace, a literal `---` that would close the block
+  early, and a leading `[` or `{` that the build reads as a collection). Each written value is read
+  back through a port of that parser before it is returned, so the refusal list cannot fall behind
+  the build. The default `yaml` dialect keeps standard quoting for sites that read their frontmatter
+  with a YAML parser.
 - **A change can carry the source file's hash.** `before` catches a file that moved on for values the
   file already carries, but not for one it does not: inserting a missing `seo_description` has nothing
   to compare `before` with. A change may therefore carry `sourceHash` (sha256 of the file as read when
@@ -69,12 +73,20 @@ same shapes.
   it before inserting a key.
 - **The build decides which frontmatter key is the page title.** `build_blog.py` uses
   `seo_title or title` for `<title>` and `seo_description` for the meta description, falling back to a
-  body excerpt. The mapping therefore names `seo_title` first and `title` second, and `seo_description`
-  for the description. A change to a generated page is a change to the draft that feeds the build, not
-  to a rendered file; a JSON-LD change is refused on such a source because the frontmatter has no field
-  for it and the schema belongs in the build template.
+  body excerpt. The mapping therefore names `seo_title` for a title change and `seo_description` for
+  the description — never `title`, which is the post's H1 and, when the draft declares no `slug`, the
+  input to `slugify(title)` and therefore the route. For the same reason the frontmatter editor
+  recomputes the route with that rule before and after every edit and refuses one that would move it.
+  A change to a generated page is a change to the draft that feeds the build, not to a rendered file;
+  a JSON-LD change is refused on such a source because the frontmatter has no field for it and the
+  schema belongs in the build template.
 - **Redirects are a plain `_redirects` file** in the Cloudflare Pages / Netlify format
   (`/from  /to  301`, `#` comments), so one editor serves both hosts. Rules are edited in place to keep
-  comments and ordering, and a rule that would loop or chain is refused with the final target to point
-  at. Redirecting more than 20 URLs remains a fixed rule that always needs a person
-  (agents-and-autonomy.md §3).
+  comments and ordering — an update rewrites only the changed `to`/`status` spans, so an inline
+  comment and the spacing around it survive — and a rule that would loop or chain is refused with the
+  final target to point at. The loop and chain analysis understands the format's patterns (`*` with
+  `:splat`, `:placeholder` segments), because a literal-only graph misses
+  `/old/* -> /new/:splat` plus `/new/item -> /old/item`; a pattern interaction it cannot resolve is
+  refused rather than accepted. A `#` inside the target token is a fragment (`/new-page#section`),
+  while ` #` after whitespace is still an inline comment. Redirecting more than 20 URLs remains a
+  fixed rule that always needs a person (agents-and-autonomy.md §3).

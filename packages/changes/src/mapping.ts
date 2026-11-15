@@ -19,14 +19,17 @@ const MAX_PATH = 1_024;
 export type ChangeField = 'title' | 'description';
 
 /**
- * Which frontmatter keys carry a change field, best first. The pilot's build_blog.py reads
- * `seo_title or title` for `<title>` and `seo_description` for the meta description, so a title
- * change edits `seo_title` when it exists and `title` otherwise.
+ * Which frontmatter keys carry a change field, best first. The pilot's build_blog.py uses
+ * `seo_title or title` for `<title>` and `seo_description` for the meta description, and derives the
+ * post's route from `slug` or the slugified `title` when no `slug` is declared. A title change
+ * therefore writes `seo_title` only: editing `title` would change the post's H1 and, without an
+ * explicit `slug`, its route. A mapping that overrides `title` is honoured, but the editor refuses
+ * the edit when it would move the route.
  */
 export type FieldMap = Partial<Record<ChangeField, readonly string[]>>;
 
 export const DEFAULT_FIELDS: FieldMap = {
-  title: ['seo_title', 'title'],
+  title: ['seo_title'],
   description: ['seo_description'],
 };
 
@@ -80,7 +83,9 @@ export const SourceRuleSchema = z.strictObject({
   fields: z
     .record(z.string(), z.array(z.string().min(1).max(120)).min(1))
     .optional()
-    .describe('markdown_frontmatter: change field -> frontmatter keys, best first'),
+    .describe(
+      'markdown_frontmatter: change field -> frontmatter keys, best first. meta.title names the key the page title is read from (the pilot: seo_title), not the key the build derives the route from (the build refuses an edit that would move the route either way)',
+    ),
   generated: z.boolean().default(false).describe('The route is served from a file the build writes; resolve it, but refuse to edit it'),
   generatedReason: z.string().min(1).max(500).optional().describe('Why the generated file must not be edited, and what to edit instead'),
   layout: z.boolean().default(false).describe('The source is a shared template; a change to it reaches every route the pattern matches'),
@@ -357,8 +362,12 @@ function resolution(
   };
 }
 
-/** The refusal for a path the site build writes, or null when the path is a real source. */
-function generatedRefusal(mapping: SiteMapping, path: string): Refusal | null {
+/**
+ * The single gate every editable path goes through: the refusal for a path the site build writes,
+ * or null when the path is a real source. Every resolver returns through it, because a path is no
+ * safer for arriving from a glob, a frontmatter slug, a layout rule or the redirects config.
+ */
+function assertEditable(mapping: SiteMapping, path: string): Refusal | null {
   const entry = generatedEntries(mapping).find((candidate) => pathMatchesGlob(candidate.path, path));
   return entry ? refuse('unsupported', entry.reason, { path, generated: true }) : null;
 }
@@ -424,7 +433,7 @@ async function resolveByFrontmatterSlug(
     );
   }
   const found = matches[0]!;
-  const generated = generatedRefusal(mapping, found);
+  const generated = assertEditable(mapping, found);
   if (generated) return generated;
   return resolution(rule, found, 'glob', [routePath]);
 }
@@ -494,12 +503,12 @@ export async function resolveSource(mapping: SiteMapping, route: string, deps: R
         );
       }
       const candidate = candidates[0]!;
-      const generated = generatedRefusal(mapping, candidate);
+      const generated = assertEditable(mapping, candidate);
       if (generated) return generated;
       return resolution(rule, candidate, 'glob', [path]);
     }
 
-    const generated = generatedRefusal(mapping, resolved);
+    const generated = assertEditable(mapping, resolved);
     if (generated) return generated;
 
     return resolution(rule, resolved, confidence, [path]);
@@ -533,6 +542,8 @@ export function resolveLayout(mapping: SiteMapping, route: string, deps: LayoutR
     const resolved = fillTemplate(rule.source, values);
     if (deps.changeType && !EDITOR_CAPABILITIES[rule.editor].includes(deps.changeType))
       return capabilityRefusal(rule, deps.changeType, resolved);
+    const generated = assertEditable(mapping, resolved);
+    if (generated) return generated;
     const reach = (deps.routes ?? [path]).filter((candidate) => routeMatches(rule.routes, candidate)).map(pathOf);
     return {
       ok: true,
@@ -557,5 +568,7 @@ export function resolveRedirects(mapping: SiteMapping): { ok: true; path: string
       'This site has no redirects file in its mapping, so a redirect change cannot be applied. Add the file to the mapping first.',
     );
   }
+  const generated = assertEditable(mapping, mapping.redirects.file);
+  if (generated) return generated;
   return { ok: true, path: mapping.redirects.file, format: mapping.redirects.format };
 }

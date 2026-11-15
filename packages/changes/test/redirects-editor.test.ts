@@ -96,6 +96,14 @@ describe('redirects editor: refused input', () => {
     expect(applyRedirectEdit(redirects, add('/a/', 'https://example.com/b'))).toMatchObject({ ok: true });
   });
 
+  it('writes a target that carries a fragment', () => {
+    const result = applyRedirectEdit('', add('/old/', '/new/#section'));
+    expect(result).toMatchObject({ ok: true, text: '/old/  /new/#section  301\n' });
+    if (!result.ok) return;
+    // The `#` is inside the token, so it is a fragment and not a comment.
+    expect(redirectRules(result.text)).toEqual([{ from: '/old/', to: '/new/#section', status: 301 }]);
+  });
+
   it('refuses a file whose sha256 is not the one the change was drafted against', () => {
     const result = applyRedirectEdit(redirects, { ...add('/a/', '/b/'), sourceHash: 'a'.repeat(64) });
     expect(result).toMatchObject({ ok: false, code: 'stale' });
@@ -135,6 +143,43 @@ describe('redirects editor: rules that would chain', () => {
   });
 });
 
+describe('redirects editor: pattern rules', () => {
+  it('refuses a loop a splat target creates', () => {
+    const document = '/old/*  /new/:splat  301\n';
+    const result = applyRedirectEdit(document, add('/new/item/', '/old/item/'));
+    expect(result).toMatchObject({ ok: false, code: 'conflict' });
+    if (result.ok) return;
+    expect(result.reason).toMatch(/loop/i);
+  });
+
+  it('refuses an incoming edge a splat target creates, and suggests the final target', () => {
+    const document = '/old/*  /new/:splat  301\n';
+    const result = applyRedirectEdit(document, add('/new/item/', '/elsewhere/'));
+    expect(result).toMatchObject({ ok: false, code: 'conflict' });
+    if (result.ok) return;
+    expect(result.reason).toContain('/old/item');
+    expect(result.details).toMatchObject({ suggestion: '/elsewhere/' });
+  });
+
+  it('follows :placeholder segments on both sides', () => {
+    const document = '/news/:year/:slug/  /archive/:year/:slug/  301\n';
+    const result = applyRedirectEdit(document, add('/archive/2026/post/', '/news/2026/post/'));
+    expect(result).toMatchObject({ ok: false, code: 'conflict' });
+    if (result.ok) return;
+    expect(result.reason).toMatch(/loop/i);
+  });
+
+  it('refuses an interaction it cannot resolve rather than accepting it', () => {
+    // The existing rule's target needs `:year`, which its source never supplies: the real target
+    // is unknowable here, so a loop cannot be ruled out.
+    const document = '/a/*  /b/:splat/:year  301\n';
+    const result = applyRedirectEdit(document, add('/start/', '/a/item/'));
+    expect(result).toMatchObject({ ok: false, code: 'conflict' });
+    if (result.ok) return;
+    expect(result.reason).toContain('cannot be decided');
+  });
+});
+
 describe('redirects editor: update and remove', () => {
   it('replaces one rule line and nothing else', () => {
     const before = { to: '/blog/claude-seo-benchmark/', status: 301 as const };
@@ -150,6 +195,45 @@ describe('redirects editor: update and remove', () => {
     if (!result.ok) return;
     expect(changedLines(redirects, result.text)).toEqual([9]);
     expect(result.text).toContain('/blog/claude-seo-teardown-martechsignal/  /blog/claude-seo-benchmark/  308');
+  });
+
+  it('keeps an inline comment and the spacing around the fields it changes', () => {
+    const document = '/old/  /new/  301  # keep this note\n';
+    const result = applyRedirectEdit(document, {
+      type: 'redirect',
+      from: '/old/',
+      to: '/newer/',
+      status: 308,
+      operation: 'update',
+      before: { to: '/new/', status: 301 },
+    });
+    expect(result).toMatchObject({ ok: true, text: '/old/  /newer/  308  # keep this note\n' });
+  });
+
+  it('changes only the status span when the target stays the same', () => {
+    const document = '/old/  /new/  301  # keep\n';
+    const result = applyRedirectEdit(document, {
+      type: 'redirect',
+      from: '/old/',
+      to: '/new/',
+      status: 308,
+      operation: 'update',
+      before: { to: '/new/', status: 301 },
+    });
+    expect(result).toMatchObject({ ok: true, text: '/old/  /new/  308  # keep\n' });
+  });
+
+  it('adds a status token before an inline comment when the rule had none', () => {
+    const document = '/old/  /new/ # keep\n';
+    const result = applyRedirectEdit(document, {
+      type: 'redirect',
+      from: '/old/',
+      to: '/newer/',
+      status: 308,
+      operation: 'update',
+      before: { to: '/new/', status: 301 },
+    });
+    expect(result).toMatchObject({ ok: true, text: '/old/  /newer/  308 # keep\n' });
   });
 
   it('refuses when the rule is not what the change was drafted against', () => {

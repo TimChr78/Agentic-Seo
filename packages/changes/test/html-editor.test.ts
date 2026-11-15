@@ -243,6 +243,17 @@ describe('HTML editor: image matching resolves the page URL', () => {
     expect(result.text).toContain('<img src="pic.png" alt="A picture">');
   });
 
+  it('uses the first <base> that has an href, not a <base target>', () => {
+    const document =
+      '<html><head><base target="_blank"><base href="https://cdn.example/assets/"><title>Post</title></head><body><img src="pic.png"></body></html>';
+    const result = applyHtmlEdit(document, alt('https://cdn.example/assets/pic.png'));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.text).toContain('<img src="pic.png" alt="A picture">');
+    // The absolute URL the editor matched is carried for verification, which never sees <base>.
+    expect(result.resolvedSrc).toBe('https://cdn.example/assets/pic.png');
+  });
+
   it('does not match the same path on another host', () => {
     const result = applyHtmlEdit(
       documentWith('<img src="https://cdn.other.test/assets/pic.png">'),

@@ -31,7 +31,9 @@ export function expectedAfter(change: Change): ExpectedAfter {
         value: change.operation === 'remove' ? null : change.after,
       };
     case 'image.alt':
-      return { kind: 'image.alt', url: change.url, src: change.src, value: change.after };
+      // The editor may have resolved a relative `src` through the document's <base href>. PageFacts
+      // has no <base>, so verification uses the absolute URL the editor matched when it is carried.
+      return { kind: 'image.alt', url: change.url, src: change.resolvedSrc ?? change.src, value: change.after };
     case 'redirect':
       return {
         kind: 'redirect',
@@ -112,6 +114,15 @@ export function checkPageAgainst(change: Change, page: PageFacts): PageCheck {
       const hops = page.redirects ?? [];
       const first = hops.find((hop) => sameUrl(hop.url, expectation.from, page.url));
       if (expectation.to === null || expectation.status === null) {
+        // "No redirect on this page" only proves the rule is gone if the page was actually fetched:
+        // a failed or incomplete request has no hop list, and treating that as "gone" would pass a
+        // removal that never took effect.
+        if (page.fetchError || !(page.status > 0)) {
+          return {
+            ok: false,
+            detail: `The redirect from ${expectation.from} could not be checked: the request did not complete (${page.fetchError ?? 'no response status'}), so whether it still redirects is unknown.`,
+          };
+        }
         return first
           ? { ok: false, detail: `${expectation.from} still redirects with status ${first.status}.` }
           : { ok: true, detail: `${expectation.from} no longer redirects.` };

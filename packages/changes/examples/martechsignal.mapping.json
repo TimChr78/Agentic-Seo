@@ -18,7 +18,7 @@
       "resolveBy": "frontmatter_slug",
       "frontmatterDialect": "strip_quotes",
       "fields": {
-        "title": ["seo_title", "title"],
+        "title": ["seo_title"],
         "description": ["seo_description"]
       }
     },

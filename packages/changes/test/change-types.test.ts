@@ -99,6 +99,16 @@ describe('change catalogue', () => {
     expect(parseChange({ type: 'redirect', from: '/a/', to: 'https://example.com/b', status: 301, operation: 'add' }).ok).toBe(true);
   });
 
+  it('accepts a fragment on the target but not on the source', () => {
+    expect(parseChange({ type: 'redirect', from: '/old/', to: '/new/#section', status: 301, operation: 'add' }).ok).toBe(true);
+    expect(parseChange({ type: 'redirect', from: '/old/', to: 'https://example.com/new#section', status: 301, operation: 'add' }).ok).toBe(
+      true,
+    );
+    // A fragment on the source names no path, and ` #` is still a comment because of its whitespace.
+    expect(parseChange({ type: 'redirect', from: '/old/#section', to: '/new/', status: 301, operation: 'add' }).ok).toBe(false);
+    expect(parseChange({ type: 'redirect', from: '/old/', to: '/new/#section # a note', status: 301, operation: 'add' }).ok).toBe(false);
+  });
+
   it('accepts a source hash on any content change and rejects a malformed one', () => {
     const hash = 'a'.repeat(64);
     expect(parseChange({ ...titleChange, sourceHash: hash }).ok).toBe(true);
@@ -197,6 +207,33 @@ describe('checkPageAgainst', () => {
     expect(checkPageAgainst(change, pageFacts({ html: { images: [] } })).ok).toBe(false);
   });
 
+  it('verifies a base-relative image src through the absolute src the editor resolved', () => {
+    // The page's <base href="https://cdn.example/assets/"> makes `src="pic.png"` load
+    // `https://cdn.example/assets/pic.png`, and the crawler records that. A change drafted with the
+    // relative src carries the editor's absolute URL, so verification compares complete URLs
+    // instead of resolving "pic.png" against the page and finding https://example.com/about/pic.png.
+    const change = ChangeSchema.parse({
+      type: 'image.alt',
+      url: 'https://example.com/about/',
+      src: 'pic.png',
+      resolvedSrc: 'https://cdn.example/assets/pic.png',
+      before: null,
+      after: 'A photo',
+    });
+    expect(
+      checkPageAgainst(
+        change,
+        pageFacts({
+          html: {
+            images: [
+              { src: 'https://cdn.example/assets/pic.png', alt: 'A photo', width: null, height: null, loading: null, inLink: false },
+            ],
+          },
+        }),
+      ).ok,
+    ).toBe(true);
+  });
+
   it('verifies a redirect by status and Location', () => {
     const change = ChangeSchema.parse({ type: 'redirect', from: '/old/', to: '/new/', status: 301, operation: 'add' });
     const page = pageFacts({
@@ -217,6 +254,15 @@ describe('checkPageAgainst', () => {
     expect(checkPageAgainst(change, pageFacts({ redirects: [] })).ok).toBe(true);
     const still = pageFacts({ redirects: [{ url: 'https://example.com/old/', status: 301, location: 'https://example.com/new/' }] });
     expect(checkPageAgainst(change, still).ok).toBe(false);
+  });
+
+  it('does not verify a removed redirect when the fetch did not complete', () => {
+    const change = ChangeSchema.parse({ type: 'redirect', from: '/old/', operation: 'remove', before: { to: '/new/', status: 301 } });
+    const failed = pageFacts({ status: 0, redirects: [], fetchError: 'connect ECONNREFUSED' });
+    const check = checkPageAgainst(change, failed);
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain('unknown');
+    expect(checkPageAgainst(change, pageFacts({ status: 0, redirects: [] })).ok).toBe(false);
   });
 });
 

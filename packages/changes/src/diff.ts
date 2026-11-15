@@ -119,6 +119,14 @@ function unifiedFor(path: string, before: DiffFileInput['before'], after: DiffFi
   const right = after === null ? { lines: [] as string[], finalNewline: true } : toLines(after);
   const ops = lineOps(left.lines, right.lines);
   const status: RenderedFileDiff['status'] = before === null ? 'added' : after === null ? 'deleted' : 'modified';
+  // A final newline that only one side has is a change of bytes even when every line matches. Git
+  // renders it as the last line being replaced, with the marker on the side that lacks it, so the
+  // same shape is produced here instead of reporting an empty diff for a non-empty change.
+  const newlineOnlyDifference = left.finalNewline !== right.finalNewline && left.lines.length > 0 && right.lines.length > 0;
+  if (newlineOnlyDifference && ops[ops.length - 1]?.kind === 'equal') {
+    const last = ops[ops.length - 1]!;
+    ops.splice(ops.length - 1, 1, { kind: 'delete', line: last.line }, { kind: 'insert', line: last.line });
+  }
   if (ops.every((op) => op.kind === 'equal')) return { path, status, unified: '', additions: 0, deletions: 0 };
 
   const oldLast = ops.findLastIndex((op) => op.kind !== 'insert');

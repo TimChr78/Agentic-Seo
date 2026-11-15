@@ -44,7 +44,7 @@ interface TagSpan {
   selfClosing: boolean;
 }
 
-export type HtmlEditOutcome = { ok: true; text: string; changed: boolean } | Refusal;
+export type HtmlEditOutcome = { ok: true; text: string; changed: boolean; resolvedSrc?: string } | Refusal;
 
 function isElement(node: DomNode): boolean {
   return node.type === 'tag' || node.type === 'script' || node.type === 'style';
@@ -382,11 +382,17 @@ function removeElement(html: string, startIndex: number, endIndex: number): stri
   return replaceRange(html, start, end, '');
 }
 
-/** The base a relative `<img src>` is resolved against: the document's `<base href>`, else the page URL. */
+/**
+ * The base a relative `<img src>` is resolved against: the document's first `<base href>`, else the
+ * page URL. The HTML spec takes the first `<base>` that has an `href`, so a `<base target>` without
+ * one does not hide a later `<base href>`.
+ */
 function documentBase(root: DomNode, pageUrl: string): string | null {
-  const base = elements(root).find((node) => nameOf(node) === 'base');
-  const href = base ? attribute(base, 'href') : undefined;
-  const candidate = href?.trim() ? normaliseUrl(href, pageUrl) : normaliseUrl(pageUrl);
+  const href = elements(root)
+    .filter((node) => nameOf(node) === 'base')
+    .map((node) => attribute(node, 'href'))
+    .find((value) => value !== undefined && value.trim() !== '');
+  const candidate = href !== undefined ? normaliseUrl(href.trim(), pageUrl) : normaliseUrl(pageUrl);
   if (candidate === null || !/^https?:/i.test(candidate)) return null;
   return candidate;
 }
@@ -427,7 +433,7 @@ function editImageAlt(html: string, change: ImageAltChange): HtmlEditOutcome {
   }
   const image = images[0]!;
   const current = attribute(image, 'alt');
-  if (current === change.after) return { ok: true, text: html, changed: false };
+  if (current === change.after) return { ok: true, text: html, changed: false, resolvedSrc: wanted };
   if (current === undefined ? change.before !== null : current !== change.before) {
     return refuse(
       'stale',
@@ -440,7 +446,7 @@ function editImageAlt(html: string, change: ImageAltChange): HtmlEditOutcome {
   if (image.startIndex === null) return refuse('invalid', 'The image could not be located in the file.');
   const tag = scanTag(html, image.startIndex);
   if (!tag) return refuse('invalid', 'The image tag could not be read.');
-  return { ok: true, text: setAttribute(html, tag, 'alt', change.after), changed: true };
+  return { ok: true, text: setAttribute(html, tag, 'alt', change.after), changed: true, resolvedSrc: wanted };
 }
 
 export function applyHtmlEdit(
