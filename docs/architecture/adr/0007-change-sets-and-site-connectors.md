@@ -215,8 +215,9 @@ earlier one.
   PR that was **merged** with a different head goes to `failed` with "merged with commits that were
   not approved": nothing is deployed or verified, and a person decides what to do with the merged
   content.
-- **Deploy and verification.** Deploy detection and verification re-fetch, both queued in the same
-  transaction as the state that makes them due (`change_set_enqueue`, a narrow security-definer door
+- **Deploy and verification.** Deploy detection runs in the recurring poller (`changes_poll`, every
+  five minutes) until the deploy is seen or the deploy window ends. The apply job and the
+  verification re-fetch are queued in the same transaction as the state that makes them due (`change_set_enqueue`, a narrow security-definer door
   like `crawl_enqueue`), with the poller reconciling an `approved` or `deployed` row whose job was
   lost. Redirect sources are resolved against the site's own origin before fetching and checked
   end to end (status and `Location`).
