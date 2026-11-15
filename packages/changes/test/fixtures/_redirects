@@ -1,0 +1,10 @@
+# Double-slash collapse rules removed 2026-09-09: they matched every trailing-slash path,
+# producing a 301 -> 308 loop site-wide. Do not re-add without testing a normal URL.
+
+# Glossary merge: hard cannibalisation.
+/glossary/attribution/ /glossary/marketing-attribution-models/ 301
+/tools.json /catalog-tools.json 301
+
+/authors/  /authors/tim-christensen/  301
+/blog/claude-seo-teardown-martechsignal/  /blog/claude-seo-benchmark/  301
+/blog/claude-seo-v225-rescore-61-vs-92/  /blog/claude-seo-benchmark/  301

@@ -1,0 +1,196 @@
+{
+  "source": {
+    "repository": "TimChr78/martechsignal",
+    "file": "tools/build_blog.py",
+    "commit": "b1b0bd3295f693944b8d7f783f2ab1712dd3eda0",
+    "functions": ["slugify", "parse_frontmatter"],
+    "generated_by": "packages/changes/scripts/pilot-expectations.py"
+  },
+  "slugify": [
+    {
+      "title": "Hello World",
+      "slug": "hello-world"
+    },
+    {
+      "title": "Hello\u0085World",
+      "slug": "hello-world"
+    },
+    {
+      "title": "Hello\u2028World",
+      "slug": "hello-world"
+    },
+    {
+      "title": "Hello\u2029World",
+      "slug": "hello-world"
+    },
+    {
+      "title": "Hello\u00a0World",
+      "slug": "hello-world"
+    },
+    {
+      "title": "Hello\u3000World",
+      "slug": "hello-world"
+    },
+    {
+      "title": "Hello\u001cWorld",
+      "slug": "hello-world"
+    },
+    {
+      "title": "Hello\u001fWorld",
+      "slug": "hello-world"
+    },
+    {
+      "title": "Hello\ufeffWorld",
+      "slug": "helloworld"
+    },
+    {
+      "title": "  Hello   World  ",
+      "slug": "hello-world"
+    },
+    {
+      "title": "Claude SEO v2.25 \u2014 Rescore (61 vs 92)",
+      "slug": "claude-seo-v225-rescore-61-vs-92"
+    },
+    {
+      "title": "\u00dcn\u00efcode \u0164itle",
+      "slug": "ncode-itle"
+    },
+    {
+      "title": "Keep-Hyphens-Intact",
+      "slug": "keep-hyphens-intact"
+    },
+    {
+      "title": "A\u200bB",
+      "slug": "ab"
+    },
+    {
+      "title": "--------",
+      "slug": ""
+    },
+    {
+      "title": "\u0130stanbul",
+      "slug": "istanbul"
+    },
+    {
+      "title": "MCP Rewrites: The Tool Layer",
+      "slug": "mcp-rewrites-the-tool-layer"
+    }
+  ],
+  "frontmatter": [
+    {
+      "text": "---\ntitle: Hello\u2028World\n---\nBody text\n",
+      "meta": {
+        "title": "Hello\u2028World"
+      },
+      "body": "Body text"
+    },
+    {
+      "text": "---\nslug: Hello\u0085World\n---\n",
+      "meta": {
+        "slug": "Hello\u0085World"
+      },
+      "body": ""
+    },
+    {
+      "text": "---\ntitle: \u0085Hello\n---\n",
+      "meta": {
+        "title": "Hello"
+      },
+      "body": ""
+    },
+    {
+      "text": "---\ntitle: \ufeffHello\n---\n",
+      "meta": {
+        "title": "\ufeffHello"
+      },
+      "body": ""
+    },
+    {
+      "text": "---\r\ntitle: Hi\r\n---\r\nbody\r\n",
+      "meta": {
+        "title": "Hi"
+      },
+      "body": "body"
+    },
+    {
+      "text": "---\n# slug: ignored\ntitle: Real\n---\n",
+      "meta": {
+        "title": "Real"
+      },
+      "body": ""
+    },
+    {
+      "text": "---\nseo_title: \"Quoted: value\"\n---\n",
+      "meta": {
+        "seo_title": "Quoted: value"
+      },
+      "body": ""
+    },
+    {
+      "text": "---\ntags: [a, b]\n---\n",
+      "meta": {
+        "tags": ["a", "b"]
+      },
+      "body": ""
+    },
+    {
+      "text": "---\ntitle: A\u2029B\n---\n",
+      "meta": {
+        "title": "A\u2029B"
+      },
+      "body": ""
+    },
+    {
+      "text": "---\ntitle:   spaced   \n---\n",
+      "meta": {
+        "title": "spaced"
+      },
+      "body": ""
+    },
+    {
+      "text": "---\ntitle:\n---\n",
+      "meta": {},
+      "body": ""
+    },
+    {
+      "text": "---\nt\u00edtle: x\n---\n",
+      "meta": {
+        "t\u00edtle": "x"
+      },
+      "body": ""
+    },
+    {
+      "text": "no frontmatter at all",
+      "meta": {},
+      "body": "no frontmatter at all"
+    },
+    {
+      "text": "---\ntitle: One\ntitle: Two\n---\n",
+      "meta": {
+        "title": "Two"
+      },
+      "body": ""
+    },
+    {
+      "text": "---\ntitle: [not, a list]\n---\n",
+      "meta": {
+        "title": ["not", "a list"]
+      },
+      "body": ""
+    },
+    {
+      "text": "---\ntitle: \"Hello 'both' quotes\"\n---\n",
+      "meta": {
+        "title": "Hello 'both' quotes"
+      },
+      "body": ""
+    },
+    {
+      "text": "---\ntitle: A --- B\n---\nbody\n",
+      "meta": {
+        "title": "A"
+      },
+      "body": "B\n---\nbody"
+    }
+  ]
+}
