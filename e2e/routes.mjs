@@ -22,8 +22,22 @@ export function nameOf(path) {
 }
 
 /**
- * Every screen Phase 0 has: the sign-in screen (signed out), the first-run screen (a workspace with
- * no site yet) and every destination in the navigation, signed in as the owner.
+ * The detail screens a navigation entry does not reach. The ids are the shapes the commands accept,
+ * so the screen renders its own "couldn’t open this" state rather than a crash; the seeded thin loop
+ * (e2e/seed.ts) uses these same ids, so a run after it scans the populated screens too.
+ */
+const DETAILS = [
+  { name: 'recommendations', path: '/recommendations' },
+  { name: 'audit-detail', path: '/audits/adt_0000000000000000000000000000thin' },
+  { name: 'issue-detail', path: '/issues/iss_0000000000000000000000000000thin' },
+  { name: 'recommendation-detail', path: '/recommendations/rcm_00000000000000000000000000000000' },
+  { name: 'change-detail', path: '/changes/chg_00000000000000000000000000000000' },
+];
+
+/**
+ * Every screen the app has: the sign-in screen (signed out), the first-run screens (a workspace with
+ * no site, an account with no workspace), every destination in the navigation, and the detail and
+ * list screens no navigation entry names, signed in as the owner.
  */
 export function allRoutes() {
   return [
@@ -31,6 +45,7 @@ export function allRoutes() {
     { name: 'no-site', path: '/', person: 'noSites' },
     { name: 'no-workspace', path: '/', person: 'noWorkspace' },
     ...navPaths().map((path) => ({ name: nameOf(path), path, person: 'owner' })),
+    ...DETAILS.map((route) => ({ ...route, person: 'owner' })),
   ];
 }
 

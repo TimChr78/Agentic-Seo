@@ -173,3 +173,124 @@ describe('the workspace header', () => {
     expect(getWorkspaceId()).toBe('ws_b');
   });
 });
+
+describe('the Phase 1 command mapping', () => {
+  // Every screen's read and write goes through one method here, so the mapping is checked against
+  // the command's own input and output shape: a renamed command or a changed field breaks this file
+  // at compile time, and a wrong command name breaks it here.
+  const calls: { name: string; input: unknown }[] = [];
+  const answered: Record<string, unknown> = {
+    'audits.list': { audits: [{ id: 'adt_1' }], nextCursor: 'c1' },
+    'audits.status': { audit: { id: 'adt_1' }, progress: { crawled: 1 } },
+    'audits.pages': { pages: [{ snapshotId: 'p1' }], nextCursor: null },
+    'audits.findings': { findings: [{ id: 'fnd_1' }], nextCursor: null },
+    'audits.page': { page: { url: 'https://example.com/', status: 200 } },
+    'audits.score': { auditId: 'adt_1', score: 82 },
+    'audits.run': { audit: { id: 'adt_2' } },
+    'audits.cancel': { audit: { id: 'adt_2' } },
+    'audits.issues': { issues: [{ id: 'iss_1' }], nextCursor: null, summary: { open: 1 }, hasGsc: false },
+    'audits.issue': { issue: { id: 'iss_1' }, pages: [] },
+    'checks.ignore': { issue: { id: 'iss_1' } },
+    'checks.unignore': { issue: { id: 'iss_1' } },
+    'recommendations.list': { recommendations: [{ id: 'rcm_1' }], total: 1, nextCursor: null },
+    'recommendations.get': { id: 'rcm_1', evidence: [] },
+    'recommendations.create': { recommendationId: 'rcm_2' },
+    'recommendations.runs': { runs: [{ id: 'rrun_1' }], total: 1 },
+    'recommendations.run': { id: 'rrun_1', state: 'completed' },
+    'recommendations.generate': { runId: 'rrun_2', state: 'queued' },
+    'changes.list': { changes: [{ artifactId: 'chg_1' }], total: 1, nextCursor: null },
+    'changes.get': { run: { artifactId: 'chg_1' }, name: 'A change' },
+    'changes.status': { run: { artifactId: 'chg_1' }, events: [], verification: { attempt: null, results: [] } },
+    'changes.diff': { version: 1, files: [], urls: [] },
+    'changes.create': { created: true, changeSetId: 'chg_1' },
+    'changes.requestApply': { status: 'in_review', approvalId: 'apr_1' },
+    'changes.rollback': { changeSetId: 'chg_2', mode: 'exact' },
+    'changes.updateDraft': { changeSetId: 'chg_1', version: 2 },
+    'approvals.list': { approvals: [{ id: 'apr_1' }], total: 1, nextCursor: null },
+    'approvals.get': { id: 'apr_1', diff: { changes: [] } },
+    'approvals.approve': { status: 'approved' },
+    'approvals.reject': { status: 'rejected' },
+    'artifacts.history': { versions: [{ number: 1 }] },
+    'search.gsc.status': { connection: null, property: null, datasets: [] },
+    'search.gsc.properties': { properties: [], selected: null, suggested: null },
+    'search.gsc.connect': { url: 'https://accounts.google.com/o/oauth2' },
+    'search.gsc.select': { id: 'cnx_1' },
+    'search.gsc.disconnect': { revoked: true },
+    'search.gsc.sync': { enqueued: true },
+    'connectors.github.status': { connection: null, repository: null, hasToken: false, sourceRules: 0 },
+    'connectors.github.connect': { repository: 'acme/site' },
+    'connectors.github.update': { repository: 'acme/site' },
+    'connectors.github.disconnect': { revoked: true },
+  };
+  const call: CommandCall = (async (name: string, input: unknown) => {
+    calls.push({ name, input });
+    if (!(name in answered)) throw new Error(`unexpected command ${name}`);
+    return answered[name];
+  }) as CommandCall;
+  const api = createCommandApi(call);
+
+  it('pages the audits, findings, pages, issues, recommendations and change sets', async () => {
+    expect(await api.listAudits({ siteId: 'site_1', state: 'completed' })).toEqual({
+      rows: [{ id: 'adt_1' }],
+      nextCursor: 'c1',
+    });
+    expect(await api.listAuditPages({ auditId: 'adt_1', status: 'ok', limit: 50 })).toEqual({
+      rows: [{ snapshotId: 'p1' }],
+      nextCursor: null,
+    });
+    expect(await api.listAuditFindings({ auditId: 'adt_1', limit: 200 })).toEqual({ rows: [{ id: 'fnd_1' }], nextCursor: null });
+    // The page facts are the command's loose object, unwrapped from `page`.
+    expect(await api.getAuditPage('adt_1', 'p1')).toEqual({ url: 'https://example.com/', status: 200 });
+    // The score names the audit only when the page has one; the site read is the fallback.
+    await api.getAuditScore('site_1');
+    await api.getAuditScore('site_1', 'adt_1');
+    expect(calls.slice(-2)).toEqual([
+      { name: 'audits.score', input: { siteId: 'site_1' } },
+      { name: 'audits.score', input: { siteId: 'site_1', auditId: 'adt_1' } },
+    ]);
+    expect(await api.listRecommendations({ siteId: 'site_1', status: 'proposed' })).toEqual({
+      recommendations: [{ id: 'rcm_1' }],
+      total: 1,
+      nextCursor: null,
+    });
+    expect(await api.getArtifactHistory('rcm_1')).toEqual([{ number: 1 }]);
+  });
+
+  it('sends each write with the arguments its command declares', async () => {
+    await api.ignoreIssue('iss_1', 'The staging host is noindex on purpose.');
+    await api.createChangeSet({
+      siteId: 'site_1',
+      title: 'T',
+      summary: 'S',
+      changes: [],
+      verificationPlan: 'V',
+      rollbackPlan: 'R',
+    });
+    await api.requestApply('chg_1', 'Why');
+    await api.rollbackChangeSet('chg_1', 'Because');
+    await api.approve('apr_1');
+    await api.reject('apr_1', 'Change the title first.');
+    await api.selectSearchConsoleProperty('site_1', 'sc-domain:example.com');
+    expect(calls.slice(-7).map((entry) => entry.name)).toEqual([
+      'checks.ignore',
+      'changes.create',
+      'changes.requestApply',
+      'changes.rollback',
+      'approvals.approve',
+      'approvals.reject',
+      'search.gsc.select',
+    ]);
+    expect(calls.find((entry) => entry.name === 'checks.ignore')?.input).toEqual({
+      issueId: 'iss_1',
+      reason: 'The staging host is noindex on purpose.',
+    });
+    expect(calls.find((entry) => entry.name === 'approvals.reject')?.input).toEqual({
+      approvalId: 'apr_1',
+      note: 'Change the title first.',
+    });
+    expect(calls.find((entry) => entry.name === 'search.gsc.select')?.input).toEqual({
+      siteId: 'site_1',
+      property: 'sc-domain:example.com',
+    });
+  });
+});

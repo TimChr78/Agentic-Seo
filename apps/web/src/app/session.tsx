@@ -28,6 +28,8 @@ export interface SessionValue {
   signOutError: string | null;
   /** Pending inbox decisions, for the nav badge. */
   pending: number;
+  /** True when this session is an agent (a token or MCP client), not a person: people-only actions are hidden. */
+  agent?: boolean;
   /** This session is the demo's fixed sample data, not a live workspace. */
   demo: boolean;
 }
@@ -66,6 +68,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [siteId, setSiteId] = useState<string | null>(null);
   const [signOutError, setSignOutError] = useState<string | null>(null);
   const [demo, setDemo] = useState(false);
+  const [agent, setAgent] = useState(false);
 
   const load = useCallback(async () => {
     // A refresh keeps the shell mounted: only the first load shows the loading screen.
@@ -109,7 +112,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     try {
       // whoami names the workspace the server actually resolved: a stored id the person has left
       // falls back to their first membership, and storing that keeps the next visit on the same one.
-      setWorkspaceId((await api.getIdentity()).workspaceId);
+      const identity = await api.getIdentity();
+      setWorkspaceId(identity.workspaceId);
+      setAgent(identity.type === 'agent');
       [nextWorkspace, nextSites] = await Promise.all([api.getWorkspace(), api.listSites()]);
     } catch (error) {
       if (error instanceof ApiError && (error.status === 401 || error.status === 403)) return setStatus('no-workspace');
@@ -140,6 +145,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       site: sites.find((candidate) => candidate.id === siteId) ?? null,
       can: (permission) => permissions.has(permission),
       pending: 0,
+      agent,
       demo,
       refresh: load,
       switchSite: async (id) => {
@@ -176,7 +182,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setStatus('signed-out');
       },
     };
-  }, [status, user, workspace, sites, siteId, load, signOutError, demo]);
+  }, [status, user, workspace, sites, siteId, load, signOutError, demo, agent]);
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
