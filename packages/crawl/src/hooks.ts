@@ -12,7 +12,24 @@ import type { PageFacts, SiteFacts } from './facts';
 
 export type AuditScope = 'site' | 'section' | 'list' | 'page';
 
-export type TruncationReason = 'page_limit' | 'depth_limit' | 'time_limit' | 'robots' | 'errors' | 'cancelled';
+export type TruncationReason =
+  | 'page_limit'
+  | 'depth_limit'
+  | 'time_limit'
+  | 'robots'
+  | 'errors'
+  | 'cancelled'
+  | 'section_quota'
+  /**
+   * A crawled page had more links than the extractor keeps, so the graph is missing edges (and
+   * possibly pages). Additive in round 2 of review.
+   */
+  | 'links_truncated'
+  /**
+   * Sitemap seeding stopped at a cap (documents, queued sitemaps, bytes or wall time), so the
+   * sitemap list — which orphan detection relies on — is not the whole list. Additive in round 2.
+   */
+  | 'sitemaps_truncated';
 
 /**
  * Whether the audit saw the whole link graph (crawler-and-audits.md §2 "Coverage"). Graph checks

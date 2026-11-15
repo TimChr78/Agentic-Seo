@@ -16,6 +16,7 @@
     "@agentic-seo/checks": "workspace:*",
     "@agentic-seo/client": "workspace:*",
     "@agentic-seo/commands": "workspace:*",
+    "@agentic-seo/crawl": "workspace:*",
     "@agentic-seo/core": "workspace:*",
     "@agentic-seo/db": "workspace:*",
     "@agentic-seo/integrations": "workspace:*",

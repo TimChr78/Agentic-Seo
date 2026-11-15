@@ -53,6 +53,9 @@ importers:
       '@agentic-seo/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@agentic-seo/crawl':
+        specifier: workspace:*
+        version: link:../../packages/crawl
       '@agentic-seo/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -343,9 +346,27 @@ importers:
 
   packages/crawl:
     dependencies:
+      '@agentic-seo/commands':
+        specifier: workspace:*
+        version: link:../commands
+      '@agentic-seo/core':
+        specifier: workspace:*
+        version: link:../core
       '@agentic-seo/db':
         specifier: workspace:*
         version: link:../db
+      '@agentic-seo/fetch':
+        specifier: workspace:*
+        version: link:../fetch
+      drizzle-orm:
+        specifier: 0.45.4
+        version: 0.45.4(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(kysely@0.29.9)(pg@8.23.1)
+      htmlparser2:
+        specifier: 12.0.0
+        version: 12.0.0
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
 
   packages/db:
     dependencies:

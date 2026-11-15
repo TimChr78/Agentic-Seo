@@ -781,3 +781,184 @@ export const aiCalls = pgTable(
     index('ai_calls_usage').on(t.workspaceId, t.providerId, sql`coalesce(${t.billedAt}, ${t.createdAt})`),
   ],
 );
+
+// The crawl engine (Phase 1 task A). See 0007_crawl.sql and docs/architecture/crawler-and-audits.md
+// §2. An audit is one crawl; its frontier, snapshots and link edges are per-audit working state,
+// and `pages` is the stable per-site list of URLs that survives across audits.
+
+/** How much of a site one audit covers. */
+export type AuditScope = 'site' | 'section' | 'list' | 'page';
+/** `cancelled` is terminal: finalize still records coverage, site facts and counters for it. */
+export type AuditState = 'queued' | 'running' | 'finalizing' | 'completed' | 'partial' | 'failed' | 'cancelled';
+/** Only `never` is accepted in Phase 1; there is no renderer yet. */
+export type AuditRenderMode = 'never' | 'auto' | 'always';
+/** A frontier row's place in the crawl. */
+export type FrontierState = 'pending' | 'leased' | 'crawled' | 'skipped';
+/** How the crawler came to know a URL (packages/crawl/src/facts.ts `DiscoverySource`). */
+export type CrawlDiscoverySource = 'seed' | 'link' | 'sitemap' | 'redirect' | 'list';
+
+/** The limits an audit runs with, after defaults and hard caps. */
+export interface CrawlLimits {
+  maxPages: number;
+  maxDepth: number;
+  maxDurationMs: number;
+}
+
+/** The defaults packages/crawl applies; duplicated here so the column has a static default. */
+const DEFAULT_CRAWL_LIMITS: CrawlLimits = { maxPages: 500, maxDepth: 10, maxDurationMs: 30 * 60 * 1000 };
+
+export const audits = pgTable(
+  'audits',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    scope: text('scope').$type<AuditScope>().notNull(),
+    /** The path prefix for `section` scope. */
+    section: text('section'),
+    /** The exact URLs for `list`/`page` scope. */
+    urls: text('urls').array().$type<string[]>(),
+    limits: jsonb('limits').$type<CrawlLimits>().notNull().default(DEFAULT_CRAWL_LIMITS),
+    renderMode: text('render_mode').$type<AuditRenderMode>().notNull().default('never'),
+    state: text('state').$type<AuditState>().notNull(),
+    stateReason: text('state_reason'),
+    /** The `Coverage` contract (packages/crawl/src/hooks.ts). */
+    coverage: jsonb('coverage').$type<unknown>(),
+    /** The `SiteFacts` contract (packages/crawl/src/facts.ts). */
+    siteFacts: jsonb('site_facts').$type<unknown>(),
+    pagesCrawled: integer('pages_crawled').notNull().default(0),
+    pagesDiscovered: integer('pages_discovered').notNull().default(0),
+    pagesFailed: integer('pages_failed').notNull().default(0),
+    requestedByType: text('requested_by_type').$type<'user' | 'agent'>().notNull(),
+    requestedById: text('requested_by_id').notNull(),
+    startedAt: ts('started_at'),
+    finishedAt: ts('finished_at'),
+    /** When the current chunk last stored a page or took a lease; the reconciler reads it. */
+    lastProgressAt: ts('last_progress_at').notNull().defaultNow(),
+    /** When the reconciler last re-enqueued a chunk for a stalled audit. */
+    reconciledAt: ts('reconciled_at'),
+    /** When the worker's crawl_seed step read robots.txt, sitemaps and the HTTP probe. */
+    seededAt: ts('seeded_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    index('audits_site').on(t.workspaceId, t.siteId, t.createdAt),
+    // At most one live audit per site; `cancelled` is terminal.
+    uniqueIndex('audits_one_live').on(t.workspaceId, t.siteId).where(sql`state IN ('queued', 'running', 'finalizing')`),
+  ],
+);
+
+export const crawlFrontier = pgTable(
+  'crawl_frontier',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    auditId: text('audit_id').notNull(),
+    /** sha256 of the normalised URL. */
+    urlHash: text('url_hash').notNull(),
+    url: text('url').notNull(),
+    state: text('state').$type<FrontierState>().notNull().default('pending'),
+    skipReason: text('skip_reason'),
+    /** Click depth from the seed; null for sitemap-only and listed URLs. */
+    depth: integer('depth'),
+    discoveredBy: text('discovered_by').$type<CrawlDiscoverySource>().notNull(),
+    discoveredFrom: text('discovered_from'),
+    inSitemap: boolean('in_sitemap').notNull().default(false),
+    /** The first path segment, for the per-section page quota. */
+    section: text('section').notNull().default('/'),
+    leaseChunk: integer('lease_chunk'),
+    leaseExpiresAt: ts('lease_expires_at'),
+    attempts: integer('attempts').notNull().default(0),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.auditId, t.urlHash] }),
+    index('crawl_frontier_pending').on(t.workspaceId, t.auditId, t.state, t.depth, t.inSitemap),
+  ],
+);
+
+export const pageSnapshots = pgTable(
+  'page_snapshots',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    /** `snp_` + the first 32 hex characters of sha256(audit_id + url_hash). */
+    id: text('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    auditId: text('audit_id').notNull(),
+    url: text('url').notNull(),
+    finalUrl: text('final_url').notNull(),
+    status: integer('status').notNull(),
+    /** The full `PageFacts`. */
+    facts: jsonb('facts').$type<Record<string, unknown>>().notNull(),
+    contentHash: text('content_hash'),
+    fetchedAt: ts('fetched_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] }), index('page_snapshots_audit').on(t.workspaceId, t.auditId, t.url)],
+);
+
+export const pages = pgTable(
+  'pages',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    /** `pag_` + the first 32 hex characters of sha256(site_id + url). */
+    id: text('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    url: text('url').notNull(),
+    lastAuditId: text('last_audit_id'),
+    lastStatus: integer('last_status'),
+    firstSeenAt: ts('first_seen_at').notNull().defaultNow(),
+    lastSeenAt: ts('last_seen_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] }), uniqueIndex('pages_site_url').on(t.workspaceId, t.siteId, t.url)],
+);
+
+export const linkEdges = pgTable(
+  'link_edges',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    auditId: text('audit_id').notNull(),
+    fromUrlHash: text('from_url_hash').notNull(),
+    toUrlHash: text('to_url_hash').notNull(),
+    toUrl: text('to_url').notNull(),
+    rel: text('rel').array().$type<string[]>().notNull().default(sql`'{}'::text[]`),
+    anchor: text('anchor').notNull().default(''),
+    internal: boolean('internal').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.auditId, t.fromUrlHash, t.toUrlHash] }),
+    index('link_edges_inlinks').on(t.workspaceId, t.auditId, t.toUrlHash),
+  ],
+);
+
+export const pageLinkStats = pgTable(
+  'page_link_stats',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    auditId: text('audit_id').notNull(),
+    urlHash: text('url_hash').notNull(),
+    inlinks: integer('inlinks').notNull().default(0),
+    outlinks: integer('outlinks').notNull().default(0),
+    internalInlinks: integer('internal_inlinks').notNull().default(0),
+    sampleAnchors: text('sample_anchors').array().$type<string[]>().notNull().default(sql`'{}'::text[]`),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.auditId, t.urlHash] })],
+);
+
+/** Global per-host concurrency: one row per leased slot, shared by every worker replica. */
+export const crawlHostLeases = pgTable(
+  'crawl_host_leases',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    host: text('host').notNull(),
+    owner: text('owner').notNull(),
+    acquiredAt: ts('acquired_at').notNull().defaultNow(),
+    expiresAt: ts('expires_at').notNull(),
+  },
+  (t) => [index('crawl_host_leases_host').on(t.host), index('crawl_host_leases_expiry').on(t.expiresAt)],
+);
+
+/** Global per-host spacing (`next_start_at`) and backoff (`paused_until`). */
+export const crawlHostPacing = pgTable('crawl_host_pacing', {
+  host: text('host').primaryKey(),
+  nextStartAt: ts('next_start_at').notNull().defaultNow(),
+  pausedUntil: ts('paused_until'),
+});
