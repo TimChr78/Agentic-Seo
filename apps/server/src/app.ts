@@ -10,6 +10,7 @@ import {
   isMcpResourceUrlAllowed,
   withConsentRequest,
 } from '@agentic-seo/auth';
+import { registerCheckAuditHooks } from '@agentic-seo/checks';
 import { createExecutor, type Services, userPrincipal } from '@agentic-seo/commands';
 import { AppError, newUuid, remoteAddressFromEnv, resolveClientIp } from '@agentic-seo/core';
 import { createDb } from '@agentic-seo/db';
@@ -66,6 +67,10 @@ export interface ServerOverrides {
 }
 
 export function createServer(config: Config, overrides: ServerOverrides = {}) {
+  // The check catalogue's audit hooks must be registered before any crawl chunk or finalize runs,
+  // in every process role: `createServer` runs first in the API, the worker and the combined role.
+  // Registering twice is a no-op (the package guards it), so several servers in one test are fine.
+  registerCheckAuditHooks();
   const db = createDb({ adminUrl: config.adminDatabaseUrl, appUrl: config.appDatabaseUrl });
   const mcpEnabled = isMcpResourceUrlAllowed(config.publicUrl);
   if (!mcpEnabled) {

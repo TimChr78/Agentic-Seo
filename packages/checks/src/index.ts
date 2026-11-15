@@ -1,3 +1,4 @@
+export * from './audit';
 export * from './catalogue';
 export * from './check';
 export * from './commands';

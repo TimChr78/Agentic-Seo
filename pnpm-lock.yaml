@@ -352,6 +352,15 @@ importers:
       '@agentic-seo/crawl':
         specifier: workspace:*
         version: link:../crawl
+      '@agentic-seo/db':
+        specifier: workspace:*
+        version: link:../db
+      '@agentic-seo/search-data':
+        specifier: workspace:*
+        version: link:../search-data
+      drizzle-orm:
+        specifier: 0.45.4
+        version: 0.45.4(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(kysely@0.29.9)(pg@8.23.1)
       zod:
         specifier: 4.6.7
         version: 4.6.7

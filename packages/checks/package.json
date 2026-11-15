@@ -15,6 +15,9 @@
     "@agentic-seo/commands": "workspace:*",
     "@agentic-seo/core": "workspace:*",
     "@agentic-seo/crawl": "workspace:*",
+    "@agentic-seo/db": "workspace:*",
+    "@agentic-seo/search-data": "workspace:*",
+    "drizzle-orm": "0.45.4",
     "zod": "4.6.7"
   }
 }

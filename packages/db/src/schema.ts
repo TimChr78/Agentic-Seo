@@ -1076,3 +1076,135 @@ export const changeSetVerifications = pgTable(
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.artifactId, t.attempt, t.changeIndex] })],
 );
+
+// Findings, issues and the health score (Phase 1 task E). See 0009_issues.sql, ADR-0008,
+// crawler-and-audits.md §5–§6 and design/DESIGN.md §4.2.
+
+/** A long-lived, site-level grouping of findings that people triage. */
+export type IssueState = 'open' | 'resolved' | 'ignored';
+/** The catalogue's severities, copied onto a finding and an issue. */
+export type FindingSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
+/** The eight categories the Phase 1 catalogue evaluates (packages/checks/src/check.ts). */
+export type FindingCategory =
+  | 'crawlability'
+  | 'indexability'
+  | 'status_links'
+  | 'on_page'
+  | 'structured_data'
+  | 'images'
+  | 'security'
+  | 'international';
+
+/** The capped evidence of one finding: the catalogue's items plus the true total. */
+export interface FindingEvidence {
+  items: unknown[];
+  total: number;
+  truncated: boolean;
+  /** Pages the finding covers; kept for older rows, the columns are authoritative now. */
+  affectedPages?: number;
+}
+
+/** One category's part of an audit's health score. */
+export interface AuditScoreCategory {
+  category: FindingCategory;
+  weight: number;
+  penalty: number;
+  contribution: number;
+  issues: number;
+  affectedPages: number;
+}
+
+export const issues = pgTable(
+  'issues',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    /** `iss_` + the first 32 hex characters of sha256(site_id + check_id + subject_key). */
+    id: text('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    checkId: text('check_id').notNull(),
+    /** The page URL for page and cross-page checks; the origin for site checks. */
+    subjectKey: text('subject_key').notNull(),
+    subject: text('subject').notNull(),
+    state: text('state').$type<IssueState>().notNull().default('open'),
+    severity: text('severity').$type<FindingSeverity>().notNull(),
+    category: text('category').$type<FindingCategory>().notNull(),
+    regressed: integer('regressed').notNull().default(0),
+    lastRegressedAt: ts('last_regressed_at'),
+    firstSeenAuditId: text('first_seen_audit_id').notNull(),
+    lastSeenAuditId: text('last_seen_audit_id').notNull(),
+    /** The last audit that evaluated the subject at all; unchanged when a later audit did not. */
+    lastCheckedAuditId: text('last_checked_audit_id').notNull(),
+    resolvedAuditId: text('resolved_audit_id'),
+    ignoredBy: text('ignored_by'),
+    ignoredReason: text('ignored_reason'),
+    ignoredAt: ts('ignored_at'),
+    evidence: jsonb('evidence').$type<FindingEvidence>().notNull().default({ items: [], total: 0, truncated: false }),
+    /** The issue's own subject pages (normalised URLs); the health score's page identity. */
+    affectedUrls: text('affected_urls').array().notNull().default([]),
+    affectedPages: integer('affected_pages').notNull().default(1),
+    evaluatedPages: integer('evaluated_pages').notNull().default(1),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    uniqueIndex('issues_subject_unique').on(t.workspaceId, t.siteId, t.checkId, t.subjectKey),
+    index('issues_site_state').on(t.workspaceId, t.siteId, t.state, t.severity),
+    index('issues_site_check').on(t.workspaceId, t.siteId, t.checkId),
+  ],
+);
+
+/** One check failing on one subject in one audit: the evidence an issue groups. */
+export const findings = pgTable(
+  'findings',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    /** `fnd_` + the first 32 hex characters of sha256(audit_id + check_id + source_key). */
+    id: text('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    auditId: text('audit_id').notNull(),
+    checkId: text('check_id').notNull(),
+    /** The snapshot (requested URL) that produced the finding; the replacement key. */
+    sourceKey: text('source_key').notNull(),
+    subjectKey: text('subject_key').notNull(),
+    /** The URL, or `url#selector` when the check points at a fragment of a page. */
+    subject: text('subject').notNull(),
+    severity: text('severity').$type<FindingSeverity>().notNull(),
+    category: text('category').$type<FindingCategory>().notNull(),
+    evidence: jsonb('evidence').$type<FindingEvidence>().notNull().default({ items: [], total: 0, truncated: false }),
+    /** The issue's own subject pages (normalised URLs); never derived from the evidence cap. */
+    affectedUrls: text('affected_urls').array().notNull().default([]),
+    affectedPages: integer('affected_pages').notNull().default(1),
+    issueId: text('issue_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    index('findings_audit_check').on(t.workspaceId, t.auditId, t.checkId),
+    index('findings_subject').on(t.workspaceId, t.siteId, t.checkId, t.subjectKey),
+    index('findings_source').on(t.workspaceId, t.auditId, t.sourceKey),
+    index('findings_issue').on(t.workspaceId, t.issueId).where(sql`issue_id IS NOT NULL`),
+  ],
+);
+
+/** One audit's health score with its per-category detail and what it could not evaluate. */
+export const auditScores = pgTable(
+  'audit_scores',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    auditId: text('audit_id').notNull(),
+    score: integer('score'),
+    reason: text('reason'),
+    categories: jsonb('categories').$type<AuditScoreCategory[]>().notNull().default([]),
+    notEvaluated: jsonb('not_evaluated').$type<{ category: string; reason: string }[]>().notNull().default([]),
+    skippedChecks: jsonb('skipped_checks').$type<{ checkId: string; reason: string }[]>().notNull().default([]),
+    pagesEvaluated: integer('pages_evaluated').notNull().default(0),
+    pagesCrawled: integer('pages_crawled').notNull().default(0),
+    /** Open issues the audit could not judge; excluded from the score and reported as coverage. */
+    uncheckedIssues: integer('unchecked_issues').notNull().default(0),
+    gscWeighted: boolean('gsc_weighted').notNull().default(false),
+    computedAt: ts('computed_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.auditId] }), index('audit_scores_site').on(t.workspaceId, t.siteId, t.computedAt)],
+);

@@ -390,7 +390,7 @@ export const titleDuplicate = defineCheck({
   references: [TITLE_LINK, DUPLICATE_CONTENT],
   fix: { change: 'meta.title' },
   definition:
-    'Fails for each group of two or more indexable 200 HTML pages in the audit whose title text is identical after trimming and collapsing whitespace (case-sensitive). Pages with no title or an empty title are excluded (title.missing and title.empty cover them). Evidence: one item per URL in the group, each carrying the shared title, capped at 50 URLs per group.',
+    'Fails for each group of two or more indexable 200 HTML pages in the audit whose title text is identical after trimming and collapsing whitespace (case-sensitive). Pages with no title or an empty title are excluded (title.missing and title.empty cover them). The finalize step reports one finding per URL in the group, each carrying the group’s evidence, because issues are grouped by page. Evidence: one item per URL in the group, each carrying the shared title, capped at 50 URLs per group.',
 });
 
 export const descriptionDuplicate = defineCheck({
@@ -406,7 +406,7 @@ export const descriptionDuplicate = defineCheck({
   references: [SNIPPET, DUPLICATE_CONTENT],
   fix: { change: 'meta.description' },
   definition:
-    'Fails for each group of two or more indexable 200 HTML pages in the audit whose meta description is identical after trimming and collapsing whitespace (case-sensitive). Pages with no meta description are excluded (description.missing covers them). Evidence: one item per URL in the group, each carrying the shared description, capped at 50 URLs per group.',
+    'Fails for each group of two or more indexable 200 HTML pages in the audit whose meta description is identical after trimming and collapsing whitespace (case-sensitive). Pages with no meta description are excluded (description.missing covers them). The finalize step reports one finding per URL in the group, each carrying the group’s evidence, because issues are grouped by page. Evidence: one item per URL in the group, each carrying the shared description, capped at 50 URLs per group.',
 });
 
 export const contentDuplicate = defineCheck({
@@ -421,7 +421,7 @@ export const contentDuplicate = defineCheck({
     'Several indexable pages have identical main content. Google picks one and treats the rest as duplicates, so the others rarely rank. Differentiate the pages or consolidate them with a canonical.',
   references: [DUPLICATE_CONTENT],
   definition:
-    'Fails for each group of two or more indexable 200 HTML pages in the audit whose main-content hash (sha256 of the normalised visible text) is identical and is not the hash of an empty body. Evidence: one item per URL in the group, each carrying the shared hash and the page’s word count, capped at 50 URLs per group.',
+    'Fails for each group of two or more indexable 200 HTML pages in the audit whose main-content hash (sha256 of the normalised visible text) is identical and is not the hash of an empty body. The finalize step reports one finding per URL in the group, each carrying the group’s evidence, because issues are grouped by page. Evidence: one item per URL in the group, each carrying the shared hash and the page’s word count, capped at 50 URLs per group.',
 });
 
 export const onPageChecks = [

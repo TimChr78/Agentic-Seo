@@ -162,7 +162,7 @@ export const indexabilityNoindexInSitemap = defineCheck({
     'A sitemap lists a URL that returns noindex. The two instructions contradict each other, and Google follows the noindex. Either remove the URL from the sitemap or drop the noindex.',
   references: [SITEMAP_BUILD, ROBOTS_META],
   definition:
-    'Fails for each URL listed in a sitemap that was fetched as a 200 HTML page whose meta robots or applicable X-Robots-Tag contains noindex (or none). Evidence: the URL, the directive and whether it came from the meta tag or the header, and the sitemap that lists it.',
+    'Fails for each URL listed in a sitemap that was fetched as a 200 HTML page whose meta robots or applicable X-Robots-Tag contains noindex (or none). Evidence: the URL, the directive and whether it came from the meta tag or the header, and the sitemap documents the audit read.',
 });
 
 export const canonicalToNon200 = defineCheck({

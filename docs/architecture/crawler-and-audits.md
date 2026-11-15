@@ -133,7 +133,7 @@ Each check carries a test fixture. A synthetic "bad SEO" test site (as OpenSEO's
 
 ## 6. Health score
 
-`score = 100 − Σ_category weight_c × penalty_c`, where `penalty_c` grows with the severity of open issues and the share of affected indexable pages, weighted by each page's traffic share when GSC is connected. The score is capped per category so one category cannot zero it. The weights are in the code and documented. The UI always shows the score with its period, its denominator (pages evaluated) and the categories **not evaluated** (for example "Performance not evaluated: no PSI key"). It never shows 100 for "nothing checked", following the design rule that no data never means healthy.
+`score = 100 − Σ_category weight_c × penalty_c`, where `penalty_c` grows with the severity of open issues and the share of affected indexable pages, weighted by each page's traffic share when GSC is connected. The score is capped per category so one category cannot zero it. The weights are in the code and documented. Only the issues the audit actually judged count: an open issue whose pages it never evaluated is excluded and reported as `unchecked_issues` (with the pages evaluated as the denominator), so a scoped audit never scores a page it did not read, and an issue's own subject pages — not its capped evidence — decide its share. The UI always shows the score with its period, its denominator (pages evaluated) and the categories **not evaluated** (for example "Performance not evaluated: no PSI key"). It never shows 100 for "nothing checked", following the design rule that no data never means healthy.
 
 ## 7. Drift monitoring
 

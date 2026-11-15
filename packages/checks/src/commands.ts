@@ -6,7 +6,9 @@ import { type Check, checkCategories, checkScopes, evaluators, fixChanges, sever
 import { ruleById } from './rules';
 
 // The two read commands an agent or the UI uses to browse the catalogue
-// (crawler-and-audits.md §5). They are what `checks://catalogue` exposes over MCP later.
+// (crawler-and-audits.md §5). They are what `checks://catalogue` exposes over MCP later. The issue,
+// finding and score commands live in ./audit/commands and are registered by the server beside
+// these, so this list stays read-only catalogue browsing.
 
 const CheckSummarySchema = z.object({
   id: z.string(),

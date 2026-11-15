@@ -188,7 +188,7 @@ export const sitemapNonIndexableUrl = defineCheck({
     'A sitemap lists a URL that is not indexable. Asking Google to index a page that is noindex, non-200 or canonicalised elsewhere wastes crawl effort and weakens trust in the sitemap. Remove the URL from the sitemap, or make the page indexable if it should rank.',
   references: [SITEMAP_BUILD],
   definition:
-    'Fails for each URL listed in any of the audit’s sitemaps whose page was fetched but is not indexable: the final status is not 200, the final response is not HTML, the page has noindex in meta robots or in an applicable X-Robots-Tag header, or its canonical points at a different URL. Exclude URLs that robots.txt disallowed (page.blocked_by_robots covers those). Evidence: the URL, the sitemap that lists it and the reason it is not indexable (status, directive or canonical target).',
+    'Fails for each URL listed in any of the audit’s sitemaps whose page was fetched but is not indexable: the final status is not 200, the final response is not HTML, the page has noindex in meta robots or in an applicable X-Robots-Tag header, or its canonical points at a different URL. Exclude URLs that robots.txt disallowed (page.blocked_by_robots covers those). Evidence: the URL, the sitemap documents the audit read and the reason it is not indexable (status, directive or canonical target).',
 });
 
 export const pageBlockedByRobots = defineCheck({
@@ -235,7 +235,7 @@ export const crawlOrphanPage = defineCheck({
     'A page in the sitemap has no internal links pointing to it. Search engines treat it as an orphan: it may be crawled from the sitemap but it gains no authority from the site. Link it from relevant pages, or remove it from the sitemap if it is not meant to rank.',
   references: [SITEMAP_BUILD, LINKS_CRAWLABLE],
   definition:
-    'On an audit whose coverage graph is complete, fails for each indexable 200 HTML page that is listed in a sitemap but has zero internal inlinks from other crawled pages. Evidence: the page URL and the sitemap that lists it.',
+    'On an audit whose coverage graph is complete, fails for each indexable 200 HTML page that is listed in a sitemap but has zero internal inlinks from other crawled pages. Evidence: the page URL and the sitemap documents the audit read.',
 });
 
 export const crawlabilityChecks = [

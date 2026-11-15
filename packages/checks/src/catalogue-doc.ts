@@ -19,7 +19,7 @@ export function renderCatalogueMarkdown(): string {
     '',
   );
   lines.push(
-    `The catalogue has ${checks.length} checks: ${counts.page} page checks, ${counts.site} site checks and ${counts.finalize} cross-page checks. Page and site checks run in \`@agentic-seo/checks\` over the crawler’s facts. Cross-page checks are evaluated at finalize, in SQL against the crawl tables; the definition below is the contract for that SQL.`,
+    `The catalogue has ${checks.length} checks: ${counts.page} page checks, ${counts.site} site checks and ${counts.finalize} cross-page checks. Page and site checks run in \`@agentic-seo/checks\` over the crawler’s facts. Cross-page checks are evaluated at finalize against the crawl tables, in set-based queries; the definition below is the contract for that evaluation.`,
     '',
   );
   lines.push('## Checks', '');
