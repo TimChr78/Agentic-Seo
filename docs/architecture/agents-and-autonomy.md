@@ -33,9 +33,9 @@ Every capability is a `defineCommand` with zod input/output, a `permission`, an 
 | `agents.*`, `learnings.*`, `approvals.*`, `workspace.*` | ported from Agentic Marketing |
 | `usage.*` | budgets, spend, estimates |
 
-**Resources:** `site-context://<site>`, `learnings://<site>`, `checks://catalogue`, `change-types://catalogue` (JSON Schema + examples), `skills://<name>`, `docs://…`, `report-starter://html` (the HTML report scaffold, as OpenSEO's `seo-report`).
+**Resources:** `site-context://<site>` (the published site context), `issues://<site>` (open issues, worst first), `learnings://current`, `checks://catalogue`, `change-types://catalogue` (JSON Schema per change type) and `artifact-types://catalogue`. Phase 1 implements these six. `learnings://<site>`, `skills://<name>`, `docs://…` and `report-starter://html` (the HTML report scaffold, as OpenSEO's `seo-report`) arrive with the types they serve. Every resource is backed by a command, so it is permission-checked and workspace-scoped like a tool call, never a second read path.
 
-**Prompts:** "Audit this site and propose the top 10 fixes", "Find striking-distance keywords and draft title changes", "Why did traffic drop last week?", "Plan a content cluster for <topic>", "Check our AI visibility against <competitor>".
+**Prompts:** Phase 1 registers one, "Audit this site and propose the top fixes": read the issues, cite them as evidence in `recommendations.create`, and draft a change set from an accepted recommendation, inventing no metric. Later phases add "Find striking-distance keywords and draft title changes", "Why did traffic drop last week?", "Plan a content cluster for <topic>" and "Check our AI visibility against <competitor>".
 
 **Skills for external agents:** a Claude Code / Codex / Cursor plugin (`plugins/agentic-seo`) ships the MCP connection plus skills mirroring the specialists (§5). It follows OpenSEO's plugin pattern, so external agents get the same playbooks as hosted ones.
 

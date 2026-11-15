@@ -310,7 +310,7 @@ export const listRecommendations = defineCommand({
   name: 'recommendations.list',
   title: 'List recommendations',
   description:
-    'A site’s recommendations, ordered by a person’s priority and then newest first: title, status (proposed, accepted, implemented or rejected), author, effort, confidence and the traffic at stake. Filter by status, author, or the issue a recommendation addresses. Read-only; no model call.',
+    'A site’s recommendations, ordered by a person’s priority and then newest first: title, status (proposed, accepted, implemented or rejected), author, effort, confidence and the traffic at stake. Filter by status, author, or the issue a recommendation addresses. Read-only and free; no model call.',
   input: z.object({
     siteId: SiteId,
     status: StatusEnum.optional().describe('Only recommendations in this status'),
@@ -403,7 +403,7 @@ export const getRecommendation = defineCommand({
   name: 'recommendations.get',
   title: 'Get a recommendation',
   description:
-    'One recommendation in full: its content (rationale, hypothesis, expected impact with the computed traffic at stake, effort, verification plan, falsification check, leading indicator, proposed changes), its evidence expanded with what each item says, the person’s priority, the change sets that implement it, and its derived status. Use it before approving, implementing or updating it. Read-only.',
+    'One recommendation in full: its content (rationale, hypothesis, expected impact with the computed traffic at stake, effort, verification plan, falsification check, leading indicator, proposed changes), its evidence expanded with what each item says, the person’s priority, the change sets that implement it, and its derived status. Use it before approving, implementing or updating it. Read-only and free.',
   input: z.object({ recommendationId: RecommendationId }),
   output: z.object({
     id: z.string(),
@@ -762,7 +762,7 @@ export const recommendationDependencies = defineCommand({
   name: 'recommendations.dependencies',
   title: 'Recommendation dependency graph',
   description:
-    'The dependencies of one recommendation, walked upstream (what must land first) and downstream (what waits on it), with each node’s status and priority, plus any dependency that no longer resolves and any cycle found. Read-only.',
+    'The dependencies of one recommendation, walked upstream (what must land first) and downstream (what waits on it), with each node’s status and priority, plus any dependency that no longer resolves and any cycle found. Read-only and free.',
   input: z.object({ recommendationId: RecommendationId }),
   output: z.object({
     recommendationId: z.string(),
@@ -900,7 +900,7 @@ export const listRecommendationRuns = defineCommand({
   name: 'recommendations.runs',
   title: 'List recommendation runs',
   description:
-    'A site’s synthesis runs, newest first: when each ran, which audit it read, how many recommendations it created, how many it dropped and why, and the tokens it used. A run that failed says why. Read-only.',
+    'A site’s synthesis runs, newest first: when each ran, which audit it read, how many recommendations it created, how many it dropped and why, and the tokens it used. A run that failed says why. Use it to see what the specialists did before reading recommendations.list. Read-only and free.',
   input: z.object({
     siteId: SiteId,
     limit: z.number().int().min(1).max(50).default(20),
@@ -938,7 +938,7 @@ export const getRecommendationRun = defineCommand({
   name: 'recommendations.run',
   title: 'Get a recommendation run',
   description:
-    'One synthesis run in full: its state, the audit it read, the candidates and recommendations its specialists produced, the ids it created, every item it dropped with the validation errors that caused it, the tokens it used and its error when it failed. Read-only.',
+    'One synthesis run in full: its state, the audit it read, the candidates and recommendations its specialists produced, the ids it created, every item it dropped with the validation errors that caused it, the tokens it used and its error when it failed. Follow a queued run with this until it completes. Read-only and free.',
   input: z.object({ runId: z.string().regex(/^rrun_[0-9a-f]{32}$/, 'A run id, e.g. from recommendations.runs') }),
   output: RunView,
   permission: 'artifacts:read',

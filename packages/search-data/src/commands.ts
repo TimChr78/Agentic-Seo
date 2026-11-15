@@ -282,7 +282,7 @@ export const gscDisconnect = defineCommand({
   name: 'search.gsc.disconnect',
   title: 'Disconnect Google Search Console',
   description:
-    'Revokes the Google tokens and removes the stored credential for this site. The search data already synced is kept. A person must do this; an agent cannot. Free.',
+    'Revokes the Google tokens and removes the stored credential for this site. The search data already synced stays readable. Use it when the connection is wrong or the Google account changed; reconnect with search.gsc.connect. A person must do this; an agent cannot. Free.',
   input: z.object({ siteId: SiteId }),
   output: z.object({ revoked: z.literal(true), googleRevoked: z.boolean() }),
   permission: 'sites:write',

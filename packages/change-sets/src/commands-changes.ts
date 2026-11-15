@@ -1,5 +1,5 @@
 import { artifactTypes, author, lockArtifacts, noteWithPolicy, publishArtifactVersion, validateContent } from '@agentic-seo/artifacts';
-import { type Change, ChangeSchema, renderDiff, urlOf } from '@agentic-seo/changes';
+import { type Change, ChangeSchema, changeTypeCatalogue, renderDiff, urlOf } from '@agentic-seo/changes';
 import { type CommandContext, defineCommand } from '@agentic-seo/commands';
 import { AppError, hashValue, newId } from '@agentic-seo/core';
 import { schema, type Tx } from '@agentic-seo/db';
@@ -339,6 +339,43 @@ function storedChanges(content: Record<string, unknown>): Change[] | undefined {
   }
   return changes.length ? changes : undefined;
 }
+
+/**
+ * The change catalogue (changes/src/change-types.ts) as a command, so `change-types://catalogue`
+ * and agents reading `changes.create` have one permission-checked way to see what a change may say.
+ */
+export const changesTypes = defineCommand({
+  name: 'changes.types',
+  title: 'List change types',
+  description:
+    'The change types a change set can carry: for each, what it edits and when to use it, the action class the policy engine judges it against, what a re-fetch after deployment must show for it to count as applied, and the JSON Schema its JSON must match. Read it before drafting with changes.create, or read the resource change-types://catalogue for the same catalogue. Read-only and free: no repository call, no provider call.',
+  input: z.object({}),
+  output: z.object({
+    types: z.array(
+      z.object({
+        type: z.string(),
+        title: z.string(),
+        summary: z.string(),
+        actionClass: z.string().describe('site.content or site.structural: how the policy engine judges it with reach'),
+        verify: z.string().describe('What a re-fetch of the URL must show for the change to be verified'),
+        jsonSchema: z.record(z.string(), z.unknown()).describe('The JSON Schema for this change’s JSON, as input to changes.create'),
+      }),
+    ),
+  }),
+  permission: 'sites:read',
+  effect: 'read',
+  actionClass: 'read',
+  handler: async () => ({
+    types: changeTypeCatalogue.map((definition) => ({
+      type: definition.type,
+      title: definition.title,
+      summary: definition.summary,
+      actionClass: definition.actionClass,
+      verify: definition.verify,
+      jsonSchema: definition.jsonSchema,
+    })),
+  }),
+});
 
 export const changesCreate = defineCommand({
   name: 'changes.create',
@@ -765,7 +802,7 @@ export const changesDiff = defineCommand({
   name: 'changes.diff',
   title: 'Change set diff',
   description:
-    'The per-URL before/after pairs and the source-file diffs of one change set version (default: the latest). This is what the review screen shows; nothing is fetched. Free.',
+    'The per-URL before/after pairs and the source-file diffs of one change set version (default: the latest). This is what the review screen shows; use it before changes.requestApply to check exactly what a person would approve. Nothing is fetched. Free.',
   input: z.object({ changeSetId: ChangeSetId, version: z.number().int().positive().optional() }),
   output: z.object({
     version: z.number().int(),
@@ -1329,6 +1366,7 @@ export const changesRollback = defineCommand({
 });
 
 export const changeCommands = [
+  changesTypes,
   changesCreate,
   changesUpdateDraft,
   changesGet,
