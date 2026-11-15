@@ -241,6 +241,28 @@ const SEED: Record<string, { insert: string; appendOnly: boolean }> = {
             VALUES ($1, 'not_seed', 1, 0, 'https://seed-site.example/', 'meta.title', 'pass', 'Seed verification', 'commit-seed')`,
     appendOnly: true,
   },
+  // Findings, issues and the score (0009_issues.sql). Inserted last: they point at the seeded site
+  // and audit. Findings and issues are history, so the app role gets no DELETE on them.
+  issues: {
+    insert: `INSERT INTO issues (workspace_id, id, site_id, check_id, subject_key, subject, state, severity, category,
+              first_seen_audit_id, last_seen_audit_id, last_checked_audit_id)
+            VALUES ($1, 'iss_00000000000000000000000000000001', '00000000-0000-4000-8000-000000000001',
+              'title.missing', 'https://seed-site.example/', 'https://seed-site.example/', 'open', 'high', 'on_page',
+              'adt_seed', 'adt_seed', 'adt_seed')`,
+    appendOnly: false,
+  },
+  findings: {
+    insert: `INSERT INTO findings (workspace_id, id, site_id, audit_id, check_id, source_key, subject_key, subject, severity, category, evidence)
+            VALUES ($1, 'fnd_00000000000000000000000000000001', '00000000-0000-4000-8000-000000000001', 'adt_seed',
+              'title.missing', 'https://seed-site.example/', 'https://seed-site.example/', 'https://seed-site.example/', 'high', 'on_page',
+              '{"items":[],"total":1,"truncated":false}'::jsonb)`,
+    appendOnly: false,
+  },
+  audit_scores: {
+    insert: `INSERT INTO audit_scores (workspace_id, site_id, audit_id, score, pages_evaluated, pages_crawled)
+            VALUES ($1, '00000000-0000-4000-8000-000000000001', 'adt_seed', 82, 10, 10)`,
+    appendOnly: false,
+  },
 };
 
 describe.skipIf(!hasTestDatabase())('foundation tables', () => {

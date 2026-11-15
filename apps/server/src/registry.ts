@@ -2,7 +2,7 @@ import { aiCommands } from '@agentic-seo/ai';
 import { artifactCommands, configCommands, learningsCommands, undoAgent } from '@agentic-seo/artifacts';
 import { agentCommands, memberCommands, tokenCommands } from '@agentic-seo/auth';
 import { changeCommands, githubConnectorCommands } from '@agentic-seo/change-sets';
-import { checkCommands } from '@agentic-seo/checks';
+import { auditIssueCommands, checkCommands } from '@agentic-seo/checks';
 import type { AnyCommand } from '@agentic-seo/commands';
 import { auditCommands } from '@agentic-seo/crawl';
 import { providerCommands } from '@agentic-seo/providers';
@@ -27,6 +27,7 @@ export const commands = [
   ...configCommands,
   ...siteCommands,
   ...checkCommands,
+  ...auditIssueCommands,
   ...auditCommands,
   ...aiCommands,
   ...providerCommands,

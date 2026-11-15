@@ -71,7 +71,7 @@ export const hreflangMissingReturn = defineCheck({
     'A page’s hreflang entry points at another page that does not link back. Google requires the relationship to be reciprocal and ignores entries that are not confirmed. Add the matching return entry on the target page.',
   references: [LOCALIZED],
   definition:
-    'Fails for each hreflang entry on page A whose target URL B was crawled and is indexable, where B has no hreflang entry that points back to A (matching A’s language code, or an x-default entry pointing at A). Evidence: A, B and the language code whose return link is missing.',
+    'Fails for each hreflang entry on page A whose target URL B was crawled and is indexable, where B has no hreflang entry that points back to A (matching A’s language code — its primary language subtag, so fr-FR answers fr — or an x-default entry pointing at A). Evidence: A, B and the language code whose return link is missing.',
 });
 
 export const hreflangToNonCanonical = defineCheck({
