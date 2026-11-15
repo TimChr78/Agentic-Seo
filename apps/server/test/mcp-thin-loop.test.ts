@@ -1,6 +1,7 @@
-import { runChangesApplyTask } from '@agentic-seo/change-sets';
+import { CHANGES_APPLY_TASK, runChangesApplyTask } from '@agentic-seo/change-sets';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type FakeGitHub, pageHtml, startFakeGitHub } from '../../../packages/change-sets/test/support';
+import { taskListFor } from '../src/workers';
 import { connectAgent, startTestServer, testPort, type User } from './harness';
 
 // The Phase 1 promise, over MCP: an agent reads a site's issues, drafts a recommendation that cites
@@ -166,16 +167,28 @@ describe('the thin loop over MCP', () => {
       );
       expect(requested.rows[0]).toEqual({ requested_by_type: 'agent', status: 'pending' });
 
-      // 6. A person approves through the executor, as the app does.
-      const approved = await t.api(approver, ws).call('approvals.approve', { approvalId });
-      expect(approved.status).toBe('approved');
+      // 6. A person approves through the executor, as the app does. The approval itself must queue
+      // the apply job (review of #24): record what the server enqueues instead of building it here.
+      const queued: { identifier: string; payload: Record<string, unknown> }[] = [];
+      const realEnqueue = t.srv.services.enqueueTask;
+      t.srv.services.enqueueTask = async (identifier: string, payload: Record<string, unknown>) => {
+        queued.push({ identifier, payload });
+      };
+      try {
+        const approved = await t.api(approver, ws).call('approvals.approve', { approvalId });
+        expect(approved.status).toBe('approved');
+      } finally {
+        t.srv.services.enqueueTask = realEnqueue;
+      }
+      expect(queued).toEqual([
+        { identifier: CHANGES_APPLY_TASK, payload: expect.objectContaining({ workspaceId: ws, artifactId: changeSetId }) },
+      ]);
+      // The worker registers that task (the handler below is what it runs).
+      expect(Object.keys(taskListFor(t.srv.db, t.srv.keyProvider))).toContain(CHANGES_APPLY_TASK);
 
-      // 7. The apply job opens exactly one pull request.
-      await runChangesApplyTask(
-        t.srv.db,
-        { workspaceId: ws, siteId, artifactId: changeSetId },
-        { kp: t.srv.keyProvider, github: github.seam },
-      );
+      // 7. The queued job opens exactly one pull request, even when it is delivered twice.
+      for (let delivery = 0; delivery < 2; delivery += 1)
+        await runChangesApplyTask(t.srv.db, queued[0]!.payload, { kp: t.srv.keyProvider, github: github.seam });
       expect(github.pullRequests).toHaveLength(1);
       const pr = github.pullRequests[0]!;
       expect(pr.base).toBe('main');

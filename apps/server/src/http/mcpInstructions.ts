@@ -9,9 +9,9 @@ Every capability is a command and every command is a tool here. Commands are gro
 
 The thin loop (Phase 1). Verify the site (sites.verify) → audits.run starts a crawl, bounded by pages and time → audits.status until it finishes → audits.issues says what is wrong, worst first, and audits.issue gives one issue's evidence → recommendations.create with that issue id as evidence (or recommendations.generate to have the two specialists draft them) → changes.create from the recommendation, using the types in change-types://catalogue → changes.requestApply; a person's request publishes, an agent's goes to review → a person approves in the app; agents cannot approve and approvals.approve is people-only → the apply job opens one pull request against the site's GitHub repository → changes.status shows pr_open, then merged, deployed and verified. Never invent a metric: every click, impression, position and score must come from a tool for this site.
 
-Resources carry context: artifact-types://catalogue, checks://catalogue, change-types://catalogue, learnings://current, site-context://<siteId> (the published site context) and issues://<siteId> (the open issues, worst first). The prompt audit-and-propose runs the loop above for one site.
+Resources carry context: artifact-types://catalogue, checks://catalogue, change-types://catalogue, learnings://current, site-context://<siteId> (the published site context) and issues://<siteId> (the top open issues by severity × traffic). The prompt audit-and-propose runs the loop above for one site.
 
-People-only commands (members.*, invitations.*, apiTokens.create/update/revoke, agents.pause/resume/revoke/update, approvals.*, recommendations.prioritise, connectors.github.connect/update/disconnect, search.gsc.connect/select/disconnect) can never be run with an agent credential, whatever scopes it has. If a task needs one, ask the person.
+People-only commands (members.*, invitations.*, apiTokens.create/update/revoke, agents.pause/resume/revoke/update, approvals.approve/reject, recommendations.prioritise, connectors.github.connect/update/disconnect, search.gsc.connect/select/disconnect) can never be run with an agent credential, whatever scopes it has. If a task needs one, ask the person.
 
 Secrets are write-only: secrets.list shows names and who changed them, never values; an agent is never granted secrets:write.
 

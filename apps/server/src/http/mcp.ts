@@ -215,10 +215,10 @@ export function mcpServerFor(
       name: 'issues',
       uriTemplate: 'issues://{siteId}',
       title: 'Open issues',
-      description: 'The site’s open issues, worst first by severity and affected pages, with the clicks over 28 days they put at risk.',
+      description:
+        'The site’s ten most important open issues, ranked by severity × the Search Console clicks over 28 days they put at risk (affected pages when there is no Search Console data).',
       commands: ['audits.issues'],
-      read: (siteId) =>
-        executor.execute(commandNamed('audits.issues'), { siteId, state: 'open', limit: 10 }, principal, { surface: 'mcp' }),
+      read: (siteId) => readTopIssues(principal, executor, siteId),
     },
   ];
   for (const template of templates) {
@@ -426,4 +426,37 @@ export function mcpEndpoint(deps: {
     const authInfo: AuthInfo = { token: '', clientId: principal.clientId!, scopes: [...principal.permissions], extra: { principal } };
     return handler.fetch(request, { authInfo });
   };
+}
+
+/** Severity weights for the issues resource's ranking: one severity step outweighs a 10× traffic gap. */
+const SEVERITY_WEIGHT: Record<string, number> = { critical: 10_000, high: 1_000, medium: 100, low: 10, info: 1 };
+/** The most open issues the resource reads before ranking; past this the ranking covers the first pages. */
+const ISSUES_RESOURCE_SCAN = 1_000;
+
+/**
+ * The issues resource: every open issue (up to a scan cap) read through `audits.issues`, ranked by
+ * severity × traffic touched, then the top ten. Ranking after reading, not before limiting, so a
+ * high-traffic issue is never cut by the command's severity-then-pages order.
+ */
+async function readTopIssues(principal: Principal, executor: Executor, siteId: string): Promise<unknown> {
+  const command = commandNamed('audits.issues');
+  type Page = { issues: { severity: string; clicks28d: number | null; affectedPages: number }[]; nextCursor: string | null } & Record<
+    string,
+    unknown
+  >;
+  const all: Page['issues'] = [];
+  let first: Page | null = null;
+  let cursor: string | undefined;
+  while (all.length < ISSUES_RESOURCE_SCAN) {
+    const page = (await executor.execute(command, { siteId, state: 'open', limit: 200, ...(cursor ? { cursor } : {}) }, principal, {
+      surface: 'mcp',
+    })) as Page;
+    first ??= page;
+    all.push(...page.issues);
+    if (!page.nextCursor) break;
+    cursor = page.nextCursor;
+  }
+  const traffic = (issue: Page['issues'][number]) => (issue.clicks28d ?? issue.affectedPages) + 1;
+  const ranked = [...all].sort((a, b) => (SEVERITY_WEIGHT[b.severity] ?? 1) * traffic(b) - (SEVERITY_WEIGHT[a.severity] ?? 1) * traffic(a));
+  return { ...(first ?? {}), issues: ranked.slice(0, 10), nextCursor: null, scanned: all.length };
 }

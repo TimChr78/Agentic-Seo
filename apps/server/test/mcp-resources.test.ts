@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { normalizePageUrl } from '@agentic-seo/search-data';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { connectAgent, startTestServer, testPort, type User } from './harness';
 
@@ -55,13 +57,19 @@ beforeAll(async () => {
   };
   await t.srv.db.admin.query(
     `INSERT INTO artifacts (workspace_id, id, type, name, latest_version, published_version, site_id)
-     VALUES ($1, $2, 'site_context', 'Site context', 1, 1, $3)`,
+     VALUES ($1, $2, 'site_context', 'Site context', 2, 1, $3)`,
     [wsA, contextId, siteA],
   );
   await t.srv.db.admin.query(
     `INSERT INTO artifact_versions (workspace_id, artifact_id, number, state, content, content_hash, author_type, author_id)
      VALUES ($1, $2, 1, 'published', $3::jsonb, 'context-hash', 'user', $4)`,
     [wsA, contextId, JSON.stringify(content), owner.id],
+  );
+  // A newer draft (review of #24): the resource must keep showing the published version.
+  await t.srv.db.admin.query(
+    `INSERT INTO artifact_versions (workspace_id, artifact_id, number, state, content, content_hash, author_type, author_id)
+     VALUES ($1, $2, 2, 'draft', $3::jsonb, 'context-draft-hash', 'user', $4)`,
+    [wsA, contextId, JSON.stringify({ ...content, businessOverview: 'DRAFT ONLY, not published.' }), owner.id],
   );
 
   // A finished crawl and two open issues, seeded as a crawl would leave them: the resources only
@@ -98,7 +106,31 @@ beforeAll(async () => {
       evaluatedPages: 2,
       evidence: { items: [{ subject: aboutUrl(), expected: 'A title' }], total: 1, truncated: false },
     },
+    {
+      // Medium severity but on the page with the traffic: ranks above the high issue on a page
+      // with none (review of #24: rank by severity × traffic before limiting).
+      id: `iss_${'3'.repeat(32)}`,
+      checkId: 'description.missing',
+      subjectKey: `${origin}/pricing/`,
+      subject: `${origin}/pricing/`,
+      severity: 'medium',
+      category: 'on_page',
+      affectedUrls: [`${origin}/pricing/`],
+      affectedPages: 1,
+      evaluatedPages: 2,
+      evidence: { items: [{ subject: `${origin}/pricing/`, expected: 'A description' }], total: 1, truncated: false },
+    },
   ];
+  await t.srv.db.admin.query(
+    `INSERT INTO connections (workspace_id, id, site_id, connector, label, settings, state)
+     VALUES ($1, $2, $3, 'google-search-console', 'Search Console', $4::jsonb, 'active')`,
+    [wsA, `con_${randomUUID().replaceAll('-', '')}`, siteA, JSON.stringify({ property: `sc-domain:${domain}` })],
+  );
+  await t.srv.db.admin.query(
+    `INSERT INTO gsc_page_aggregates (workspace_id, site_id, property, date, page, page_key, clicks, impressions, ctr, position)
+     VALUES ($1, $2, $3, CURRENT_DATE, $4, $5, 50, 500, 0.1, 3)`,
+    [wsA, siteA, `sc-domain:${domain}`, `${origin}/pricing/`, normalizePageUrl(`${origin}/pricing/`)],
+  );
   for (const issue of issues)
     await t.srv.db.admin.query(
       `INSERT INTO issues (workspace_id, id, site_id, check_id, subject_key, subject, state, severity, category,
@@ -149,12 +181,15 @@ describe('MCP resources', () => {
 
       const context = await jsonOf(agent.client, `site-context://${siteA}`);
       expect(context).toMatchObject({ siteId: siteA, version: 1, content: { businessOverview: 'We sell widgets to small workshops.' } });
+      expect(JSON.stringify(context)).not.toContain('DRAFT ONLY');
 
       const issues = await jsonOf(agent.client, `issues://${siteA}`);
       const list = issues.issues as { checkId: string; severity: string; state: string }[];
-      expect(list.map((issue) => issue.checkId)).toEqual(['robots_txt.blocks_all', 'title.missing']);
+      // Severity × traffic: the medium issue on the page with 50 clicks outranks the high one on a
+      // page with none; the critical site-wide one stays first.
+      expect(list.map((issue) => issue.checkId)).toEqual(['robots_txt.blocks_all', 'description.missing', 'title.missing']);
       expect(list.every((issue) => issue.state === 'open')).toBe(true);
-      expect(issues.hasGsc).toBe(false);
+      expect(issues.hasGsc).toBe(true);
     } finally {
       await agent.client.close();
     }
