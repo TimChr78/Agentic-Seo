@@ -187,6 +187,17 @@ export type AnyCommand = CommandDef<any, any, string>;
 export interface ExecuteOptions {
   surface: Surface;
   idempotencyKey?: string;
+  /**
+   * A gate the executor runs inside the command's own transaction, after the agent-policy lock and
+   * the agent's status read, and before the handler. A worker that needs to prove it still owns the
+   * work it is about to write uses it: the check and the write then commit or roll back together,
+   * so a precondition cannot be satisfied by a worker whose lease lapsed after checking.
+   *
+   * It must take no lock the caller could take before the agent-policy lock (see
+   * {@link lockAgentPolicy} for the one order), and must be safe to run twice: the executor retries
+   * a write after a serialization failure or deadlock.
+   */
+  precondition?: (tx: Tx) => Promise<void>;
 }
 
 export interface ExecutorOptions {
@@ -514,6 +525,11 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                     return replay;
                   }
                 }
+                // A caller's gate on executing the handler, inside this transaction so the check and
+                // the write share one commit (e.g. a worker's fencing token). Runs after the policy
+                // lock and the status read above, never before them, and before `impact` and the
+                // policy decision so a stale caller cannot spend a policy call.
+                if (opts.precondition) await opts.precondition(tx);
                 // ADR-0006: every agent write passes the policy engine before the handler runs.
                 if (agent && cmd.effect !== 'read') {
                   const impact = cmd.impact

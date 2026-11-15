@@ -140,6 +140,40 @@ A **specialist** is a versioned `skill` artifact. It holds a playbook (Markdown)
 
 **Full audit run.** The strategist detects the business type, then fans out the relevant specialists in parallel. Fan-out is bounded per workspace, with each specialist under its own budget. The strategist collects their structured outputs and synthesises them into recommendations. The synthesis follows claude-seo's PERCEIVE → ANALYZE → VALIDATE → ACT method, made structural: a recommendation without evidence ids, a hypothesis, a falsification check and a leading indicator fails output validation and is retried, then dropped with a reason.
 
+**Phase 1 implementation.** The run is `recommendations.generate`, which queues a job and returns a run id
+(`recommendations.runs` / `recommendations.run`). It has two specialists, seeded on first use as published
+`skill` artifacts per workspace — a **technical** one on the fast tier, which turns open issues into
+candidates, and the **strategist** on the deep tier, which writes the recommendations. Both calls use
+structured output over a bounded facts payload (open issues, pages, Search Console clicks, which change
+types the site can apply), reserve tokens against the `agents` provider's budget before the call and settle
+it after, and log the call with the playbook version they used.
+
+The synthesis fields are enforced by the recommendation content schema for **every** author, so a person
+writing one by hand is as falsifiable as an agent. The traffic at stake is computed from the evidence pages
+with the reach estimate; the input has no field for it. A status (`proposed`, `accepted`, `implemented`,
+`rejected`) is derived from the artifact's own lifecycle and the change sets whose content names it, never
+stored, so it cannot disagree with what happened; `measured` arrives with outcomes. Because a deleted audit
+takes its findings with it, a recommendation can be drafted on evidence that has since gone, but it cannot be
+published while an id no longer resolves.
+
+The run holds no special authority: each draft is created by `recommendations.create` under the specialist's
+own agents row (created on first use, with the person who asked for the run as its sponsor), so the workspace
+autonomy switch, mandates and the action ledger decide for a synthesis exactly as for an MCP client, and the
+`recommendation` type is server-owned: the generic artifact commands and `config.import` refuse it because
+they cannot compute the reach. The requester's authority is resolved when the job runs, not when it was
+queued: a run whose requester left the workspace, or whose role no longer includes `artifacts:write`, creates
+nothing and records why, and the specialist writes as its own minimal grant intersected with the requester's
+current role. The model's answer is parsed leniently into items and each item judged alone, so one missing
+field costs that item a retry (then a drop with its reason), not the whole run. Facts and candidates reach the
+model as escaped, delimited data with a system instruction that says they are data; the facts cap measures the
+exact string sent, and a retry's error instructions name items by position, with the model's own earlier
+answer carried in a separate untrusted block. A run row carries a fencing token bumped on every claim; the
+token is checked under a row lock inside the transaction that creates each draft, and the lease is renewed
+from the clock around every model call and write, so a worker whose lease lapsed can neither write a draft nor
+a terminal state after another worker took the run over. Which artifact is the platform's playbook is recorded
+in `recommendation_specialists` (workspace + specialist → artifact id), never inferred from a title, so a
+person's skill — even one titled like the built-in playbook — is never seeded over or used.
+
 ## 6. Opportunity detectors (deterministic, before the LLM)
 
 These are scheduled jobs over search facts and research data. They create **opportunities** that agents then turn into recommendations:
