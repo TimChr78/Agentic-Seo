@@ -1,0 +1,5 @@
+- Add the `checks` package: 68 deterministic checks across crawlability, indexability, status and links, on-page, structured data, images, security and international, each with a plain explanation, official references, an optional fix type, a pass fixture and a fail fixture.
+- Add `checks.catalogue` and `checks.explain`: read-only commands that list the catalogue with filters and return one check in full, including the exact definition the finalize step must evaluate for cross-page checks.
+- Add freshness rules as data in the checks package, with source and review date: FAQ rich results retired in May 2026, HowTo rich results deprecated, INP replacing FID, and Google declaring no required properties for Article and Organization. A script warns when a rule is more than six months unreviewed.
+- Add the generated `docs/architecture/check-catalogue.md`, with a test that fails when the committed table is stale.
+- Cap every finding’s evidence at 50 items with the true total, so one page with thousands of offending images or links cannot produce an unbounded finding.
