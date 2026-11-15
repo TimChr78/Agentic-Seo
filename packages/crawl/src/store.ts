@@ -182,8 +182,10 @@ export async function markFrontier(
   chunk: number,
   state: 'crawled' | 'skipped',
   skipReason: string | null,
-): Promise<void> {
-  await tx
+): Promise<number> {
+  // Returns the rows moved out of `leased` (0 or 1): the page counter's delta comes from this
+  // transition, the same one `refreshCounters` counts, so live progress never runs ahead of it.
+  const moved = await tx
     .update(schema.crawlFrontier)
     .set({ state, skipReason, leaseChunk: null, leaseExpiresAt: null })
     .where(
@@ -194,7 +196,9 @@ export async function markFrontier(
         eq(schema.crawlFrontier.state, 'leased'),
         eq(schema.crawlFrontier.leaseChunk, chunk),
       ),
-    );
+    )
+    .returning({ urlHash: schema.crawlFrontier.urlHash });
+  return moved.length;
 }
 
 /** Releases a chunk's leases; a killed or over-deadline chunk calls it, and so does a retry. */
@@ -239,7 +243,7 @@ export async function refreshCounters(tx: Tx, workspaceId: string, auditId: stri
 
 /** What one committed page adds to the counters; every field is a delta, not a total. */
 export interface PageProgressDelta {
-  /** 1 when the page's snapshot was new, 0 when the page was re-stored. */
+  /** 1 when this commit moved the page's frontier row from leased to crawled (robots skips are 0). */
   crawled: number;
   /** 1 when the new page failed to load (a fetch error or a 5xx status). */
   failed: number;

@@ -35,6 +35,8 @@ export interface SitemapDocument {
   errors: string[];
   /** Decompressed bytes read, for the aggregate cap. */
   bytes: number;
+  /** The file was read only in part (over 10 MB, or more than the per-file URL limit). */
+  truncated?: boolean;
 }
 
 /** Parses a sitemap XML document (urlset or sitemapindex) from its text. */
@@ -154,6 +156,7 @@ export async function fetchSitemap(
     urls,
     errors: [...errors, ...parsed.errors],
     bytes: Buffer.byteLength(text, 'utf8'),
+    truncated: result.truncated || parsed.urls.length > SITEMAP_MAX_URLS,
   };
 }
 
@@ -253,7 +256,11 @@ export async function readSitemaps(options: ReadSitemapsOptions): Promise<ReadSi
     const batch = queue;
     queue = [];
     for (const { url, depth } of batch) {
-      if (pages.length >= maxUrls || stopped) break;
+      if (stopped) break;
+      if (pages.length >= maxUrls) {
+        stop(`The sitemaps list more than ${maxUrls} pages; the remaining sitemaps were not read.`);
+        break;
+      }
       if (documents.length >= maxDocuments) {
         stop(`The sitemap read stopped after ${maxDocuments} documents; the rest are not read.`);
         break;
@@ -279,6 +286,9 @@ export async function readSitemaps(options: ReadSitemapsOptions): Promise<ReadSi
         urlCount: document.urls.length,
         errors: document.errors,
       });
+      // A file read only in part lists fewer URLs than the site has: discovery is incomplete even
+      // though the read goes on, so the audit's coverage must say so.
+      if (document.truncated) truncation.push(`${document.url} was read only in part.`);
       if (totalBytes >= maxTotalBytes) {
         stop(
           `The sitemap read stopped after ${Math.max(1, Math.round(maxTotalBytes / (1024 * 1024)))} MB of sitemaps; the rest are not read.`,
@@ -287,7 +297,9 @@ export async function readSitemaps(options: ReadSitemapsOptions): Promise<ReadSi
       }
       if (document.kind === 'index') {
         if (depth >= SITEMAP_MAX_INDEX_DEPTH) {
-          documents.at(-1)?.errors.push(`The index is nested ${depth + 1} levels deep; only ${SITEMAP_MAX_INDEX_DEPTH} are followed.`);
+          const message = `The index is nested ${depth + 1} levels deep; only ${SITEMAP_MAX_INDEX_DEPTH} are followed.`;
+          documents.at(-1)?.errors.push(message);
+          truncation.push(`${document.url}: ${message}`);
           continue;
         }
         for (const child of document.urls) {
@@ -304,14 +316,20 @@ export async function readSitemaps(options: ReadSitemapsOptions): Promise<ReadSi
       }
       if (document.kind !== 'urlset') continue;
       for (const entry of document.urls) {
-        if (pages.length >= maxUrls) break;
         const pageUrl = normalizeUrl(entry);
         if (!pageUrl || !isInternalUrl(pageUrl, options.hosts) || seenPages.has(pageUrl)) continue;
+        if (pages.length >= maxUrls) {
+          stop(`The sitemaps list more than ${maxUrls} pages; only the first ${maxUrls} are used.`);
+          break;
+        }
         seenPages.add(pageUrl);
         pages.push(pageUrl);
       }
     }
   }
+  // The URL cap ended the read with sitemaps still queued: those were never read.
+  if (!stopped && queue.length > 0 && pages.length >= maxUrls)
+    stop(`The sitemaps list more than ${maxUrls} pages; ${queue.length} sitemap${queue.length === 1 ? ' was' : 's were'} not read.`);
 
   return { documents, urls: pages, truncation };
 }

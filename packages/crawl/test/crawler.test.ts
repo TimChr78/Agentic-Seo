@@ -484,6 +484,66 @@ describe.skipIf(!hasTestDatabase())('crawl engine', () => {
     expect(result.released).toBe(4);
   });
 
+  it('aborts and settles in-flight work before a failed cancellation read propagates (review round 3)', async () => {
+    const audit = await newAudit({ limits: { maxPages: 10, maxDepth: 10, maxDurationMs: 30 * 60 * 1000 } });
+    await setFrontier(
+      ctx.db,
+      ws,
+      audit.id,
+      ['a', 'b'].map((name) => ({ url: `${fixture.origin}/${name}`, depth: 0 })),
+    );
+    const signals: AbortSignal[] = [];
+    const limiter = new NeverGrantingLimiter();
+    const acquire = limiter.acquire.bind(limiter);
+    limiter.acquire = (host, options = {}) => {
+      if (options.signal) signals.push(options.signal);
+      return acquire(host, options);
+    };
+    // Every database call after the slots are waiting is a cancellation poll: make it fail.
+    let failing = false;
+    const db = new Proxy(ctx.db, {
+      get(target, prop, receiver) {
+        if (prop === 'withWorkspace' && failing) return async () => Promise.reject(new Error('the database went away'));
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const chunk = runCrawlChunk(
+      db,
+      { workspaceId: ws, auditId: audit.id, chunk: await nextChunkNumber(ctx.db) },
+      { limiter, version: 'test', chunkSize: 2, softDeadlineMs: 60_000, cancelPollMs: 50 },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    failing = true;
+    await expect(chunk).rejects.toThrow(/database went away/);
+    expect(signals.length).toBeGreaterThan(0);
+    for (const signal of signals) expect(signal.aborted).toBe(true);
+  });
+
+  it('counts a robots-skipped page as discovered, never as crawled, while the crawl runs (review round 3)', async () => {
+    const audit = await newAudit({ limits: { maxPages: 10, maxDepth: 10, maxDurationMs: 30 * 60 * 1000 } });
+    await setFrontier(ctx.db, ws, audit.id, [
+      { url: `${fixture.origin}/private/secret`, depth: 0 },
+      { url: `${fixture.origin}/a`, depth: 0 },
+    ]);
+    const seen: { counter: number; crawledRows: number }[] = [];
+    const boundary = async (point: string) => {
+      if (point !== 'afterPageCommit') return;
+      const row = await auditRow(ctx.db, ws, audit.id);
+      const rows = await frontierRows(ctx.db, ws, audit.id);
+      seen.push({ counter: Number(row?.pages_crawled), crawledRows: rows.filter((r) => r.state === 'crawled').length });
+    };
+    await runCrawlChunk(
+      ctx.db,
+      { workspaceId: ws, auditId: audit.id, chunk: await nextChunkNumber(ctx.db) },
+      { limiter: limiterFor(ctx.db), version: 'test', chunkSize: 2, softDeadlineMs: 60_000, boundary },
+    );
+    expect(seen).toHaveLength(2);
+    // Live progress, before any recount: the counter always equals the crawled frontier rows.
+    for (const point of seen) expect(point.counter).toBe(point.crawledRows);
+    const rows = await frontierRows(ctx.db, ws, audit.id);
+    expect(rows.find((r) => r.url.endsWith('/private/secret'))?.state).toBe('skipped');
+  });
+
   it('postpones the successor past a host pause that outlives the chunk', async () => {
     const audit = await newAudit({ limits: { maxPages: 10, maxDepth: 10, maxDurationMs: 30 * 60 * 1000 } });
     await setFrontier(ctx.db, ws, audit.id, [{ url: `${fixture.origin}/a`, depth: 0 }]);

@@ -639,7 +639,7 @@ async function storePageResult(
     // Discoveries are persisted before the page is marked crawled (crawler-and-audits.md §2), so a
     // crash between the two cannot lose them.
     const discovered = await storeDiscoveries(tx, workspaceId, auditId, discoveries);
-    await markFrontier(
+    const moved = await markFrontier(
       tx,
       workspaceId,
       auditId,
@@ -649,7 +649,9 @@ async function storePageResult(
       facts.robotsAllowed ? null : 'robots',
     );
     await recordPageProgress(tx, workspaceId, auditId, context.now(), {
-      crawled: inserted ? 1 : 0,
+      // The frontier transition, not the snapshot insert: a robots-disallowed page gets a snapshot
+      // but is skipped, and `refreshCounters` counts crawled frontier rows.
+      crawled: moved && facts.robotsAllowed ? 1 : 0,
       failed: inserted && (facts.status >= 500 || facts.fetchError !== null) ? 1 : 0,
       discovered,
     });
@@ -851,43 +853,54 @@ export async function runCrawlChunk(db: Db, payload: CrawlChunkPayload, options:
     inFlight.add(task);
   };
 
-  while (!stopped && (cursor < leased.rows.length || inFlight.size > 0)) {
-    while (!stopped && inFlight.size < concurrency && cursor < leased.rows.length) {
-      if (now() > deadline) {
-        stopped = true;
-        controller.abort(new Error('the crawl chunk reached its soft deadline'));
-        break;
-      }
-      // Cancellation is checked every few pages (a workspace-scoped read costs a round trip per
-      // check); the command's copy says the chunk stops within a few pages, which this keeps true.
-      if (pagesSinceStopCheck >= 5) {
-        pagesSinceStopCheck = 0;
-        if (await auditStopped(db, payload.workspaceId, payload.auditId)) {
+  // Any error in the loop itself (a failed cancellation read) must still abort and settle the pages
+  // in flight and clear the timers before it propagates: a retry of this job must never run while
+  // this invocation still holds requests or limiter waits.
+  try {
+    while (!stopped && (cursor < leased.rows.length || inFlight.size > 0)) {
+      while (!stopped && inFlight.size < concurrency && cursor < leased.rows.length) {
+        if (now() > deadline) {
           stopped = true;
-          controller.abort(new Error('the audit was cancelled'));
+          controller.abort(new Error('the crawl chunk reached its soft deadline'));
           break;
         }
+        // Cancellation is checked every few pages (a workspace-scoped read costs a round trip per
+        // check); the command's copy says the chunk stops within a few pages, which this keeps true.
+        if (pagesSinceStopCheck >= 5) {
+          pagesSinceStopCheck = 0;
+          if (await auditStopped(db, payload.workspaceId, payload.auditId)) {
+            stopped = true;
+            controller.abort(new Error('the audit was cancelled'));
+            break;
+          }
+        }
+        launch(leased.rows[cursor++] as FrontierRow);
+        pagesSinceStopCheck += 1;
       }
-      launch(leased.rows[cursor++] as FrontierRow);
-      pagesSinceStopCheck += 1;
+      if (inFlight.size === 0) break;
+      // Cancellation must not wait out a limiter pause or a slow host: while pages are out, poll the
+      // audit every `cancelPollMs` and abort the shared controller, which rejects every limiter wait
+      // and fetch the chunk still holds, so the leases are released within a few seconds.
+      let pollTimer: NodeJS.Timeout | undefined;
+      const settled = await Promise.race([
+        Promise.race(inFlight).then(() => 'page' as const),
+        new Promise<'poll'>((resolve) => {
+          pollTimer = setTimeout(() => resolve('poll'), options.cancelPollMs ?? 2_000);
+          pollTimer.unref?.();
+        }),
+      ]);
+      clearTimeout(pollTimer);
+      if (settled === 'poll' && !stopped && (await auditStopped(db, payload.workspaceId, payload.auditId))) {
+        stopped = true;
+        controller.abort(new Error('the audit was cancelled'));
+      }
     }
-    if (inFlight.size === 0) break;
-    // Cancellation must not wait out a limiter pause or a slow host: while pages are out, poll the
-    // audit every `cancelPollMs` and abort the shared controller, which rejects every limiter wait
-    // and fetch the chunk still holds, so the leases are released within a few seconds.
-    let pollTimer: NodeJS.Timeout | undefined;
-    const settled = await Promise.race([
-      Promise.race(inFlight).then(() => 'page' as const),
-      new Promise<'poll'>((resolve) => {
-        pollTimer = setTimeout(() => resolve('poll'), options.cancelPollMs ?? 2_000);
-        pollTimer.unref?.();
-      }),
-    ]);
-    clearTimeout(pollTimer);
-    if (settled === 'poll' && !stopped && (await auditStopped(db, payload.workspaceId, payload.auditId))) {
-      stopped = true;
-      controller.abort(new Error('the audit was cancelled'));
-    }
+  } catch (error) {
+    stopped = true;
+    controller.abort(new Error('the crawl chunk failed'));
+    await Promise.allSettled([...inFlight]);
+    clearTimeout(deadlineTimer);
+    throw error;
   }
 
   // Wait for the pages already in flight, then decide the chunk's future. Nothing outlives the chunk:

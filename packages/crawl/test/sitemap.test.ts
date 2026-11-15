@@ -95,6 +95,30 @@ describe('readSitemaps', () => {
       fetch: async (url) => response(url, documents.get(url) ?? ''),
     });
     expect(capped.urls).toEqual(['https://example.com/a']);
+    // The URL cap left pages unread: discovery is incomplete and the read says so (review round 3).
+    expect(capped.truncation.join(' ')).toMatch(/more than 1 pages/);
+    expect(read.truncation).toEqual([]);
+  });
+
+  it('records truncation when one urlset holds more pages than the cap (review round 3)', async () => {
+    const read = await readSitemaps({
+      startUrls: ['https://example.com/s.xml'],
+      hosts,
+      maxUrls: 1,
+      fetch: async (url) =>
+        response(url, '<urlset><url><loc>https://example.com/a</loc></url><url><loc>https://example.com/b</loc></url></urlset>'),
+    });
+    expect(read.urls).toEqual(['https://example.com/a']);
+    expect(read.truncation.join(' ')).toMatch(/more than 1 pages/);
+  });
+
+  it('records truncation for a sitemap file read only in part (review round 3)', async () => {
+    const read = await readSitemaps({
+      startUrls: ['https://example.com/s.xml'],
+      hosts,
+      fetch: async (url) => response(url, '<urlset><url><loc>https://example.com/a</loc></url></urlset>', { truncated: true }),
+    });
+    expect(read.truncation.join(' ')).toMatch(/read only in part/);
   });
 
   it('stops following an index after three levels', async () => {
@@ -106,6 +130,8 @@ describe('readSitemaps', () => {
     });
     expect(read.documents).toHaveLength(4);
     expect(read.documents.at(-1)?.errors.join(' ')).toMatch(/only 3 are followed/);
+    // The depth cap drops the deeper sitemaps: that is truncated discovery too (review round 3).
+    expect(read.truncation.join(' ')).toMatch(/only 3 are followed/);
   });
 
   it('bounds the fan-out by documents, queued sitemaps, bytes and time, recording the truncation', async () => {
