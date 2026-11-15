@@ -1,4 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import v8 from 'node:v8';
+import vm from 'node:vm';
 import { createExecutor } from '@agentic-seo/commands';
 import { finalizeAudit, type PageFacts, snapshotId, urlHash } from '@agentic-seo/crawl';
 import { createDb, type Db } from '@agentic-seo/db';
@@ -11,6 +13,18 @@ import { type PageFactsOverrides, pageFacts, siteFacts } from './fixtures';
 // have left them and then calls the real `finalizeAudit` — the public entry point of the hooks.
 
 export const services = { serverVersion: 'test', strictInputs: false, keyProvider: {} as never };
+
+/**
+ * A `gc` that works without `--expose-gc`: Node exposes the collector once the flag is set at
+ * runtime (v8.setFlagsFromString + a fresh VM context). A memory test calls it before the baseline
+ * and before every sample, so it measures live heap, not garbage an earlier batch left behind.
+ */
+export function forceGc(): () => void {
+  const existing = (globalThis as { gc?: () => void }).gc;
+  if (existing) return existing;
+  v8.setFlagsFromString('--expose-gc');
+  return vm.runInNewContext('gc') as () => void;
+}
 
 const appUrl = (url: URL): string => {
   const copy = new URL(url.toString());

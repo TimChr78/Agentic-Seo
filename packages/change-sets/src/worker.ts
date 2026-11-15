@@ -55,6 +55,7 @@ export async function runChangesApplyTask(db: Db, raw: unknown, deps: ChangeSetT
   const result = await runChangesApply(db, payload, {
     kp: deps.kp,
     ...(deps.github ? { github: deps.github } : {}),
+    ...(deps.siteUrlFor ? { siteUrlFor: deps.siteUrlFor } : {}),
     ...(deps.now ? { now: deps.now } : {}),
   });
   if (result.status === 'stale' || result.status === 'failed') {

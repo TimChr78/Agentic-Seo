@@ -9,6 +9,7 @@ import { activeConnection, commandClient, type GitHubConnection, githubAppError,
 import { draftChanges, inverseOf } from './draft';
 import { changeSetImpact, contentOfRun, sourcePathsOf } from './impact';
 import { describeRevalidation, revalidateChangeSet } from './revalidate';
+import type { SiteHosts } from './site-host';
 import {
   actorOf,
   type ChangeSetRun,
@@ -218,7 +219,7 @@ async function draftingContext(ctx: CommandContext, siteId: string, siteName: st
 
 interface DraftInput {
   siteId: string;
-  siteName: string;
+  site: SiteHosts;
   title: string;
   summary: string;
   changes: Change[];
@@ -237,16 +238,18 @@ interface DraftInput {
  */
 async function revalidationProblems(
   ctx: CommandContext,
-  input: { siteId: string; siteName: string; content: Parameters<typeof revalidateChangeSet>[0] },
+  input: { siteId: string; site: SiteHosts; content: Parameters<typeof revalidateChangeSet>[0] },
 ) {
   const connection = await activeConnection(ctx.tx, {
     workspaceId: ctx.principal.workspaceId,
     siteId: input.siteId,
     kp: ctx.services.keyProvider,
-    siteName: `“${input.siteName}”`,
+    siteName: `“${input.site.name}”`,
   });
   const client = await commandClient(ctx, connection);
   return revalidateChangeSet(input.content, {
+    site: input.site,
+    ...(ctx.services.siteUrlFor ? { originFor: ctx.services.siteUrlFor } : {}),
     mapping: connection.settings.mapping,
     listFiles: async (prefix, ref) =>
       (
@@ -265,8 +268,10 @@ async function revalidationProblems(
 
 /** Resolves and applies every change; the content is only built when something can be written. */
 async function draftFor(ctx: CommandContext, input: DraftInput) {
-  const drafting = await draftingContext(ctx, input.siteId, input.siteName);
+  const drafting = await draftingContext(ctx, input.siteId, input.site.name);
   const draft = await draftChanges(input.changes, {
+    site: input.site,
+    ...(ctx.services.siteUrlFor ? { originFor: ctx.services.siteUrlFor } : {}),
     mapping: drafting.mapping,
     baseSha: drafting.baseSha,
     listFiles: drafting.listFiles,
@@ -410,7 +415,7 @@ export const changesCreate = defineCommand({
   target: (input) => input.siteId,
   handler: async (input, ctx) => {
     const site = await loadSite(ctx.tx, ctx.principal.workspaceId, input.siteId);
-    const { drafting, draft, content } = await draftFor(ctx, { ...input, siteName: site.name });
+    const { drafting, draft, content } = await draftFor(ctx, { ...input, site });
     if (!content) {
       return {
         created: false,
@@ -584,7 +589,7 @@ export const changesUpdateDraft = defineCommand({
     const recommendationId = input.recommendationId ?? (old.recommendationId as string | undefined);
     const { draft, content } = await draftFor(ctx, {
       siteId: site.id,
-      siteName: site.name,
+      site,
       title: input.title ?? String(old.title ?? artifact.name),
       summary: input.summary ?? String(old.summary ?? ''),
       changes,
@@ -1009,7 +1014,7 @@ export const changesRequestApply = defineCommand({
     // The source details are server-owned: re-derive them from the repository at the commit this
     // version was drafted from. A forged path, hash or diff never reaches a policy decision or an
     // approval request.
-    const problems = await revalidationProblems(ctx, { siteId: run.siteId, siteName: site.name, content });
+    const problems = await revalidationProblems(ctx, { siteId: run.siteId, site, content });
     if (problems.length) {
       throw new AppError(
         'precondition_failed',
@@ -1241,7 +1246,7 @@ export const changesRollback = defineCommand({
     const summary = `Rolls back change set ${input.changeSetId}. ${input.note}`.slice(0, 2000);
     const { draft, content: drafted } = await draftFor(ctx, {
       siteId: site.id,
-      siteName: site.name,
+      site,
       title,
       summary,
       changes: inverses,

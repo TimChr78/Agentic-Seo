@@ -1,7 +1,16 @@
 import { finalizeAudit } from '@agentic-seo/crawl';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { hasTestDatabase } from '../../db/test/disposable';
-import { type AuditTestContext, addSite, createAuditTestContext, goodPage, type SeedAuditInput, scoreRow, seedAudit } from './support';
+import {
+  type AuditTestContext,
+  addSite,
+  createAuditTestContext,
+  forceGc,
+  goodPage,
+  type SeedAuditInput,
+  scoreRow,
+  seedAudit,
+} from './support';
 
 // Finalize is bounded (crawler-and-audits.md §1 "Bounded memory"): the crawl tables are aggregated in
 // SQL and per-page work runs in keyset batches, so peak heap is a function of the batch size, not of
@@ -10,7 +19,9 @@ import { type AuditTestContext, addSite, createAuditTestContext, goodPage, type 
 //
 // The first test reports the 2,000-page timing the earlier round used. The second builds the
 // link-heavy, failure-heavy audit the review asked for (30 internal links a page, broken and
-// redirecting targets, duplicate-title groups, page checks on) and asserts peak heap growth.
+// redirecting targets, duplicate-title groups, page checks on) and asserts peak *live* heap growth:
+// the collector runs before the baseline and before every sample, so garbage from an earlier batch
+// cannot be counted as retained memory and make the bound flaky.
 
 const PAGES = 5_000;
 const LINKS_PER_PAGE = 30;
@@ -117,17 +128,25 @@ describe.skipIf(!hasTestDatabase())('finalize at scale', () => {
 
   it('bounds peak heap growth on a 5,000-page, 150,000-edge audit', async () => {
     const auditId = await seedAudit(ctx.db, ws, siteId, { ...heavyAudit(), finalize: false });
+    // Live heap, not `heapUsed`: collect before the baseline and before every sample, so parsing
+    // garbage from the batches does not read as memory finalize holds (CI once saw 63.5 MB against a
+    // 60 MB bound for that reason). 100 ms is often enough to catch the peak and cheap enough to
+    // leave the measured work the dominant cost.
+    const collect = forceGc();
+    collect();
     const before = process.memoryUsage().heapUsed;
     let peak = before;
     const sampler = setInterval(() => {
+      collect();
       peak = Math.max(peak, process.memoryUsage().heapUsed);
-    }, 10);
+    }, 100);
 
     const started = performance.now();
     try {
       expect(await finalizeAudit(ctx.db, { workspaceId: ws, auditId })).toBe(true);
     } finally {
       clearInterval(sampler);
+      collect();
     }
     const durationMs = performance.now() - started;
     const growthMb = (peak - before) / (1024 * 1024);

@@ -3,7 +3,7 @@ import { actionClassFor, type Change, urlOf } from '@agentic-seo/changes';
 import type { ActionClass, Impact, ReachEstimate } from '@agentic-seo/commands';
 import { AppError } from '@agentic-seo/core';
 import { schema, type Tx } from '@agentic-seo/db';
-import { estimateReach } from '@agentic-seo/search-data';
+import { estimateReach, normalizePageUrl } from '@agentic-seo/search-data';
 import { and, eq, inArray } from 'drizzle-orm';
 import { findGitHubConnection, GITHUB_CONNECTOR_ID } from './connector';
 import { type ChangeSetRun, findRun, OPEN_STATES } from './state';
@@ -28,12 +28,37 @@ export function strongestClass(changes: readonly Change[]): ActionClass {
   return strongest;
 }
 
-/** Every URL a change set touches: what each change is about, plus the routes its source reaches. */
-export function affectedUrlsOf(content: ChangeSetContent): string[] {
+/**
+ * A URL or route made absolute against the site origin, or null when it cannot be one. A change URL
+ * is already absolute; a mapping route (`/about/`) and a redirect source (`/old/`) are paths, and
+ * they mean the site's own page.
+ */
+function resolvedUrl(value: string, origin: string | null): string | null {
+  try {
+    return origin ? new URL(value, `${origin}/`).toString() : new URL(value).toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every URL a change set touches: what each change is about, plus the routes its source reaches.
+ *
+ * A change URL is absolute but a source's affected routes and a redirect's source are relative, so
+ * every value is resolved against the site origin (https on its primary domain), normalised with
+ * `normalizePageUrl` — the same page identity `estimateReach` matches `page_key` with — and
+ * deduplicated. `/about/` and `https://example.com/about/` are then one page, counted once, and a
+ * redirect source matches the Search Console row for the URL it moves rather than the literal `/old/`.
+ */
+export function affectedUrlsOf(content: ChangeSetContent, origin: string | null): string[] {
   const urls = new Set<string>();
+  const add = (value: string) => {
+    const resolved = resolvedUrl(value, origin);
+    if (resolved) urls.add(normalizePageUrl(resolved));
+  };
   for (const drafted of content.changes) {
-    urls.add(urlOf(drafted.change));
-    for (const route of drafted.source.affectedRoutes) urls.add(route);
+    add(urlOf(drafted.change));
+    for (const route of drafted.source.affectedRoutes) add(route);
   }
   return [...urls];
 }
@@ -62,10 +87,14 @@ export interface ChangeSetConflict {
  * Another open change set on the same site that touches the same URL or the same source file. Two
  * changes to one file drafted against the same base commit race: whichever is applied second
  * overwrites the other's edit, so the second needs a person's decision with the first named.
+ *
+ * A URL is compared in its resolved, normalised form (see `affectedUrlsOf`), so a set that names
+ * https://example.com/about/ and one that names the mapping route /about/ conflict, as they must.
  */
 export async function conflictsFor(
   tx: Tx,
   input: { workspaceId: string; siteId: string; artifactId: string; content: ChangeSetContent },
+  origin: string | null,
 ): Promise<ChangeSetConflict[]> {
   const rows = await tx
     .select()
@@ -80,13 +109,13 @@ export async function conflictsFor(
   const others = rows.filter((row) => row.artifactId !== input.artifactId);
   if (!others.length) return [];
 
-  const urls = new Set(affectedUrlsOf(input.content));
+  const urls = new Set(affectedUrlsOf(input.content, origin));
   const paths = new Set(sourcePathsOf(input.content));
   const conflicts: ChangeSetConflict[] = [];
   for (const other of others) {
     const content = await contentOfRun(tx, other);
     if (!content) continue;
-    const sharedUrls = affectedUrlsOf(content).filter((url) => urls.has(url));
+    const sharedUrls = affectedUrlsOf(content, origin).filter((url) => urls.has(url));
     const sharedPaths = sourcePathsOf(content).filter((path) => paths.has(path));
     if (sharedUrls.length || sharedPaths.length) {
       conflicts.push({ artifactId: other.artifactId, title: content.title, urls: sharedUrls, paths: sharedPaths });
@@ -156,15 +185,25 @@ async function originContentOf(tx: Tx, workspaceId: string, rollbackOf: string):
   return origin ? contentOfRun(tx, origin) : null;
 }
 
+/** The origin a change set's relative routes resolve against: https on the site's primary domain. */
+async function siteOriginOf(tx: Tx, workspaceId: string, siteId: string): Promise<string | null> {
+  const [site] = await tx
+    .select({ domain: schema.sites.primaryDomain })
+    .from(schema.sites)
+    .where(and(eq(schema.sites.workspaceId, workspaceId), eq(schema.sites.id, siteId)));
+  return site ? `https://${site.domain}` : null;
+}
+
 /** The impact of publishing one change set, from its content (or the original it rolls back). */
 export async function changeSetImpact(
   tx: Tx,
   input: { workspaceId: string; siteId: string; artifactId: string; content: ChangeSetContent; rollbackOf?: string | null },
 ): Promise<ChangeSetImpactResult> {
   const basis = input.rollbackOf ? ((await originContentOf(tx, input.workspaceId, input.rollbackOf)) ?? input.content) : input.content;
-  const urls = affectedUrlsOf(basis);
+  const origin = await siteOriginOf(tx, input.workspaceId, input.siteId);
+  const urls = affectedUrlsOf(basis, origin);
   const reach = await estimateReach(tx, { workspaceId: input.workspaceId, siteId: input.siteId, urls });
-  const conflicts = await conflictsFor(tx, input);
+  const conflicts = await conflictsFor(tx, input, origin);
   const needsPerson: string[] = [];
   const redirects = redirectCount(input.content);
   if (redirects > MAX_REDIRECTS_PER_CHANGE_SET) {

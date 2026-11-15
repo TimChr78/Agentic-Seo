@@ -40,6 +40,32 @@ interface Sums {
 
 const unknown = (reason: string): ReachEstimate => ({ kind: 'unknown', reason });
 
+/** The only search surface Phase 1 syncs; Phase 2 adds types without a rewrite. */
+export const PHASE1_SEARCH_TYPE = 'web';
+
+/**
+ * Where a site's Search Console numbers come from: the live connection's selected property and the
+ * web search type. Every reader that sums `gsc_page_aggregates` (reach, recommendation evidence and
+ * the facts payload) goes through this, so two properties a person connected over the years are
+ * never added together. `reason` is written for a person and names what to do next.
+ */
+export type GscScope = { ok: true; property: string; searchType: string } | { ok: false; reason: string };
+
+export async function gscScopeOf(tx: Tx, workspaceId: string, siteId: string): Promise<GscScope> {
+  // The live connection, never the revoked history beside it: after a disconnect and a reconnect the
+  // estimate must read the replacement, not the first row the planner happens to return.
+  const connection = await findLiveConnection(tx, workspaceId, siteId, GSC_CONNECTOR_ID);
+  if (!connection) return { ok: false, reason: 'Search Console is not connected for this site' };
+  if (connection.state !== 'active')
+    return {
+      ok: false,
+      reason: `Search Console needs to be reconnected for this site${connection.lastError ? `: ${connection.lastError}` : ''}`,
+    };
+  const property = connection.settings.property;
+  if (typeof property !== 'string' || !property) return { ok: false, reason: 'No Search Console property is selected for this site' };
+  return { ok: true, property, searchType: PHASE1_SEARCH_TYPE };
+}
+
 export async function estimateReach(tx: Tx, input: ReachInput): Promise<ReachEstimate> {
   const now = input.now ?? new Date();
   const today = searchConsoleToday(now);
@@ -50,14 +76,9 @@ export async function estimateReach(tx: Tx, input: ReachInput): Promise<ReachEst
     .where(and(eq(schema.sites.workspaceId, input.workspaceId), eq(schema.sites.id, input.siteId)));
   if (!site) return unknown('This site does not exist in this workspace, so its traffic at risk cannot be estimated.');
 
-  // The live connection, never the revoked history beside it: after a disconnect and a reconnect the
-  // estimate must read the replacement, not the first row the planner happens to return.
-  const connection = await findLiveConnection(tx, input.workspaceId, input.siteId, GSC_CONNECTOR_ID);
-  if (!connection) return unknown('Search Console is not connected for this site');
-  if (connection.state !== 'active')
-    return unknown(`Search Console needs to be reconnected for this site${connection.lastError ? `: ${connection.lastError}` : ''}`);
-  const property = connection.settings.property;
-  if (typeof property !== 'string' || !property) return unknown('No Search Console property is selected for this site');
+  const scope = await gscScopeOf(tx, input.workspaceId, input.siteId);
+  if (!scope.ok) return unknown(scope.reason);
+  const { property } = scope;
 
   const [latest] = await tx
     .select({ date: sql<string | null>`max(${schema.gscPageAggregates.date})::text` })
@@ -67,6 +88,7 @@ export async function estimateReach(tx: Tx, input: ReachInput): Promise<ReachEst
         eq(schema.gscPageAggregates.workspaceId, input.workspaceId),
         eq(schema.gscPageAggregates.siteId, input.siteId),
         eq(schema.gscPageAggregates.property, property),
+        eq(schema.gscPageAggregates.searchType, scope.searchType),
       ),
     );
   const latestDate = latest?.date ?? null;
@@ -99,6 +121,7 @@ export async function estimateReach(tx: Tx, input: ReachInput): Promise<ReachEst
       WHERE workspace_id = ${input.workspaceId}
         AND site_id = ${input.siteId}
         AND property = ${property}
+        AND search_type = ${scope.searchType}
         AND page_key = ANY(ARRAY[${sql.join(
           keys.map((key) => sql`${key}`),
           sql`, `,

@@ -7,6 +7,7 @@ import {
   importConfig,
   requestPublish,
 } from '@agentic-seo/artifacts';
+import { sourceHashOf } from '@agentic-seo/changes';
 import {
   type AgentActionEntry,
   type AnyCommand,
@@ -116,6 +117,9 @@ describe.skipIf(!hasTestDatabase())('change sets and the GitHub connector', () =
     keyProvider: kp,
     publicUrl: 'https://seo.example.test',
     github: github.seam,
+    // Production checks a change URL against https on the site's domain; the fixture has a port, so
+    // the seam answers with its origin. What the invariant allows is otherwise unchanged.
+    siteUrlFor: () => site.origin,
     enqueueTask: async (identifier: string, payload: Record<string, unknown>) => {
       jobs.push({ identifier, payload });
     },
@@ -1114,20 +1118,22 @@ describe.skipIf(!hasTestDatabase())('change sets and the GitHub connector', () =
     expect(JSON.stringify(content.content)).toContain('Even newer about');
   });
 
-  /** A live Search Console connection and one fresh page row, so a reach estimate is known. */
-  async function seedSearchConsole() {
+  /** A live Search Console connection and fresh page rows, so a reach estimate is known. */
+  async function seedSearchConsole(rows: { url: string; clicks: number }[] = [{ url: `${site.origin}/about/`, clicks: 12 }]) {
     const property = `sc-domain:${domain}`;
     await db.admin.query(
       `INSERT INTO connections (workspace_id, id, site_id, connector, label, settings, state)
        VALUES ($1, $2, $3, 'google-search-console', 'Google Search Console', $4::jsonb, 'active')`,
       [workspace, `con_${randomUUID().replace(/-/g, '')}`, siteId, JSON.stringify({ property })],
     );
-    await db.admin.query(
-      `INSERT INTO gsc_page_aggregates
-         (workspace_id, site_id, property, date, page, page_key, country, device, clicks, impressions, ctr, position, is_final)
-       VALUES ($1, $2, $3, current_date, $4, $5, '', '', 12, 400, 0.03, 4, true)`,
-      [workspace, siteId, property, `${site.origin}/about/`, normalizePageUrl(`${site.origin}/about/`)],
-    );
+    for (const row of rows) {
+      await db.admin.query(
+        `INSERT INTO gsc_page_aggregates
+           (workspace_id, site_id, property, date, page, page_key, country, device, clicks, impressions, ctr, position, is_final)
+         VALUES ($1, $2, $3, current_date, $4, $5, '', '', $6, $7, 0.03, 4, true)`,
+        [workspace, siteId, property, row.url, normalizePageUrl(row.url), row.clicks, row.clicks * 10],
+      );
+    }
   }
 
   it('proposes one rollback when two requests arrive at the same moment', async () => {
@@ -1352,4 +1358,134 @@ describe.skipIf(!hasTestDatabase())('change sets and the GitHub connector', () =
   async function dropGraphileStub(): Promise<void> {
     await db.admin.query('DROP SCHEMA IF EXISTS graphile_worker CASCADE');
   }
+
+  /**
+   * A change set stored straight in the database, as a write that bypassed the commands leaves it:
+   * within the content schema and re-derivable from the repository, with only the URL wrong.
+   */
+  async function seedStoredChangeSet(url: string, before = 'Old about', after = 'New about'): Promise<string> {
+    const id = `chg_${randomUUID().replace(/-/g, '')}`;
+    const baseSha = github.headOf(DEFAULT_BRANCH)!;
+    const content = {
+      connector: 'github',
+      title: 'Rewrite a page title',
+      summary: 'The title is generic and does not match the search intent.',
+      changes: [
+        {
+          change: { type: 'meta.title', url, before, after },
+          source: {
+            path: 'about/index.html',
+            editor: 'html',
+            confidence: 'exact',
+            affectedRoutes: [new URL(url).pathname],
+          },
+          baseSha,
+          sourceHash: sourceHashOf(pageHtml(before, 'Old description')),
+          diff: { path: 'about/index.html', status: 'modified', unified: '', additions: 1, deletions: 1 },
+        },
+      ],
+      verificationPlan: 'Re-fetch the page and check its title.',
+      rollbackPlan: 'Revert the merge commit.',
+    };
+    await db.admin.query(
+      `INSERT INTO artifacts (workspace_id, id, type, name, site_id, latest_version)
+       VALUES ($1, $2, 'change_set', 'Rewrite a page title', $3, 1)`,
+      [workspace, id, siteId],
+    );
+    await db.admin.query(
+      `INSERT INTO artifact_versions (workspace_id, artifact_id, number, state, content, content_hash, author_type, author_id)
+       VALUES ($1, $2, 1, 'draft', $3::jsonb, 'seed-hash', 'user', $4)`,
+      [workspace, id, JSON.stringify(content), personA.userId],
+    );
+    await db.admin.query(
+      `INSERT INTO change_set_runs (workspace_id, artifact_id, site_id, state, drafted_at)
+       VALUES ($1, $2, $3, 'draft', now())`,
+      [workspace, id, siteId],
+    );
+    return id;
+  }
+
+  it('refuses a change URL that is not on the site, naming the hosts it answers on', async () => {
+    const created = await call(
+      changesCreate,
+      createBody([{ type: 'meta.title', url: 'https://unrelated.example/about/', before: 'Old about', after: 'New about' }]),
+    );
+
+    expect(created.created).toBe(false);
+    expect(created.refusals).toHaveLength(1);
+    expect(created.refusals[0]).toMatchObject({ code: 'invalid', url: 'https://unrelated.example/about/' });
+    expect(created.refusals[0]?.reason).toContain('not on site');
+    expect(created.refusals[0]?.reason).toContain(domain);
+    // Nothing was drafted: no change set row exists for the write to be approved from.
+    const { rows } = await db.admin.query<{ n: number }>('SELECT count(*)::int AS n FROM change_set_runs WHERE workspace_id = $1', [
+      workspace,
+    ]);
+    expect(rows[0]?.n).toBe(0);
+  });
+
+  it('refuses a stored change set for another site at requestApply, before any approval', async () => {
+    const changeSetId = await seedStoredChangeSet('https://unrelated.example/about/');
+
+    const refused = await call(changesRequestApply, { changeSetId, note: 'Apply it.' }).then(
+      () => null,
+      (error: Error) => error,
+    );
+
+    expect(refused?.message).toContain('not on site');
+    expect(refused?.message).toContain(domain);
+    const status = await call(changesStatus, { changeSetId });
+    expect(status.run.state).toBe('draft');
+    expect(github.paths.filter((path) => path.includes('/pulls'))).toHaveLength(0);
+  });
+
+  it('refuses a stored change set for another site in the apply worker, so nothing is written', async () => {
+    const changeSetId = await seedStoredChangeSet('https://unrelated.example/about/');
+    // The state an approval leaves: published, approved, and queued for the worker.
+    await db.admin.query(`UPDATE artifacts SET published_version = 1 WHERE workspace_id = $1 AND id = $2`, [workspace, changeSetId]);
+    await db.admin.query(`UPDATE artifact_versions SET state = 'published' WHERE workspace_id = $1 AND artifact_id = $2`, [
+      workspace,
+      changeSetId,
+    ]);
+    await db.admin.query(
+      `UPDATE change_set_runs SET state = 'approved', approved_version = 1, approved_head_sha = $3
+        WHERE workspace_id = $1 AND artifact_id = $2`,
+      [workspace, changeSetId, github.headOf(DEFAULT_BRANCH)!],
+    );
+
+    await runChangesApplyTask(db, { workspaceId: workspace, siteId, artifactId: changeSetId }, deps());
+
+    expect(github.pullRequests).toHaveLength(0);
+    const status = await call(changesStatus, { changeSetId });
+    expect(status.run.state).toBe('in_review');
+    expect(status.run.lastError).toContain('not on site');
+    expect(status.run.lastError).toContain(domain);
+  });
+
+  /** The command on the site's own https domain (no fixture-origin seam); nothing is fetched. */
+  function callOnDomain<C extends AnyCommand>(command: C, input: unknown) {
+    const hostedServices = { ...services(), siteUrlFor: undefined };
+    return createExecutor(db, hostedServices).execute(command, input, personA, { surface: 'internal' });
+  }
+
+  it('counts a redirect’s stored clicks by resolving its source on the site’s own origin', async () => {
+    await seedSearchConsole([{ url: `https://${domain}/old/`, clicks: 100 }]);
+    const created = await callOnDomain(
+      changesCreate,
+      createBody([{ type: 'redirect', from: '/old/', to: '/about/', status: 301, operation: 'add' }], { title: 'Retire a page' }),
+    );
+    expect(created.created).toBe(true);
+    const submitted = await callOnDomain(changesRequestApply, { changeSetId: created.changeSetId, note: 'Retire it.' });
+    expect(submitted.reach).toMatchObject({ kind: 'known', affectedUrls: 1, clicksAtRisk: 100 });
+  });
+
+  it('counts one page once when a change names it absolutely and its mapping route does too', async () => {
+    await seedSearchConsole([{ url: `https://${domain}/about/`, clicks: 100 }]);
+    const created = await callOnDomain(
+      changesCreate,
+      createBody([{ type: 'meta.title', url: `https://${domain}/about/`, before: 'Old about', after: 'New about' }]),
+    );
+    expect(created.created).toBe(true);
+    const submitted = await callOnDomain(changesRequestApply, { changeSetId: created.changeSetId, note: 'Apply it.' });
+    expect(submitted.reach).toMatchObject({ kind: 'known', affectedUrls: 1, clicksAtRisk: 100 });
+  });
 });
