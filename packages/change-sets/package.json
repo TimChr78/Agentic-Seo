@@ -1,0 +1,26 @@
+{
+  "name": "@agentic-seo/change-sets",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@agentic-seo/artifacts": "workspace:*",
+    "@agentic-seo/changes": "workspace:*",
+    "@agentic-seo/commands": "workspace:*",
+    "@agentic-seo/core": "workspace:*",
+    "@agentic-seo/crawl": "workspace:*",
+    "@agentic-seo/db": "workspace:*",
+    "@agentic-seo/integrations": "workspace:*",
+    "@agentic-seo/search-data": "workspace:*",
+    "@agentic-seo/secrets": "workspace:*",
+    "@agentic-seo/telemetry": "workspace:*",
+    "drizzle-orm": "0.45.4",
+    "zod": "4.6.7"
+  }
+}

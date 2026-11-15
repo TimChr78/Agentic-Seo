@@ -224,6 +224,23 @@ const SEED: Record<string, { insert: string; appendOnly: boolean }> = {
     insert: `INSERT INTO page_link_stats (workspace_id, audit_id, url_hash) VALUES ($1, 'adt_seed', 'hash-seed')`,
     appendOnly: false,
   },
+  // The change-set lifecycle (Phase 1 task F). The run row points at the seeded site and artifact;
+  // the transition log and the verification evidence are append-only by grant.
+  change_set_runs: {
+    insert: `INSERT INTO change_set_runs (workspace_id, artifact_id, site_id, state)
+            VALUES ($1, 'not_seed', '00000000-0000-4000-8000-000000000001', 'draft')`,
+    appendOnly: false,
+  },
+  change_set_events: {
+    insert: `INSERT INTO change_set_events (workspace_id, artifact_id, from_state, to_state, actor_type, reason)
+            VALUES ($1, 'not_seed', 'draft', 'in_review', 'system', 'Seed transition')`,
+    appendOnly: true,
+  },
+  change_set_verifications: {
+    insert: `INSERT INTO change_set_verifications (workspace_id, artifact_id, attempt, change_index, url, change_type, result, detail, deployed_sha)
+            VALUES ($1, 'not_seed', 1, 0, 'https://seed-site.example/', 'meta.title', 'pass', 'Seed verification', 'commit-seed')`,
+    appendOnly: true,
+  },
 };
 
 describe.skipIf(!hasTestDatabase())('foundation tables', () => {

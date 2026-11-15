@@ -108,6 +108,30 @@ export interface GitHubCommitSummary {
   date: string | null;
 }
 
+/** A commit's identity: its tree and parents, for verifying a commit a retried job adopts. */
+export interface GitHubCommit {
+  sha: string;
+  treeSha: string;
+  parents: string[];
+}
+
+/**
+ * One entry of a tree, with everything that decides what the path is: the git object SHA, the object
+ * type (`blob`, `tree`, or `commit` for a submodule) and the mode (`100644` regular, `100755`
+ * executable, `120000` symlink, `160000` submodule).
+ *
+ * All four matter to the apply worker's adoption check. The blob SHA alone cannot tell an
+ * executable file from a regular one, a symlink from the file it points at, or a submodule from a
+ * directory that happens to be checked in; a pull request that changed any of those is not the
+ * content a person reviewed.
+ */
+export interface GitHubTreeEntry {
+  path: string;
+  sha: string;
+  type: string;
+  mode: string;
+}
+
 export type CompareStatus = 'ahead' | 'behind' | 'diverged' | 'identical';
 
 export interface GitHubComparison {
@@ -136,6 +160,12 @@ export interface CommitFile {
   path: string;
   /** The new contents; `null` deletes the file. */
   content: string | null;
+  /**
+   * The git mode to write (`100644` regular, `100755` executable, `120000` symlink). Defaults to
+   * `100644`; the apply worker passes the mode the file has at the base commit, so a commit it
+   * creates republishes nothing but the reviewed text.
+   */
+  mode?: string;
 }
 
 export interface CommitAuthor {
@@ -513,6 +543,40 @@ export class GitHubClient {
     return { paths, truncated: data.truncated === true };
   }
 
+  /**
+   * Every entry under a prefix at a ref, with its git object type, mode and SHA. A retried apply job
+   * compares this with the tree it would write, so a branch holding anything else — another file, a
+   * deleted one, a different mode or a submodule — is never adopted.
+   */
+  async listTreeEntries(ref: string, prefix = ''): Promise<{ entries: GitHubTreeEntry[]; truncated: boolean }> {
+    const { data } = await this.get<{ tree?: { path?: string; type?: string; mode?: string; sha?: string }[]; truncated?: boolean }>(
+      `/repos/${this.slug}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
+      { notFound: `the tree at ${ref}` },
+    );
+    const entries = (data.tree ?? [])
+      .filter((entry) => typeof entry.path === 'string' && typeof entry.sha === 'string')
+      .map((entry) => ({
+        path: entry.path!,
+        sha: entry.sha!,
+        type: entry.type ?? 'blob',
+        // GitHub always sends the mode; the regular-file default keeps an older response usable.
+        mode: entry.mode ?? '100644',
+      }))
+      .filter((entry) => entry.path.startsWith(prefix));
+    return { entries, truncated: data.truncated === true };
+  }
+
+  /** One commit's tree and parents, or a typed not-found. */
+  async getCommit(sha: string): Promise<GitHubCommit> {
+    const { data } = await this.get<{ sha?: string; tree?: { sha?: string }; parents?: { sha?: string }[] }>(
+      `/repos/${this.slug}/git/commits/${encodeURIComponent(sha)}`,
+      { notFound: `the commit ${sha}` },
+    );
+    const treeSha = data.tree?.sha;
+    if (!treeSha) throw new GitHubError('invalid', `GitHub returned no tree for commit ${sha}.`);
+    return { sha: data.sha ?? sha, treeSha, parents: (data.parents ?? []).map((parent) => String(parent.sha ?? '')).filter(Boolean) };
+  }
+
   /** Create a branch at a commit. A branch that already exists is a typed conflict. */
   async createBranch(branch: string, sha: string): Promise<void> {
     try {
@@ -554,7 +618,7 @@ export class GitHubClient {
       base_tree: baseTree,
       tree: input.files.map((file) => ({
         path: file.path,
-        mode: '100644',
+        mode: file.mode ?? '100644',
         type: 'blob',
         sha: file.content === null ? null : blobs.get(file.path),
       })),
@@ -597,6 +661,20 @@ export class GitHubClient {
       notFound: `pull request #${number}`,
     });
     return pullRequestFrom(data);
+  }
+
+  /**
+   * The pull request whose head is this branch, or null. A retried job uses it to adopt the pull
+   * request an earlier attempt created before its response was lost, so a retry never opens a second
+   * one. `state: 'all'` finds a closed or merged one too.
+   */
+  async findPullRequestByHead(head: string, options: { state?: 'open' | 'closed' | 'all' } = {}): Promise<GitHubPullRequest | null> {
+    const query = new URLSearchParams({ head: `${this.owner}:${head}`, per_page: '10' });
+    if (options.state) query.set('state', options.state);
+    const { data } = await this.get<Array<Record<string, unknown>>>(`/repos/${this.slug}/pulls?${query.toString()}`);
+    const first = Array.isArray(data) ? data[0] : undefined;
+    if (!first) return null;
+    return pullRequestFrom(first);
   }
 
   /**

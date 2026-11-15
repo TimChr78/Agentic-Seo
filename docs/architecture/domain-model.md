@@ -95,6 +95,18 @@ erDiagram
 | **Outcome** | The measured result after the measurement window: GSC clicks, impressions and positions on affected URLs/queries against a pre-registered control cohort, plus rank observations. Verdict: confirmed, refuted, inconclusive or confounded ([agents-and-autonomy.md](agents-and-autonomy.md) §10) |
 | **Learning** | A conclusion with evidence ("For this site, rewriting titles of striking-distance product pages raised CTR 18% ±6% over 28 days, n=24"), in the learnings store that agents read as `learnings://<site>` |
 
+A change set's pipeline is stored, not inferred (Phase 1, ADR-0007): `change_set_runs` holds one row
+per change set with the state, the approved version and the pull-request, merge and deployed commit
+SHAs, `change_set_events` is the append-only transition log with the evidence for each step, and
+`change_set_verifications` records one row per change per verification attempt. The run states are
+the pipeline above plus `approved` (published, not yet applied), `stale` (a source changed after
+drafting), `closed` (the pull request was closed unmerged), `deploy_not_detected` (the merge never
+reached the site inside the deploy window) and `failed` (the pipeline refused to continue — for
+example a pull request merged with commits that were not approved); `superseded` is reserved for a
+change set a later version replaced before it was applied. A rollback is a change set of its own: the
+original stays in its live state, linked through `rollback_change_set_id`, and becomes `rolled_back`
+only when the rollback is verified.
+
 ## 5. Artifacts (versioned, reviewable)
 
 These go through drafts, diffs and approvals, like Agentic Marketing's artifacts: `site_context`, `recommendation`, `change_set`, `content_brief`, `schema_template`, `report`, `report_template`, `rank_tracker`, `ai_visibility_tracker`, `audit_profile` (saved crawl settings, check overrides), `agent_mandate`, `hosted_agent`, `skill` (specialist playbook), `prompt`.
