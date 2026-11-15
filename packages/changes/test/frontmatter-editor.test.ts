@@ -258,6 +258,24 @@ describe('frontmatter editor: the pilot dialect', () => {
     expect(Array.isArray(damaged.meta.seo_title)).toBe(true);
   });
 
+  it('refuses a line separator or a space Python treats as whitespace', () => {
+    // Python's `str.isspace()`, `\s` and `str.splitlines()` cover characters JavaScript's do not
+    // (U+0085, U+001C–U+001F) and vice versa (U+FEFF), so a value carrying one is read back as a
+    // different string or split into more than one token. The pilot's own parser keeps U+2028 whole
+    // inside a value, which is exactly why the editor must not write one into a page title.
+    const cases = ['Hello\u2028World', 'Hello\u2029World', 'Hello\u0085World', 'Hello\u00a0World', 'Hello\u3000World', 'Hello\u001cWorld'];
+    for (const after of cases) {
+      const result = write(after);
+      expect(result, JSON.stringify(after)).toMatchObject({ ok: false, code: 'unsupported' });
+    }
+    expect(parsePilotFrontmatter('---\nseo_title: "Hello\u2028World"\n---\n').meta.seo_title).toBe('Hello\u2028World');
+    // U+FEFF is whitespace to JavaScript's trim but not to Python, so it is not a reason to refuse.
+    const zeroWidth = write('Hello\ufeffWorld');
+    expect(zeroWidth.ok).toBe(true);
+    if (!zeroWidth.ok) return;
+    expect(parsePilotFrontmatter(zeroWidth.text).meta.seo_title).toBe('Hello\ufeffWorld');
+  });
+
   it('reads the current value the way the pilot does when checking before', () => {
     const document = `---\nseo_title: "A \\"quoted\\" title"\n---\nBody\n`;
     const result = applyFrontmatterEdit(document, title('A \\"quoted\\" title', 'A plainer title'), { dialect: 'strip_quotes' });

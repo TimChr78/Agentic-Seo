@@ -1,6 +1,6 @@
 import type { MetaDescriptionChange, MetaTitleChange } from '../change-types';
 import { DEFAULT_FIELDS, type FieldMap, type FrontmatterDialect } from '../mapping';
-import { parsePilotFrontmatter, pilotSlug } from '../pilot';
+import { parsePilotFrontmatter, pilotSlug, pythonIsSpace, pythonStrip } from '../pilot';
 import { type Refusal, refuse } from '../refusal';
 import { sourceHashRefusal } from '../source';
 
@@ -133,10 +133,23 @@ function needsQuotes(value: string): boolean {
   return false;
 }
 
+/**
+ * Whether a value carries a character Python treats as whitespace or as a line boundary. The build
+ * splits lines and strips values with Python's own sets, so a value carrying U+0085, U+001C–U+001F
+ * or one of the Unicode spaces is read back as more than one token (or as a different value), and
+ * the page would not show what the change names.
+ */
+function pythonWhitespaceProblem(value: string): boolean {
+  for (const char of value) if (char !== ' ' && pythonIsSpace(char)) return true;
+  return false;
+}
+
 /** Why the pilot's parser cannot carry a value, or null when it can. */
 function stripQuotesProblem(value: string): string | null {
   if (/\p{Cc}/u.test(value)) return 'it contains a control character or a line break, which a single-line frontmatter value cannot carry.';
-  if (value !== value.trim()) return 'it begins or ends with whitespace, which the parser strips.';
+  if (pythonWhitespaceProblem(value))
+    return 'it contains a line separator or a non-breaking or unusual space (Python’s parser treats those as whitespace), which a single-line frontmatter value cannot carry.';
+  if (value !== pythonStrip(value)) return 'it begins or ends with whitespace, which the parser strips.';
   if (value.startsWith('#')) return 'it begins with "#", which YAML reads as a comment.';
   // The build closes the frontmatter at the second literal `---` anywhere in the file, so a value
   // carrying one ends the block early and the rest of the draft is published as body text.

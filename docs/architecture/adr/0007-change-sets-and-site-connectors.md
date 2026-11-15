@@ -65,7 +65,14 @@ same shapes.
   early, and a leading `[` or `{` that the build reads as a collection). Each written value is read
   back through a port of that parser before it is returned, so the refusal list cannot fall behind
   the build. The default `yaml` dialect keeps standard quoting for sites that read their frontmatter
-  with a YAML parser.
+  with a YAML parser. The port has to use Python's character classes, not JavaScript's: Python's
+  `str.isspace()`, `\s`, `str.strip()` and `\w` differ from JavaScript's (U+0085, U+001C–U+001F and
+  the Unicode spaces are whitespace to Python; U+FEFF is whitespace to JavaScript only), and Python's
+  `.` stops only at `\n`, so a U+2028 inside a value is part of it. `test/fixtures/pilot/
+  python-expectations.json` holds the expected slugs and frontmatter output produced by running the
+  pilot's own functions (the script that writes it is `packages/changes/scripts/pilot-expectations.py`),
+  and the editor refuses a value carrying a character Python treats as whitespace or as a line
+  boundary other than a plain space.
 - **A change can carry the source file's hash.** `before` catches a file that moved on for values the
   file already carries, but not for one it does not: inserting a missing `seo_description` has nothing
   to compare `before` with. A change may therefore carry `sourceHash` (sha256 of the file as read when
@@ -81,12 +88,25 @@ same shapes.
   a JSON-LD change is refused on such a source because the frontmatter has no field for it and the
   schema belongs in the build template.
 - **Redirects are a plain `_redirects` file** in the Cloudflare Pages / Netlify format
-  (`/from  /to  301`, `#` comments), so one editor serves both hosts. Rules are edited in place to keep
-  comments and ordering — an update rewrites only the changed `to`/`status` spans, so an inline
-  comment and the spacing around it survive — and a rule that would loop or chain is refused with the
-  final target to point at. The loop and chain analysis understands the format's patterns (`*` with
-  `:splat`, `:placeholder` segments), because a literal-only graph misses
-  `/old/* -> /new/:splat` plus `/new/item -> /old/item`; a pattern interaction it cannot resolve is
-  refused rather than accepted. A `#` inside the target token is a fragment (`/new-page#section`),
-  while ` #` after whitespace is still an inline comment. Redirecting more than 20 URLs remains a
-  fixed rule that always needs a person (agents-and-autonomy.md §3).
+  (`/from  /to  301`, `#` comments), so one editor serves both hosts. **A change writes one literal
+  rule**: `from` and `to` carry no `*` splat and no `:name` segment, and a change that names a
+  pattern is refused ("Pattern redirects are written by people in Phase 1"). Pattern rules are a
+  person's edit; proving what a pattern graph does for every path is not something a change can do,
+  and the three pattern cases a review found (a self-referential splat, a splat loop through an
+  existing rule, a splat chain) are all refused by that one rule. The file may still contain pattern
+  rules, so the analysis around a new rule understands them.
+  Rules are edited in place to keep comments and ordering — an update rewrites only the changed
+  `to`/`status` spans, so an inline comment and the spacing around it survive. Loop and chain
+  analysis evaluates the *resulting* file the way the platform applies it: **first match wins on the
+  request path**. Identity is the path with trailing slashes dropped, plus the query only when a rule
+  spells one (Cloudflare Pages and Netlify match the path; a fragment is never part of a match, so
+  `/a -> /a#section` is a self-loop), and an absolute target keeps its origin. For the new rule's
+  source and every rule whose effective target is that source, the walk follows the first matching
+  rule — literal or pattern, with `:splat`/`:name` substituted — and refuses a loop or a chain with
+  the final target to point at. A pattern rule that answers the new rule's own source or target, or
+  whose target needs a placeholder it cannot supply, is refused with the line to edit by hand, unless
+  first match wins shows an earlier rule shadows the pattern for that path (so `/old/item /safe`
+  before `/old/* /new/:splat` does not make `/new/item -> /end` a chain). A `#` inside the target
+  token is a fragment (`/new-page#section`), while ` #` after whitespace is still an inline comment.
+  Redirecting more than 20 URLs remains a fixed rule that always needs a person
+  (agents-and-autonomy.md §3).

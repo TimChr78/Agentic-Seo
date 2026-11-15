@@ -254,6 +254,49 @@ describe('HTML editor: image matching resolves the page URL', () => {
     expect(result.resolvedSrc).toBe('https://cdn.example/assets/pic.png');
   });
 
+  it('treats an empty <base href=""> as the document URL, not as no base', () => {
+    // The HTML spec takes the first <base> element with an href attribute; an empty value resolves
+    // to the document URL, so the later <base href="/assets/"> must be ignored.
+    const document = '<html><head><base href=""><base href="/assets/"><title>Post</title></head><body><img src="pic.png"></body></html>';
+    const result = applyHtmlEdit(document, alt('https://martechsignal.com/blog/post/pic.png'));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.resolvedSrc).toBe('https://martechsignal.com/blog/post/pic.png');
+  });
+
+  it('does not use a later <base href> when the first one is empty', () => {
+    const document = '<html><head><base href=""><base href="/assets/"><title>Post</title></head><body><img src="pic.png"></body></html>';
+    expect(applyHtmlEdit(document, alt('https://martechsignal.com/assets/pic.png'))).toMatchObject({
+      ok: false,
+      code: 'not_found',
+    });
+  });
+
+  it('refuses a resolvedSrc that is not the URL it matched', () => {
+    // A caller can carry the absolute URL of page B's image on page A's change. Trusting it would
+    // match nothing here and verify the wrong page, so the editor refuses the mismatch.
+    const result = applyHtmlEdit(documentWith('<img src="pic.png" alt="old">'), {
+      ...alt('pic.png', 'new'),
+      before: 'old',
+      resolvedSrc: 'https://b.test/blog/post/pic.png',
+    });
+    expect(result).toMatchObject({ ok: false, code: 'stale' });
+    if (result.ok) return;
+    expect(result.reason).toContain('https://b.test/blog/post/pic.png');
+    expect(result.reason).toContain('https://martechsignal.com/blog/post/pic.png');
+  });
+
+  it('accepts a resolvedSrc that is the URL it matched', () => {
+    const result = applyHtmlEdit(documentWith('<img src="pic.png" alt="old">'), {
+      ...alt('pic.png', 'new'),
+      before: 'old',
+      resolvedSrc: 'https://martechsignal.com/blog/post/pic.png',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.text).toContain('alt="new"');
+  });
+
   it('does not match the same path on another host', () => {
     const result = applyHtmlEdit(
       documentWith('<img src="https://cdn.other.test/assets/pic.png">'),

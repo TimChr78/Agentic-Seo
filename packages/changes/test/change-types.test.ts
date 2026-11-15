@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { actionClassFor, ChangeSchema, changeTypeCatalogue, parseChange, urlOf } from '../src/change-types';
+import { actionClassFor, ChangeSchema, changeTypeCatalogue, type ImageAltChange, parseChange, urlOf } from '../src/change-types';
+import { applyChange } from '../src/editors';
 import { jsonLdTypes, matchesJsonLd, serialiseJsonLd, stableJson } from '../src/jsonld';
 import { checkPageAgainst, expectedAfter } from '../src/verify';
 import { pageFacts } from './support';
@@ -107,6 +108,24 @@ describe('change catalogue', () => {
     // A fragment on the source names no path, and ` #` is still a comment because of its whitespace.
     expect(parseChange({ type: 'redirect', from: '/old/#section', to: '/new/', status: 301, operation: 'add' }).ok).toBe(false);
     expect(parseChange({ type: 'redirect', from: '/old/', to: '/new/#section # a note', status: 301, operation: 'add' }).ok).toBe(false);
+  });
+
+  it('rejects a pattern rule on either side, because a Phase 1 change writes one URL', () => {
+    const cases = [
+      { from: '/a/*', to: '/b/' },
+      { from: '/a/*', to: '/b/:splat' },
+      { from: '/news/:year/', to: '/archive/' },
+      { from: '/a/', to: '/archive/:slug/' },
+      { from: '/a/', to: 'https://example.com/:slug/' },
+    ];
+    for (const fields of cases) {
+      const parsed = parseChange({ type: 'redirect', ...fields, status: 301, operation: 'add' });
+      expect(parsed, JSON.stringify(fields)).toMatchObject({ ok: false, code: 'invalid' });
+      if (parsed.ok) continue;
+      expect(parsed.reason).toContain('Pattern redirects are written by people in Phase 1');
+    }
+    // A colon that is not a leading segment marker is an ordinary path character.
+    expect(parseChange({ type: 'redirect', from: '/time/12:30/', to: '/time/1230/', status: 301, operation: 'add' }).ok).toBe(true);
   });
 
   it('accepts a source hash on any content change and rejects a malformed one', () => {
@@ -232,6 +251,40 @@ describe('checkPageAgainst', () => {
         }),
       ).ok,
     ).toBe(true);
+  });
+
+  it('verifies the URL the editor matched, not a caller-supplied resolvedSrc from another page', () => {
+    // The reviewer's case: page B already shows the new alt. A change for page A whose resolvedSrc
+    // names B's image must not verify, and must not be accepted by the editor either.
+    const document = '<html><head><title>Post</title></head><body><img src="pic.png" alt="old"></body></html>';
+    const change = ChangeSchema.parse({
+      type: 'image.alt',
+      url: 'https://a.test/blog/post/',
+      src: 'pic.png',
+      before: 'old',
+      after: 'new',
+    }) as ImageAltChange;
+    const image = { src: 'https://b.test/blog/post/pic.png', alt: 'new', width: null, height: null, loading: null, inLink: false };
+    const pageB = pageFacts({ url: 'https://b.test/blog/post/', finalUrl: 'https://b.test/blog/post/', html: { images: [image] } });
+    // A caller-supplied resolvedSrc would have verified page B for a change about page A.
+    expect(checkPageAgainst({ ...change, resolvedSrc: image.src }, pageB).ok).toBe(true);
+    expect(applyChange({ editor: 'html', text: document, change: { ...change, resolvedSrc: image.src } })).toMatchObject({
+      ok: false,
+      code: 'stale',
+    });
+
+    // Without it, the editor reports A's absolute URL and verification judges A, which has not changed.
+    const outcome = applyChange({ editor: 'html', text: document, change });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.verifyTarget).toMatchObject({ src: 'pic.png', resolvedSrc: 'https://a.test/blog/post/pic.png' });
+    const pageA = pageFacts({
+      url: 'https://a.test/blog/post/',
+      finalUrl: 'https://a.test/blog/post/',
+      html: { images: [{ ...image, src: 'https://a.test/blog/post/pic.png', alt: 'old' }] },
+    });
+    expect(checkPageAgainst(outcome.verifyTarget, pageA).ok).toBe(false);
+    expect(checkPageAgainst(outcome.verifyTarget, pageB).ok).toBe(false);
   });
 
   it('verifies a redirect by status and Location', () => {

@@ -104,20 +104,52 @@ export const ImageAltChange = z.strictObject({
    * A relative `src` means what the document's `<base href>` makes it mean, and the crawler records
    * the absolute URL. PageFacts carries no `<base>`, so the editor reports the absolute URL it
    * matched here and verification compares against that. A change drafted from PageFacts already
-   * carries an absolute `src` and does not need it.
+   * carries an absolute `src` and does not need it. A caller-supplied value is never trusted: the
+   * editor refuses one that is not the URL it matched, and `applyChange` returns the matched URL as
+   * the change to verify.
    */
   resolvedSrc: z
     .string()
     .min(1)
     .max(MAX_URL)
     .optional()
-    .describe('The absolute src the editor resolved from `src` through the page <base href>, for verification'),
+    .describe(
+      'The absolute src the editor matched through the page base href. The editor refuses a value that differs from what it matched and reports the one it used.',
+    ),
   before: z.string().max(MAX_TEXT).nullable().describe('The alt the image has now; null when the attribute is missing'),
   after: z.string().max(MAX_TEXT).describe('The alt to write; an empty string marks a decorative image'),
   sourceHash: SourceHash,
 });
 
 const RedirectStatus = z.union([z.literal(301), z.literal(302), z.literal(307), z.literal(308)]);
+
+/**
+ * The refusal for a pattern rule: Phase 1 writes one URL at a time (ADR-0007, review round 3).
+ * Patterns are a person's edit, because deciding what a pattern graph does for every path is not
+ * something a change can prove here.
+ */
+export const REDIRECT_PATTERN_MESSAGE = 'Pattern redirects are written by people in Phase 1; this change can only add a rule for one URL.';
+
+/**
+ * Whether a redirect field is a pattern rather than one URL: a `*` splat or a `:name` path segment.
+ * The path of an absolute URL is checked too, so `https://example.com/*` is refused as a target.
+ */
+export function isRedirectPattern(value: string): boolean {
+  let path = value;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
+    try {
+      path = new URL(value).pathname;
+    } catch {
+      path = value;
+    }
+  }
+  const query = path.indexOf('?');
+  if (query !== -1) path = path.slice(0, query);
+  const hash = path.indexOf('#');
+  if (hash !== -1) path = path.slice(0, hash);
+  if (path.includes('*')) return true;
+  return path.split('/').some((segment) => segment.startsWith(':'));
+}
 
 /**
  * Why a value cannot be written to a Netlify/Cloudflare Pages redirects file, or null when it can.
@@ -129,6 +161,9 @@ const RedirectStatus = z.union([z.literal(301), z.literal(302), z.literal(307), 
  * (`/new-page#section`), so `#` is allowed there as long as it is inside the token: whitespace is
  * rejected outright, which is what makes ` #` an inline comment and `/new#section` a target.
  *
+ * A Phase 1 change writes one literal rule: a `*` or a `:name` segment is refused with
+ * `REDIRECT_PATTERN_MESSAGE`, because patterns are a person's edit.
+ *
  * Whitespace or a control character would be read back as extra fields — a target of
  * `/target 301\n/admin https://evil.test 302\n#` writes a second, unreviewed rule — so both are
  * refused. A target of `javascript:` or `data:` is not a redirect either.
@@ -138,6 +173,7 @@ export function redirectTokenProblem(value: string, role: 'from' | 'to'): string
   if (/[\s\p{Cc}]/u.test(value)) {
     return `The redirect ${what} contains whitespace or a control character, which would split it into extra fields in the redirects file.`;
   }
+  if (isRedirectPattern(value)) return REDIRECT_PATTERN_MESSAGE;
   if (role === 'from' && value.includes('#')) {
     return 'The redirect source contains "#": a redirect matches a path, and "#" would start a fragment or a comment in the redirects file.';
   }
@@ -159,8 +195,9 @@ const RedirectFrom = z
   .string()
   .min(1)
   .max(MAX_URL)
-  .refine((value) => redirectTokenProblem(value, 'from') === null, {
-    message: 'Give a path starting with "/" with no whitespace, control characters or "#".',
+  .superRefine((value, ctx) => {
+    const problem = redirectTokenProblem(value, 'from');
+    if (problem) ctx.addIssue({ code: 'custom', message: problem });
   })
   .describe('The path that redirects, e.g. /old-page/');
 
@@ -168,9 +205,9 @@ const RedirectTo = z
   .string()
   .min(1)
   .max(MAX_URL)
-  .refine((value) => redirectTokenProblem(value, 'to') === null, {
-    message:
-      'Give a path starting with "/" or an absolute http(s) URL, with no whitespace or control characters; a fragment such as /new-page#section is allowed.',
+  .superRefine((value, ctx) => {
+    const problem = redirectTokenProblem(value, 'to');
+    if (problem) ctx.addIssue({ code: 'custom', message: problem });
   })
   .describe('The new target: a path or an absolute http(s) URL, optionally with a fragment');
 
@@ -281,7 +318,7 @@ const definitions: readonly Omit<ChangeTypeDefinition, 'jsonSchema'>[] = [
     type: 'redirect',
     title: 'Redirect rule',
     summary:
-      "Add, update or remove one rule in the site's redirects file. Use it to send an old URL to its replacement. The editor refuses loops and chains and suggests the final target instead. Redirecting more than 20 URLs is a fixed rule: it always needs a person.",
+      "Add, update or remove one rule in the site's redirects file, for one URL. Use it to send an old URL to its replacement. `from` and `to` are literal paths or an absolute URL: a `*` splat or a `:name` segment is a pattern rule, which a person writes by hand in Phase 1. The editor refuses loops and chains (following the file's first-match-wins order) and suggests the final target instead. Redirecting more than 20 URLs is a fixed rule: it always needs a person.",
     actionClass: 'site.structural',
     verify:
       'Fetch the `from` URL again: it must answer with the configured status and a Location header resolving to `to`; for remove it must not redirect.',

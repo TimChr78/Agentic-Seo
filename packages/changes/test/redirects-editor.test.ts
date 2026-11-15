@@ -50,6 +50,17 @@ describe('redirects editor: add', () => {
     expect(result.reason).toMatch(/loop/i);
   });
 
+  it('refuses a target that is the same page as the source, a fragment included', () => {
+    // The platform matches the request path, so `/a/` and `/a/#section` are the same page: the
+    // browser would request `/a` again and loop. A trailing slash is not a difference either.
+    for (const to of ['/a/', '/a', '/a/#fragment', '/a#fragment']) {
+      const result = applyRedirectEdit('', add('/a/', to));
+      expect(result, to).toMatchObject({ ok: false, code: 'conflict' });
+      if (result.ok) return;
+      expect(result.reason, to).toMatch(/loop/i);
+    }
+  });
+
   it('refuses a chain and names the final target', () => {
     const document = '/a/  /b/  301\n/b/  /c/  301\n';
     const result = applyRedirectEdit(document, add('/new/', '/a/'));
@@ -65,6 +76,14 @@ describe('redirects editor: add', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(/(?<!\r)\n/.test(result.text)).toBe(false);
+  });
+
+  it('refuses a rule an earlier rule already answers (first match wins)', () => {
+    // A `from` without a query answers every query, so `/a?page=2` would never be reached.
+    const result = applyRedirectEdit('/a  /b  301\n', add('/a?page=2', '/c/'));
+    expect(result).toMatchObject({ ok: false, code: 'conflict' });
+    if (result.ok) return;
+    expect(result.reason).toContain('line 1');
   });
 });
 
@@ -143,13 +162,56 @@ describe('redirects editor: rules that would chain', () => {
   });
 });
 
-describe('redirects editor: pattern rules', () => {
-  it('refuses a loop a splat target creates', () => {
+describe('redirects editor: a change writes one literal rule', () => {
+  it('refuses a splat rule that would loop, because it is a pattern a person writes', () => {
+    const result = applyRedirectEdit('', add('/a/*', '/a/:splat'));
+    expect(result).toMatchObject({ ok: false, code: 'unsupported' });
+    if (result.ok) return;
+    expect(result.reason).toContain('Pattern redirects are written by people in Phase 1');
+  });
+
+  it('refuses a splat rule that would close a loop with an existing rule', () => {
+    const document = '/a/item  /b/item  301\n';
+    const result = applyRedirectEdit(document, add('/b/*', '/a/:splat'));
+    expect(result).toMatchObject({ ok: false, code: 'unsupported' });
+    if (result.ok) return;
+    expect(result.reason).toContain('Pattern redirects are written by people in Phase 1');
+  });
+
+  it('refuses a splat rule that would chain through an existing rule', () => {
+    const document = '/target/item  /end  301\n';
+    const result = applyRedirectEdit(document, add('/source/*', '/target/:splat'));
+    expect(result).toMatchObject({ ok: false, code: 'unsupported' });
+    if (result.ok) return;
+    expect(result.reason).toContain('Pattern redirects are written by people in Phase 1');
+  });
+
+  it('refuses a placeholder on the source or the target', () => {
+    for (const [from, to] of [
+      ['/news/:year/', '/archive/'],
+      ['/a/', '/archive/:slug/'],
+      ['/a/', 'https://example.com/:slug/'],
+    ] as const) {
+      const result = applyRedirectEdit('', add(from, to));
+      expect(result, `${from} -> ${to}`).toMatchObject({ ok: false, code: 'unsupported' });
+    }
+  });
+
+  it('refuses a pattern even when the change was never parsed', () => {
+    const crafted = { type: 'redirect', from: '/a/*', to: '/b/:splat', status: 301, operation: 'add' } as RedirectChange;
+    expect(applyRedirectEdit('', crafted)).toMatchObject({ ok: false, code: 'unsupported' });
+  });
+});
+
+describe('redirects editor: existing pattern rules are followed, not judged blind', () => {
+  it('refuses a pattern rule the new target runs into, and names the line to edit', () => {
     const document = '/old/*  /new/:splat  301\n';
     const result = applyRedirectEdit(document, add('/new/item/', '/old/item/'));
     expect(result).toMatchObject({ ok: false, code: 'conflict' });
     if (result.ok) return;
-    expect(result.reason).toMatch(/loop/i);
+    expect(result.reason).toContain('interacts with the pattern rule at line 1');
+    expect(result.reason).toContain('Edit the redirects file by hand');
+    expect(result.details).toMatchObject({ line: 1 });
   });
 
   it('refuses an incoming edge a splat target creates, and suggests the final target', () => {
@@ -161,22 +223,34 @@ describe('redirects editor: pattern rules', () => {
     expect(result.details).toMatchObject({ suggestion: '/elsewhere/' });
   });
 
-  it('follows :placeholder segments on both sides', () => {
+  it('refuses a placeholder rule the new target asks about rather than guessing', () => {
     const document = '/news/:year/:slug/  /archive/:year/:slug/  301\n';
     const result = applyRedirectEdit(document, add('/archive/2026/post/', '/news/2026/post/'));
     expect(result).toMatchObject({ ok: false, code: 'conflict' });
     if (result.ok) return;
-    expect(result.reason).toMatch(/loop/i);
+    expect(result.reason).toContain('interacts with the pattern rule at line 1');
   });
 
-  it('refuses an interaction it cannot resolve rather than accepting it', () => {
+  it('refuses a pattern interaction it cannot resolve rather than accepting it', () => {
     // The existing rule's target needs `:year`, which its source never supplies: the real target
     // is unknowable here, so a loop cannot be ruled out.
     const document = '/a/*  /b/:splat/:year  301\n';
     const result = applyRedirectEdit(document, add('/start/', '/a/item/'));
     expect(result).toMatchObject({ ok: false, code: 'conflict' });
     if (result.ok) return;
-    expect(result.reason).toContain('cannot be decided');
+    expect(result.reason).toContain('interacts with the pattern rule at line 1');
+  });
+
+  it('accepts a rule whose incoming pattern is shadowed for that path (first match wins)', () => {
+    // `/old/item` answers before `/old/*`, so `/old/*` never sends anything to `/new/item`:
+    // the pattern cannot make this rule a chain.
+    const document = '/old/item  /safe  301\n/old/*  /new/:splat  301\n';
+    expect(applyRedirectEdit(document, add('/new/item/', '/end/'))).toMatchObject({ ok: true });
+  });
+
+  it('refuses the same change when the shadowing rule is not there', () => {
+    const document = '/old/*  /new/:splat  301\n';
+    expect(applyRedirectEdit(document, add('/new/item/', '/end/'))).toMatchObject({ ok: false, code: 'conflict' });
   });
 });
 

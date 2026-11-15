@@ -383,16 +383,17 @@ function removeElement(html: string, startIndex: number, endIndex: number): stri
 }
 
 /**
- * The base a relative `<img src>` is resolved against: the document's first `<base href>`, else the
- * page URL. The HTML spec takes the first `<base>` that has an `href`, so a `<base target>` without
- * one does not hide a later `<base href>`.
+ * The base a relative `<img src>` is resolved against: the document's first `<base>` that has an
+ * `href` (even an empty one, which resolves to the document URL), else the page URL. The HTML spec
+ * takes the first `<base>` with an `href` attribute, so a `<base target>` without one does not hide
+ * a later `<base href>`, and `<base href="">` does not either.
  */
 function documentBase(root: DomNode, pageUrl: string): string | null {
   const href = elements(root)
     .filter((node) => nameOf(node) === 'base')
     .map((node) => attribute(node, 'href'))
-    .find((value) => value !== undefined && value.trim() !== '');
-  const candidate = href !== undefined ? normaliseUrl(href.trim(), pageUrl) : normaliseUrl(pageUrl);
+    .find((value) => value !== undefined);
+  const candidate = href !== undefined ? normaliseUrl(href, pageUrl) : normaliseUrl(pageUrl);
   if (candidate === null || !/^https?:/i.test(candidate)) return null;
   return candidate;
 }
@@ -413,6 +414,19 @@ function editImageAlt(html: string, change: ImageAltChange): HtmlEditOutcome {
   }
   const wanted = normaliseUrl(change.src, base);
   if (wanted === null) return refuse('invalid', `The change's image src "${change.src}" is not a URL.`, { src: change.src });
+  // A caller-supplied absolute src is what verification would use, so it has to be the URL this
+  // editor actually matched. Trusting it would verify a different image (page B's src carried on
+  // page A's change) and report a change as applied that never landed.
+  if (change.resolvedSrc !== undefined) {
+    const recorded = normaliseUrl(change.resolvedSrc);
+    if (recorded === null || recorded !== wanted) {
+      return refuse(
+        'stale',
+        `The change records ${change.resolvedSrc} as this image's absolute src, but "${change.src}" resolves to ${wanted} on this page. Re-read the page and draft the change again.`,
+        { src: change.src, recorded: change.resolvedSrc, resolved: wanted },
+      );
+    }
+  }
   const images = elements(root).filter(
     (node) => nameOf(node) === 'img' && imageSourceUrl(attribute(node, 'src'), attribute(node, 'srcset'), base) === wanted,
   );

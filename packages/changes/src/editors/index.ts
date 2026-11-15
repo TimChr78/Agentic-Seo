@@ -21,7 +21,19 @@ export type { RedirectEditOutcome } from './redirects';
 export { redirectRules } from './redirects';
 export { applyFrontmatterEdit, applyHtmlEdit, applyRedirectEdit };
 
-export type EditOutcome = { ok: true; text: string; changed: boolean } | Refusal;
+export type EditOutcome =
+  | {
+      ok: true;
+      text: string;
+      changed: boolean;
+      /**
+       * The change to store and verify. It is the change that was applied, except for an `image.alt`
+       * change whose relative `src` was resolved through the page's `<base href>`: its `resolvedSrc`
+       * is the URL the editor matched, and verification must use that rather than a caller's value.
+       */
+      verifyTarget: Change;
+    }
+  | Refusal;
 
 export interface EditInput {
   editor: EditorName;
@@ -37,15 +49,24 @@ export interface EditInput {
 export function applyChange({ editor, text, change, fields, dialect }: EditInput): EditOutcome {
   if (change.type === 'redirect') {
     if (editor !== 'netlify') return refuse('unsupported', `A redirect is edited in the redirects file, not by the ${editor} editor.`);
-    return applyRedirectEdit(text, change);
+    const outcome = applyRedirectEdit(text, change);
+    return outcome.ok ? { ...outcome, verifyTarget: change } : outcome;
   }
   if (editor === 'netlify') return refuse('unsupported', `The redirects editor cannot write a ${change.type} change.`);
-  if (editor === 'html') return applyHtmlEdit(text, change);
+  if (editor === 'html') {
+    const outcome = applyHtmlEdit(text, change);
+    if (!outcome.ok) return outcome;
+    const { resolvedSrc } = outcome;
+    if (resolvedSrc === undefined) return { ...outcome, verifyTarget: change };
+    if (change.type !== 'image.alt') return { ...outcome, verifyTarget: change };
+    return { ok: true, text: outcome.text, changed: outcome.changed, verifyTarget: { ...change, resolvedSrc } };
+  }
   if (change.type === 'schema.jsonld' || change.type === 'image.alt') {
     return refuse(
       'unsupported',
       `Markdown frontmatter has no field for a ${change.type} change. Add it in the site's build template instead.`,
     );
   }
-  return applyFrontmatterEdit(text, change, { fields, dialect });
+  const outcome = applyFrontmatterEdit(text, change, { fields, dialect });
+  return outcome.ok ? { ...outcome, verifyTarget: change } : outcome;
 }

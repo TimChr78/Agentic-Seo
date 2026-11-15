@@ -1,5 +1,5 @@
 import type { RedirectChange } from '../change-types';
-import { redirectTokenProblem } from '../change-types';
+import { isRedirectPattern, redirectTokenProblem } from '../change-types';
 import { type Refusal, refuse } from '../refusal';
 import { sourceHashRefusal } from '../source';
 
@@ -14,13 +14,21 @@ import { sourceHashRefusal } from '../source';
 // the spans of the field that changed (`to`, `status`), so an inline comment (`/a /b 301 # note`) and
 // the spacing around it survive an update.
 //
-// A new rule is refused when it would loop (`/a -> /b` while `/b -> /a` exists) or chain, in either
-// direction: `/a -> /b` while `/b -> /c` exists adds a hop after `/a`, and adding `/b -> /c` while
-// `/a -> /b` exists adds a hop before it. Both checks understand the format's patterns — a `*`
-// splat with `:splat` on the target, and `:placeholder` segments — because a literal-only graph
-// misses the loop `/old/* -> /new/:splat` plus `/new/item -> /old/item`. When a pattern interaction
-// cannot be decided (a target placeholder the source cannot supply), the rule is refused with the
-// reason rather than accepted.
+// A change writes a rule for ONE url (Phase 1 decision, ADR-0007): `from` and `to` carry no `*`
+// splat and no `:name` segment. Pattern rules are a person's edit; a change that names one is
+// refused rather than analysed, because a pattern graph has holes that are hard to prove closed. The
+// file may still contain pattern rules written by people, so the surrounding analysis understands
+// them.
+//
+// A new rule is refused when the resulting file would loop or chain. That is decided the way the
+// platform decides: first match wins, on the request path. Match order follows the file, and both
+// Cloudflare Pages and Netlify match the path (a fragment is never part of a match, and a `from`
+// that carries no query string matches any query), so identity here is the path with trailing
+// slashes dropped, plus the query only when the rule itself spells one. Every involved literal path
+// is evaluated against the resulting file: the new rule's own target, and every rule whose
+// effective target is the new rule's source would gain a hop. A pattern rule that answers one of
+// those paths — or that cannot be resolved for it — is refused with the line to edit by hand, unless
+// first match wins proves an earlier rule shadows it for that path.
 //
 // The fields are re-checked here even though the schema already validates them, because a caller
 // can build a change object without parsing it and one stray newline would inject a rule.
@@ -126,16 +134,65 @@ function ruleOf(line: string, index: number): RuleLine | null {
   };
 }
 
-/** A path for chain comparison: trailing slashes dropped (except the root), absolute URLs kept whole. */
-function normalisePath(value: string): string {
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return value.replace(/\/+$/, '').toLowerCase();
-  const withoutSlash = value.replace(/\/+$/, '');
+// ---------------------------------------------------------------------------------------------
+// Matching: what the platform compares
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The request path a rule field is about: an absolute URL's path, or the field itself, with the
+ * fragment and query removed and trailing slashes dropped (except the root). A rule's `to` keeps
+ * its fragment when written; it just never takes part in matching.
+ */
+function pathOnly(value: string): string {
+  let path = value;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
+    try {
+      path = new URL(value).pathname;
+    } catch {
+      path = value;
+    }
+  }
+  const hash = path.indexOf('#');
+  if (hash !== -1) path = path.slice(0, hash);
+  const query = path.indexOf('?');
+  if (query !== -1) path = path.slice(0, query);
+  const withoutSlash = path.replace(/\/+$/, '');
   return withoutSlash === '' ? '/' : withoutSlash;
 }
 
-// ---------------------------------------------------------------------------------------------
-// The format's patterns
-// ---------------------------------------------------------------------------------------------
+/** The query string a field spells (without `?`), or null when it spells none. */
+function queryOnly(value: string): string | null {
+  let rest = value;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
+    try {
+      return new URL(value).search === '' ? null : new URL(value).search.slice(1);
+    } catch {
+      rest = value;
+    }
+  }
+  const hash = rest.indexOf('#');
+  if (hash !== -1) rest = rest.slice(0, hash);
+  const query = rest.indexOf('?');
+  return query === -1 ? null : rest.slice(query + 1);
+}
+
+/**
+ * A rule or target as the graph compares it: the request path, with the query only when the value
+ * spells one. An absolute target keeps its origin, because another host is another page.
+ */
+function identityOf(value: string): string {
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
+    try {
+      const url = new URL(value);
+      const query = url.search === '' ? '' : url.search;
+      return `${url.protocol}//${url.host}${pathOnly(value)}${query}`;
+    } catch {
+      return value;
+    }
+  }
+  const query = queryOnly(value);
+  return query === null ? pathOnly(value) : `${pathOnly(value)}?${query}`;
+}
 
 interface CompiledFrom {
   regex: RegExp;
@@ -145,16 +202,14 @@ interface CompiledFrom {
 const compiledFrom = new Map<string, CompiledFrom>();
 
 /**
- * A rule's `from` as a matcher: `*` is a splat (rest of the path) and `:name` is one segment. A
+ * A rule's path as a matcher: `*` is a splat (rest of the path) and `:name` is one segment. A
  * `:name` sharing its segment with literals is not a placeholder in this format, so it stays
  * literal and the rule simply matches less; that is visible rather than over-broad.
  */
 function compileFrom(from: string): CompiledFrom {
   const cached = compiledFrom.get(from);
   if (cached) return cached;
-  // Patterns are compared the way rules are compared elsewhere: a trailing slash is not a
-  // difference (`/b/` and `/b` are the same page), so it is dropped before compiling.
-  const pattern = normalisePath(from);
+  const pattern = pathOnly(from);
   let source = '^';
   const names: string[] = [];
   let index = 0;
@@ -186,13 +241,23 @@ function compileFrom(from: string): CompiledFrom {
   return compiled;
 }
 
-/** The parameters a `from` pattern gives a path, or null when it does not match. */
-function matchFrom(from: string, path: string): Record<string, string> | null {
-  const compiled = compileFrom(from);
-  const matched = compiled.regex.exec(normalisePath(path));
+/** Whether a rule's `from` is a pattern rather than one path. */
+function isPattern(from: string): boolean {
+  return isRedirectPattern(from);
+}
+
+/**
+ * The parameters a rule's `from` gives a request value, or null when the rule does not answer it.
+ * A `from` without a query matches any query — the platform matches the path — while one that
+ * spells a query only matches that one.
+ */
+function fromMatches(from: string, requestValue: string): Record<string, string> | null {
+  const ruleQuery = queryOnly(from);
+  if (ruleQuery !== null && ruleQuery !== queryOnly(requestValue)) return null;
+  const matched = compileFrom(from).regex.exec(pathOnly(requestValue));
   if (!matched) return null;
   const values: Record<string, string> = {};
-  compiled.names.forEach((name, index) => {
+  compileFrom(from).names.forEach((name, index) => {
     values[name] = matched[index + 1] ?? '';
   });
   return values;
@@ -217,124 +282,87 @@ function resolveTarget(to: string, params: Record<string, string>): string | nul
   return unresolved ? null : resolved;
 }
 
-/** A `to` template as a matcher, to see whether a rule could target a concrete path. */
+/**
+ * The parameters that make a `to` template land on a concrete path, or null when it cannot. Used to
+ * turn "which rule sends something to the new rule's source" into a concrete source path.
+ */
 function matchTarget(to: string, path: string): Record<string, string> | null {
-  // For this direction `:splat` may span segments and `:name` is one, but the template is checked
-  // against a concrete path, so the same compiler is enough once `:splat` is named `*`.
-  const asFrom = to.replace(/:splat\b/g, '*');
-  return matchFrom(asFrom, path);
+  // In this direction `:splat` may span segments and `:name` is one; the template is matched
+  // against one concrete path, so addressing `:splat` as a splat is enough.
+  const matched = compileFrom(to.replace(/:splat\b/g, '*')).regex.exec(pathOnly(path));
+  if (!matched) return null;
+  const values: Record<string, string> = {};
+  compileFrom(to.replace(/:splat\b/g, '*')).names.forEach((name, index) => {
+    values[name] = matched[index + 1] ?? '';
+  });
+  return values;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Chain and loop analysis
-// ---------------------------------------------------------------------------------------------
-
-interface ChainVerdict {
-  kind: 'loop' | 'chain';
-  finalTarget: string;
-  chain: string[];
+/** The rule that answers a request, with the target it writes; `target` is null when unresolvable. */
+interface EffectiveTarget {
+  rule: RuleLine;
+  target: string | null;
 }
 
-/** A rule that already targets the new rule's source, so it would redirect twice. */
-interface IncomingVerdict {
-  kind: 'chain';
-  sources: string[];
-}
-
-type Walk =
-  | { kind: 'loop'; finalTarget: string; chain: string[] }
-  | { kind: 'chain'; finalTarget: string; chain: string[] }
-  | { kind: 'undecidable'; reason: string };
-
-/** The refusal for a walk that cannot be decided: the rules it followed are named. */
-function undecidableWalk(rule: RuleLine, path: string): Walk {
-  return {
-    kind: 'undecidable',
-    reason: `The existing rule ${rule.from} -> ${rule.to} matches ${path}, but its target needs a placeholder its source cannot supply, so whether this change loops cannot be decided here. Fix that rule first.`,
-  };
-}
-
-/**
- * Follow the rules from a proposed target. A loop comes back as `loop`; a target that already
- * redirects comes back as `chain` with the final target, which is what the rule should point at.
- * `ignoreFrom` is the rule being replaced: it must not make its own successor look like a chain.
- */
-function chainVerdict(lines: Line[], from: string, to: string, ignoreFrom: string | null): Walk | null {
-  const rules = lines.map((line, index) => ruleOf(line.text, index)).filter((rule): rule is RuleLine => rule !== null);
-  const usable = ignoreFrom === null ? rules : rules.filter((rule) => normalisePath(rule.from) !== normalisePath(ignoreFrom));
-  const origin = normalisePath(from);
-  const seen = new Set<string>([origin]);
-  let current = normalisePath(to);
-  let finalTarget = to;
-  const chain: string[] = [];
-  if (current === origin) return { kind: 'loop', finalTarget: to, chain: [to] };
-  for (let hops = 0; hops < 20; hops += 1) {
-    // Netlify and Cloudflare answer with the first rule that matches, so the first match wins here.
-    let matched: RuleLine | undefined;
-    let params: Record<string, string> | null = null;
-    for (const rule of usable) {
-      const values = matchFrom(rule.from, current);
-      if (values) {
-        matched = rule;
-        params = values;
-        break;
-      }
-    }
-    if (!matched || params === null) break;
-    const resolved = resolveTarget(matched.to, params);
-    if (resolved === null) return undecidableWalk(matched, current);
-    finalTarget = resolved;
-    chain.push(resolved);
-    const next = normalisePath(resolved);
-    if (next === origin || seen.has(next)) return { kind: 'loop', finalTarget, chain };
-    seen.add(next);
-    current = next;
-  }
-  return chain.length > 0 ? { kind: 'chain', finalTarget, chain } : null;
-}
-
-/**
- * The rules whose target is the new rule's source, patterns included: `/old/* -> /new/:splat`
- * already sends `/old/item` to `/new/item`, so adding `/new/item` would make it redirect twice.
- * A source the pattern cannot pin down is reported by the pattern itself.
- */
-function incomingVerdict(lines: Line[], from: string): IncomingVerdict | null {
-  const fromPath = normalisePath(from);
-  const sources: string[] = [];
-  for (const line of lines) {
-    const rule = ruleOf(line.text, 0);
-    if (!rule) continue;
-    const params = matchTarget(rule.to, fromPath);
+/** The first rule that answers a request value, as the platform applies them (first match wins). */
+function effectiveTarget(rules: readonly RuleLine[], requestValue: string): EffectiveTarget | null {
+  for (const rule of rules) {
+    const params = fromMatches(rule.from, requestValue);
     if (!params) continue;
-    const concrete = resolveTarget(rule.from.replaceAll('*', ':splat'), params);
-    sources.push(concrete === null ? rule.from : concrete);
+    return { rule, target: resolveTarget(rule.to, params) };
   }
-  return sources.length > 0 ? { kind: 'chain', sources } : null;
+  return null;
 }
 
-/** Refuse a new rule when an existing one already points at its source. */
-function incomingRefusal(change: RedirectChange, finalTarget: string, verdict: IncomingVerdict): Refusal {
-  const list = verdict.sources.join(', ');
-  return refuse(
-    'conflict',
-    `${list} already ${verdict.sources.length === 1 ? 'redirects' : 'redirect'} to ${change.from}, so ${verdict.sources.length === 1 ? 'it' : 'they'} would redirect twice. Point ${list} at ${finalTarget} in the same change set, or add this rule after updating ${verdict.sources.length === 1 ? 'it' : 'them'}.`,
-    { from: change.from, incoming: verdict.sources, suggestion: finalTarget },
-  );
-}
-
-function chainRefusal(change: RedirectChange, target: string, verdict: ChainVerdict): Refusal {
-  return refuse(
-    'conflict',
-    `${target} already redirects to ${verdict.finalTarget}. Point this rule at ${verdict.finalTarget} directly instead of adding a chain.`,
-    { from: change.from, suggestion: verdict.finalTarget, chain: verdict.chain },
-  );
-}
+// ---------------------------------------------------------------------------------------------
+// Refusals
+// ---------------------------------------------------------------------------------------------
 
 function loopRefusal(change: RedirectChange, target: string, chain: string[]): Refusal {
   return refuse('conflict', `Redirecting ${change.from} to ${target} creates a loop. Point it at a page that does not redirect.`, {
     from: change.from,
     chain,
   });
+}
+
+function chainRefusal(change: RedirectChange, target: string, finalTarget: string, chain: string[]): Refusal {
+  return refuse(
+    'conflict',
+    `${target} already redirects to ${finalTarget}. Point this rule at ${finalTarget} directly instead of adding a chain.`,
+    { from: change.from, suggestion: finalTarget, chain },
+  );
+}
+
+function incomingRefusal(change: RedirectChange, finalTarget: string, sources: string[]): Refusal {
+  const list = sources.join(', ');
+  return refuse(
+    'conflict',
+    `${list} already ${sources.length === 1 ? 'redirects' : 'redirect'} to ${change.from}, so ${sources.length === 1 ? 'it' : 'they'} would redirect twice. Point ${list} at ${finalTarget} in the same change set, or add this rule after updating ${sources.length === 1 ? 'it' : 'them'}.`,
+    { from: change.from, incoming: sources, suggestion: finalTarget },
+  );
+}
+
+/**
+ * A pattern rule the change's own source or target runs into. Phase 1 changes write one literal
+ * rule and never edit a pattern, so the fix is a person's edit of the redirects file.
+ */
+function patternInteractionRefusal(change: RedirectChange, rule: RuleLine, path: string): Refusal {
+  const line = rule.index + 1;
+  return refuse(
+    'conflict',
+    `${path} interacts with the pattern rule at line ${line} (${rule.from} -> ${rule.to}); this change can only add a rule for one URL. Edit the redirects file by hand if that pattern needs to change.`,
+    { from: change.from, line, rule: { from: rule.from, to: rule.to } },
+  );
+}
+
+/** A pattern rule whose target cannot be resolved for a path, so a loop cannot be ruled out. */
+function undecidableRefusal(change: RedirectChange, rule: RuleLine, path: string): Refusal {
+  const line = rule.index + 1;
+  return refuse(
+    'conflict',
+    `${path} matches the rule at line ${line} (${rule.from} -> ${rule.to}), but its target needs a placeholder that rule cannot supply, so whether this change loops cannot be decided. It interacts with the pattern rule at line ${line}; edit the redirects file by hand.`,
+    { from: change.from, line, rule: { from: rule.from, to: rule.to } },
+  );
 }
 
 function detailOf(change: RedirectChange): { to: string; status: number } | Refusal {
@@ -368,23 +396,119 @@ function updatedRuleLine(line: string, spans: RuleSpans, to: string, status: num
   return `${line.slice(0, spans.to.end)}  ${status}${line.slice(spans.to.end)}`;
 }
 
-/** Add, update or remove one rule in a Netlify-format redirects file. */
+// ---------------------------------------------------------------------------------------------
+// Loop and chain analysis
+// ---------------------------------------------------------------------------------------------
+
+/** The rules of the file after the change, plus the rule the change writes. */
+interface ProposedFile {
+  rules: RuleLine[];
+  newRule: RuleLine;
+}
+
+/** The rules whose effective target is the new rule's source, so they would redirect twice. */
+interface Incoming {
+  sources: string[];
+  /** A pattern rule that sends some path to the source but cannot be resolved to one path. */
+  undecidable: RuleLine | null;
+}
+
+function incomingOf(rules: readonly RuleLine[], newRule: RuleLine): Incoming {
+  const origin = identityOf(newRule.from);
+  const sources: string[] = [];
+  let undecidable: RuleLine | null = null;
+  for (const rule of rules) {
+    if (rule === newRule) continue;
+    let source = rule.from;
+    if (isPattern(rule.from)) {
+      const params = matchTarget(rule.to, newRule.from);
+      if (!params) continue;
+      const concrete = resolveTarget(rule.from.replaceAll('*', ':splat'), params);
+      if (concrete === null) {
+        undecidable = rule;
+        continue;
+      }
+      source = concrete;
+    } else if (identityOf(rule.to) !== origin) {
+      continue;
+    }
+    // First match wins: the rule only sends `source` to the new rule's source when no earlier rule
+    // answers `source` instead. That is what makes a shadowed pattern not a chain.
+    const found = effectiveTarget(rules, source);
+    if (!found || found.rule !== rule || found.target === null) continue;
+    if (identityOf(found.target) !== origin) continue;
+    sources.push(source);
+  }
+  return { sources, undecidable };
+}
+
+/**
+ * Refuse a proposed file whose new rule loops, chains, or runs into a pattern rule that only a
+ * person should change. Returns null when the rule is safe.
+ */
+function graphRefusal(change: RedirectChange, proposed: ProposedFile): Refusal | null {
+  const { rules, newRule } = proposed;
+  const origin = identityOf(newRule.from);
+  if (identityOf(newRule.to) === origin) return loopRefusal(change, newRule.to, [newRule.to]);
+
+  // The rule's own source and target must be settled by the first match: a pattern that answers
+  // either path is an interaction this change does not make, and an earlier rule that answers the
+  // new source leaves the new rule with nothing to do.
+  for (const path of [newRule.from, newRule.to]) {
+    const found = effectiveTarget(rules, path);
+    if (!found || found.rule === newRule) continue;
+    if (isPattern(found.rule.from)) return patternInteractionRefusal(change, found.rule, path);
+    if (path !== newRule.from) continue;
+    return refuse(
+      'conflict',
+      `The rule at line ${found.rule.index + 1} (${found.rule.from} -> ${found.rule.to}) already answers ${path} first, so this rule would never apply. Update that rule instead, or remove it first.`,
+      { from: change.from, line: found.rule.index + 1 },
+    );
+  }
+
+  // Follow the resulting file from the new target: a hop is a chain, a return to the start is a
+  // loop. Pattern rules are followed too, with their placeholders filled from the path they see.
+  const seen = new Set<string>([origin]);
+  const chain: string[] = [];
+  let finalTarget = newRule.to;
+  let current = newRule.to;
+  for (let hops = 0; hops < 20; hops += 1) {
+    const found = effectiveTarget(rules, current);
+    if (!found || found.rule === newRule) break;
+    if (found.target === null) return undecidableRefusal(change, found.rule, pathOnly(current));
+    finalTarget = found.target;
+    chain.push(finalTarget);
+    const next = identityOf(finalTarget);
+    if (next === origin || seen.has(next)) return loopRefusal(change, newRule.to, chain);
+    seen.add(next);
+    current = finalTarget;
+  }
+
+  const incoming = incomingOf(rules, newRule);
+  if (incoming.undecidable) return undecidableRefusal(change, incoming.undecidable, newRule.from);
+  if (incoming.sources.length > 0) return incomingRefusal(change, finalTarget, incoming.sources);
+  if (chain.length > 0) return chainRefusal(change, newRule.to, finalTarget, chain);
+  return null;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The editor
+// ---------------------------------------------------------------------------------------------
+
+/** Add, update or remove one literal rule in a Netlify-format redirects file. */
 export function applyRedirectEdit(text: string, change: RedirectChange): RedirectEditOutcome {
   const hashProblem = sourceHashRefusal(change, text);
   if (hashProblem) return hashProblem;
   const lines = splitLines(text);
   const rules = lines.map((line, index) => ruleOf(line.text, index)).filter((rule): rule is RuleLine => rule !== null);
-  const from = normalisePath(change.from);
-  const existing = rules.find((rule) => normalisePath(rule.from) === from);
+  const existing = rules.find((rule) => identityOf(rule.from) === identityOf(change.from));
   const target = detailOf(change);
   if ('ok' in target) return target;
 
   const fromProblem = redirectTokenProblem(change.from, 'from');
-  if (fromProblem) return refuse('invalid', fromProblem, { from: change.from });
-  if (change.operation !== 'remove') {
-    const toProblem = redirectTokenProblem(target.to, 'to');
-    if (toProblem) return refuse('invalid', toProblem, { to: target.to });
-  }
+  if (fromProblem) return refuse(isRedirectPattern(change.from) ? 'unsupported' : 'invalid', fromProblem, { from: change.from });
+  const toProblem = redirectTokenProblem(target.to, 'to');
+  if (toProblem) return refuse(isRedirectPattern(target.to) ? 'unsupported' : 'invalid', toProblem, { to: target.to });
 
   if (change.operation === 'add') {
     if (existing) {
@@ -392,12 +516,9 @@ export function applyRedirectEdit(text: string, change: RedirectChange): Redirec
         from: change.from,
       });
     }
-    const verdict = chainVerdict(lines, change.from, target.to, null);
-    if (verdict?.kind === 'undecidable') return refuse('conflict', verdict.reason, { from: change.from });
-    if (verdict?.kind === 'loop') return loopRefusal(change, target.to, verdict.chain);
-    const incoming = incomingVerdict(lines, change.from);
-    if (incoming) return incomingRefusal(change, verdict?.finalTarget ?? target.to, incoming);
-    if (verdict) return chainRefusal(change, target.to, verdict);
+    const newRule: RuleLine = { index: -1, from: change.from, to: target.to, status: target.status };
+    const refusal = graphRefusal(change, { rules: [...rules, newRule], newRule });
+    if (refusal) return refusal;
     const eol = lines.find((line) => line.ending !== '')?.ending ?? '\n';
     const rule = `${change.from}  ${target.to}  ${target.status}`;
     if (lines.length === 1 && lines[0]!.text === '') return { ok: true, text: `${rule}${eol}`, changed: true };
@@ -420,11 +541,12 @@ export function applyRedirectEdit(text: string, change: RedirectChange): Redirec
     return { ok: true, text: joinLines(lines), changed: true };
   }
 
-  const verdict = chainVerdict(lines, change.from, target.to, change.from);
-  if (verdict?.kind === 'undecidable') return refuse('conflict', verdict.reason, { from: change.from });
-  if (verdict?.kind === 'loop') return loopRefusal(change, target.to, verdict.chain);
-  if (verdict) return chainRefusal(change, target.to, verdict);
   if (existing.to === target.to && existing.status === target.status) return { ok: true, text, changed: false };
+
+  const newRule: RuleLine = { index: existing.index, from: change.from, to: target.to, status: target.status };
+  const resulting = rules.map((rule) => (rule.index === existing.index ? newRule : rule));
+  const refusal = graphRefusal(change, { rules: resulting, newRule });
+  if (refusal) return refusal;
 
   const spans = ruleSpansOf(lines[existing.index]!.text);
   if (!spans) return refuse('invalid', `The redirect from ${change.from} could not be located precisely enough to update it.`);
