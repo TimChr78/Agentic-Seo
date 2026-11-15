@@ -124,7 +124,7 @@ export async function seedThinLoop(
     hypothesis: 'If the title fits the result, the whole message is read and more people click.',
     expectedImpact: {
       summary: 'Expected: CTR +5–10% on the pricing page',
-      trafficAtStake: { kind: 'unknown', reason: 'Search Console is not connected for this site.' },
+      trafficAtStake: { kind: 'unknown', reason: 'Search Console is not connected for this site.', computedAt: new Date().toISOString() },
       confidence: 'medium',
     },
     effort: 'small',

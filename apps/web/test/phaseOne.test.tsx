@@ -188,6 +188,7 @@ const RECOMMENDATION: RecommendationDetail = {
   latestVersion: 2,
   publishedVersion: null,
   versionState: 'draft',
+  trafficAtStakeComputedAt: '2026-11-12T09:05:00.000Z',
   priority: null,
   ownerAgentId: null,
   content: {
@@ -197,7 +198,7 @@ const RECOMMENDATION: RecommendationDetail = {
     expectedImpact: {
       summary: 'Expected: CTR +5–10% on 12 pages',
       confidence: 'medium',
-      trafficAtStake: { kind: 'unknown', reason: 'Search Console is not connected.' },
+      trafficAtStake: { kind: 'unknown', reason: 'Search Console is not connected.', computedAt: '2026-11-12T09:05:00.000Z' },
     },
     effort: 'small',
     dependsOn: [],
@@ -492,7 +493,7 @@ describe('the issue detail', () => {
       version: 1,
       state: 'draft' as const,
       status: 'proposed' as const,
-      trafficAtStake: { kind: 'unknown' as const, reason: 'Search Console is not connected.' },
+      trafficAtStake: { kind: 'unknown' as const, reason: 'Search Console is not connected.', computedAt: '2026-11-12T09:05:00.000Z' },
       warnings: [],
     }));
     setApiClient(
@@ -529,7 +530,7 @@ describe('the issue detail', () => {
       version: 1,
       state: 'draft' as const,
       status: 'proposed' as const,
-      trafficAtStake: { kind: 'unknown' as const, reason: 'Search Console is not connected.' },
+      trafficAtStake: { kind: 'unknown' as const, reason: 'Search Console is not connected.', computedAt: '2026-11-12T09:05:00.000Z' },
       warnings: [],
     }));
     setApiClient(
@@ -758,6 +759,8 @@ describe('the recommendations', () => {
     expect(screen.getAllByText('Search Console is not connected.').length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Expected:/).length).toBeGreaterThan(0);
     expect(screen.getByText('Pages touched: Unknown')).toBeTruthy();
+    // When the estimate was made (it moves with Search Console data every day).
+    expect(screen.getByText(/Traffic at stake computed .* from the Search Console data then available/)).toBeTruthy();
     expect(screen.getByText(/draft a change set from the proposed changes/)).toBeTruthy();
   });
 

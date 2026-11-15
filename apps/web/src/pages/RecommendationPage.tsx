@@ -14,7 +14,7 @@ import { Identifier } from '../ui/Identifier';
 import { UrlCell } from '../ui/seo/evidence';
 import { ChangeStatePill, RecommendationStatusPill } from '../ui/seo/pills';
 import { type Reach, TrafficAtRisk } from '../ui/seo/reach';
-import { formatDateTime, timeAgo } from '../ui/time';
+import { formatDate, formatDateTime, timeAgo } from '../ui/time';
 import { useToast } from '../ui/toast';
 import { ApprovalBar, usePendingApproval } from './seo/Approval';
 import { DraftChangeSetDialog } from './seo/DraftChangeSetDialog';
@@ -98,6 +98,11 @@ export default function RecommendationPage({ recommendationId }: { recommendatio
         <span className="font-normal text-fg-2">·</span>
         <span className="font-normal text-fg-2">reversible through a GitHub pull request</span>
       </p>
+      {detail.trafficAtStakeComputedAt && (
+        <p className="mt-1 text-[13px] leading-5 text-fg-2">
+          Traffic at stake computed {formatDate(detail.trafficAtStakeComputedAt)} from the Search Console data then available.
+        </p>
+      )}
       <p className="mt-1 text-[13px] leading-5 text-fg-2">
         <span className="font-medium text-fg">Expected:</span> {content.expectedImpact?.summary}
       </p>
