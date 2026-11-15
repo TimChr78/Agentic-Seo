@@ -27,8 +27,8 @@ Every capability is a `defineCommand` with zod input/output, a `permission`, an 
 | `tracking.*` | ranks (create, estimate, run, history, pin, add/remove keywords), local (grid, serp, business, reviews, updates, questions, categories), aiVisibility (generatePrompts, research, create, estimate, run, results, answer, sources, trend, export, schedule), explorePrompt, brandLookup |
 | `search.*` | gsc (sites, connect, performance, inspect, opportunities), ga4 (properties, organicOverview, pagePerformance, landingPages, acquisition, keyEvents, ecommerce, siteSearch, audience, measurementHealth), bing (queries, backlinks), indexNow.submit |
 | `content.*` | briefs (create from keyword/cluster/URL), outline, competitorPages, programmaticPlan, schema (generate, validate), sitemap (generate), llmsTxt (generate), hreflang (generate), sendToMarketing |
-| `recommendations.*` | list, get, create, update, prioritise, dependencies, outcome |
-| `changes.*` | create, updateDraft, diff, preview, requestApply, apply, verify, rollback, status |
+| `recommendations.*` | list, get, create, update, prioritise, dependencies, generate, runs, run (Phase 1); outcome (Phase 2) |
+| `changes.*` | create, updateDraft, get, list, diff, status, requestApply, rollback, types (Phase 1; applying, polling and verifying are background jobs, never commands); preview (later) |
 | `reports.*` | save, list, get, delete, templates (save, list, delete), share |
 | `agents.*`, `learnings.*`, `approvals.*`, `workspace.*` | ported from Agentic Marketing |
 | `usage.*` | budgets, spend, estimates |
