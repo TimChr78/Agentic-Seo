@@ -116,7 +116,8 @@ test('the GitHub connection carries a drafted change set to an approved pull req
   const mapping = ownerPage.getByLabel(/^Source mapping/);
   await mapping.fill(JSON.stringify({ rules: [{ routes: '/pricing', source: 'content/pricing/index.html', editor: 'html' }] }));
   await ownerPage.getByRole('button', { name: 'Connect GitHub' }).click();
-  await expect(ownerPage.getByText('acme/site')).toBeVisible({ timeout: 20_000 });
+  // Exact: the success toast also names the repository in a longer sentence.
+  await expect(ownerPage.getByText('acme/site', { exact: true })).toBeVisible({ timeout: 20_000 });
 
   // Draft from the recommendation: an issue-created one starts with an empty row, so the person
   // names the type, page and values here.
@@ -156,7 +157,10 @@ test('the GitHub connection carries a drafted change set to an approved pull req
   await approverPage.goto('/inbox');
   await settle(approverPage);
   await expect(approverPage.getByRole('heading', { level: 1, name: 'Inbox' })).toBeVisible();
-  const row = approverPage.getByRole('listitem').filter({ hasText: ISSUE_TITLE }).first();
+  // Inside the approvals section: the Inbox also lists proposed recommendations, and this title is
+  // both the recommendation and the change set it drafted.
+  const approvals = approverPage.locator('section[aria-labelledby="inbox-approvals"]');
+  const row = approvals.getByRole('listitem').filter({ hasText: ISSUE_TITLE });
   await expect(row).toBeVisible();
   await row.getByRole('button', { name: 'Review' }).click();
   const drawer = approverPage.getByRole('dialog', { name: ISSUE_TITLE });
