@@ -249,7 +249,12 @@ export default function ChangePage({ changeSetId }: { changeSetId: string }) {
                   {run.prUrl && (
                     <>
                       <span aria-hidden>·</span>
-                      <a href={run.prUrl} target="_blank" rel="noreferrer noopener" className="font-medium text-accent hover:underline">
+                      <a
+                        href={run.prUrl}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="font-medium text-accent underline underline-offset-2 hover:text-accent-hover"
+                      >
                         PR #{run.prNumber}
                       </a>
                     </>
@@ -258,7 +263,7 @@ export default function ChangePage({ changeSetId }: { changeSetId: string }) {
               ) : (
                 <p className="mt-2 text-[12px] leading-[18px] text-muted">
                   No GitHub connection for this site, so the pull request cannot be read.{' '}
-                  <a href="/settings/connections" className="text-accent hover:underline">
+                  <a href="/settings/connections" className="text-accent underline underline-offset-2 hover:text-accent-hover">
                     Connect GitHub
                   </a>
                 </p>
@@ -368,7 +373,7 @@ function DiffsTab({ diff, error, onRetry }: { diff: ChangeSetDiff | undefined; e
     <div className="space-y-6">
       {diff.urls.map((url) => (
         <section key={url.url} aria-label={url.url}>
-          <h3 className="mb-2 font-mono text-[12px] leading-[18px] break-all text-fg-2">{url.url}</h3>
+          <h2 className="mb-2 font-mono text-[12px] leading-[18px] break-all text-fg-2">{url.url}</h2>
           {url.changes.map((change, index) =>
             change.type === 'redirect' ? (
               // biome-ignore lint/suspicious/noArrayIndexKey: these rows have no identity of their own; the index is their position in an ordered list that never reorders

@@ -117,8 +117,10 @@ export async function seedThinLoop(
   // the second person in the journey.
   const content = {
     title: 'Rewrite the pricing page title',
-    rationale: `The title on ${url} is cut off in the result (issue ${issueId}).`,
-    evidence: [{ kind: 'issue', id: issueId, note: 'The pricing page title is too long.' }],
+    rationale: `The title on ${url} is cut off in the result (finding ${findingId}).`,
+    // A finding, not the issue: the journey creates its own recommendation from the issue, and the
+    // issue screen only offers that when no recommendation already cites it.
+    evidence: [{ kind: 'finding', id: findingId, note: 'The pricing page title is too long.' }],
     hypothesis: 'If the title fits the result, the whole message is read and more people click.',
     expectedImpact: {
       summary: 'Expected: CTR +5–10% on the pricing page',
