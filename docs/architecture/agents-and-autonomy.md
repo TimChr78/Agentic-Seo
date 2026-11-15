@@ -140,6 +140,22 @@ A **specialist** is a versioned `skill` artifact. It holds a playbook (Markdown)
 
 **Full audit run.** The strategist detects the business type, then fans out the relevant specialists in parallel. Fan-out is bounded per workspace, with each specialist under its own budget. The strategist collects their structured outputs and synthesises them into recommendations. The synthesis follows claude-seo's PERCEIVE → ANALYZE → VALIDATE → ACT method, made structural: a recommendation without evidence ids, a hypothesis, a falsification check and a leading indicator fails output validation and is retried, then dropped with a reason.
 
+**Phase 1 implementation.** The run is `recommendations.generate`, which queues a job and returns a run id
+(`recommendations.runs` / `recommendations.run`). It has two specialists, seeded on first use as published
+`skill` artifacts per workspace — a **technical** one on the fast tier, which turns open issues into
+candidates, and the **strategist** on the deep tier, which writes the recommendations. Both calls use
+structured output over a bounded facts payload (open issues, pages, Search Console clicks, which change
+types the site can apply), reserve tokens against the `agents` provider's budget before the call and settle
+it after, and log the call with the playbook version they used.
+
+The synthesis fields are enforced by the recommendation content schema for **every** author, so a person
+writing one by hand is as falsifiable as an agent. The traffic at stake is computed from the evidence pages
+with the reach estimate; the input has no field for it. A status (`proposed`, `accepted`, `implemented`,
+`rejected`) is derived from the artifact's own lifecycle and the change sets whose content names it, never
+stored, so it cannot disagree with what happened; `measured` arrives with outcomes. Because a deleted audit
+takes its findings with it, a recommendation can be drafted on evidence that has since gone, but it cannot be
+published while an id no longer resolves.
+
 ## 6. Opportunity detectors (deterministic, before the LLM)
 
 These are scheduled jobs over search facts and research data. They create **opportunities** that agents then turn into recommendations:

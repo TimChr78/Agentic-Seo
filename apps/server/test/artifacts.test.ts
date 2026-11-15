@@ -103,13 +103,13 @@ describe('artifacts: drafts, history and diffs', () => {
   it('refuses content for a placeholder type with the phase it arrives in', async () => {
     const e = await rejects(
       apiOwner.call('artifacts.create', {
-        type: 'recommendation',
+        type: 'audit_profile',
         name: 'Too early',
-        content: { title: 'Not yet' },
+        content: { any: 'thing' },
       }),
     );
     expect(e.code).toBe('invalid_input');
-    expect(e.message).toContain('This artifact type arrives in Phase 1.');
+    expect(e.message).toContain('This artifact type arrives in Phase 2.');
   });
 
   it('makes site_context a singleton per site, not per workspace', async () => {

@@ -71,6 +71,9 @@ importers:
       '@agentic-seo/providers':
         specifier: workspace:*
         version: link:../../packages/providers
+      '@agentic-seo/recommendations':
+        specifier: workspace:*
+        version: link:../../packages/recommendations
       '@agentic-seo/search-data':
         specifier: workspace:*
         version: link:../../packages/search-data
@@ -491,6 +494,54 @@ importers:
       '@agentic-seo/fetch':
         specifier: workspace:*
         version: link:../fetch
+      drizzle-orm:
+        specifier: 0.45.4
+        version: 0.45.4(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(kysely@0.29.9)(pg@8.23.1)
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
+
+  packages/recommendations:
+    dependencies:
+      '@agentic-seo/ai':
+        specifier: workspace:*
+        version: link:../ai
+      '@agentic-seo/artifacts':
+        specifier: workspace:*
+        version: link:../artifacts
+      '@agentic-seo/change-sets':
+        specifier: workspace:*
+        version: link:../change-sets
+      '@agentic-seo/changes':
+        specifier: workspace:*
+        version: link:../changes
+      '@agentic-seo/checks':
+        specifier: workspace:*
+        version: link:../checks
+      '@agentic-seo/commands':
+        specifier: workspace:*
+        version: link:../commands
+      '@agentic-seo/core':
+        specifier: workspace:*
+        version: link:../core
+      '@agentic-seo/db':
+        specifier: workspace:*
+        version: link:../db
+      '@agentic-seo/integrations':
+        specifier: workspace:*
+        version: link:../integrations
+      '@agentic-seo/search-data':
+        specifier: workspace:*
+        version: link:../search-data
+      '@agentic-seo/secrets':
+        specifier: workspace:*
+        version: link:../secrets
+      '@agentic-seo/telemetry':
+        specifier: workspace:*
+        version: link:../telemetry
+      ai:
+        specifier: 7.0.170
+        version: 7.0.170(zod@4.6.7)
       drizzle-orm:
         specifier: 0.45.4
         version: 0.45.4(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(kysely@0.29.9)(pg@8.23.1)

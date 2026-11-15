@@ -6,6 +6,7 @@ import { auditIssueCommands, checkCommands } from '@agentic-seo/checks';
 import type { AnyCommand } from '@agentic-seo/commands';
 import { auditCommands } from '@agentic-seo/crawl';
 import { providerCommands } from '@agentic-seo/providers';
+import { recommendationsCommands } from '@agentic-seo/recommendations';
 import { searchDataCommands } from '@agentic-seo/search-data';
 import { secretCommands } from '@agentic-seo/secrets';
 import { siteCommands } from '@agentic-seo/sites';
@@ -34,6 +35,7 @@ export const commands = [
   ...searchDataCommands,
   ...githubConnectorCommands,
   ...changeCommands,
+  ...recommendationsCommands,
   undoAgent,
   { ...setSecret, actionClass: 'settings' as const },
   listSecrets,

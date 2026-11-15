@@ -13,6 +13,12 @@ import type { Db } from '@agentic-seo/db';
 import { buildUserAgent } from '@agentic-seo/fetch';
 import { GSC_CONNECTOR_ID, refreshDueConnections } from '@agentic-seo/integrations';
 import { createProviderGateway } from '@agentic-seo/providers';
+import {
+  RECOMMENDATIONS_GENERATE_TASK,
+  RECOMMENDATIONS_RECONCILE_TASK,
+  reconcileRecommendationRuns,
+  runRecommendationGeneration,
+} from '@agentic-seo/recommendations';
 import { runGscSync } from '@agentic-seo/search-data';
 import type { KeyProvider } from '@agentic-seo/secrets';
 import { logger } from '@agentic-seo/telemetry';
@@ -72,6 +78,9 @@ export const CRONTAB = [
   // Change sets wait on GitHub and a deploy; five minutes is the latency the change-set screen
   // promises, and the poller only reads what is already open.
   `*/5 * * * * ${CHANGES_POLL_TASK}`,
+  // A recommendation run is queued transactionally; this tick only picks up one whose job was lost
+  // (a fresh install without Graphile's schema, or a worker that died mid-run).
+  `* * * * * ${RECOMMENDATIONS_RECONCILE_TASK}`,
 ].join('\n');
 
 /** Options the crawl tasks accept; the version goes into the honest user agent. */
@@ -173,6 +182,19 @@ export function taskListFor(db: Db, kp: KeyProvider, config?: Config, options: C
         userAgent: userAgentFor(options),
         enqueue: (identifier, job, jobOptions) => helpers.addJob(identifier, job, jobOptions ?? {}).then(() => undefined),
       });
+    },
+    // A recommendation run: two structured model calls outside any transaction, each under the
+    // provider's budget, then the drafts and the run row in one transaction.
+    [RECOMMENDATIONS_GENERATE_TASK]: async (payload) => {
+      const outcome = await runRecommendationGeneration(db, payload, { kp });
+      if (outcome.status !== 'completed') logger.info({ ...outcome }, 'recommendation run did not create anything');
+    },
+    [RECOMMENDATIONS_RECONCILE_TASK]: async (_payload, helpers) => {
+      const summary = await reconcileRecommendationRuns(db, {
+        enqueue: (identifier, job) =>
+          helpers.addJob(identifier, job, { jobKey: `${identifier}:${String(job.runId ?? '')}` }).then(() => undefined),
+      });
+      if (summary.queued || summary.failed) logger.info(summary, 'recommendation reconciler ran');
     },
   };
 }
