@@ -5,6 +5,8 @@ export * from './editors';
 export * from './github';
 export * from './jsonld';
 export * from './mapping';
+export * from './pilot';
 export * from './refusal';
+export * from './source';
 export * from './urls';
 export * from './verify';

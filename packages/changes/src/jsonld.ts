@@ -86,12 +86,13 @@ export function jsonLdBlockHash(raw: string): string {
 }
 
 /**
- * The block body to write: two-space indentation, and `</` escaped as `<\/` so the JSON can never
- * close its own `<script>` element. (A JSON string cannot contain a bare `</` in a way that would
- * change the value: `<\/` is the same character to a JSON parser.)
+ * The block body to write: two-space indentation, the document's own line ending, and `</` escaped
+ * as `<\/` so the JSON can never close its own `<script>` element. (A JSON string cannot contain a
+ * bare `</` in a way that would change the value: `<\/` is the same character to a JSON parser.)
  */
-export function serialiseJsonLd(value: unknown): string {
-  return JSON.stringify(value, null, 2).replaceAll('</', '<\\/');
+export function serialiseJsonLd(value: unknown, lineEnding: '\n' | '\r\n' = '\n'): string {
+  const body = JSON.stringify(value, null, 2);
+  return (lineEnding === '\n' ? body : body.replaceAll('\n', lineEnding)).replaceAll('</', '<\\/');
 }
 
 /** A short human description of a selector, for refusal messages. */

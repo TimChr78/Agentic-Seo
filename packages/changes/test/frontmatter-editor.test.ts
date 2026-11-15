@@ -1,7 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { applyFrontmatterEdit, frontmatterValue } from '../src/editors/frontmatter';
+import { sourceHashOf } from '../src/source';
+import { parsePilotFrontmatter } from './pilot-parser';
 
+// The drafts are small excerpts of real files from TimChr78/martechsignal (content/drafts/), kept
+// with their own frontmatter so the pilot mapping is tested against the shapes it really meets.
 const draft = readFileSync(new URL('./fixtures/draft.md', import.meta.url), 'utf8');
 
 function changedLines(before: string, after: string): number[] {
@@ -101,15 +105,37 @@ describe('frontmatter editor: description', () => {
 
   it('inserts seo_description when the draft has none, and leaves the rest alone', () => {
     const withoutDescription = draft.replace(/seo_description: .*\n/, '');
-    const result = applyFrontmatterEdit(
-      withoutDescription,
-      description('The body excerpt, which the build uses instead.', 'A hand-written description.'),
-    );
+    const result = applyFrontmatterEdit(withoutDescription, {
+      ...description('The body excerpt, which the build uses instead.', 'A hand-written description.'),
+      sourceHash: sourceHashOf(withoutDescription),
+    });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.text.startsWith('---\nseo_description: A hand-written description.\ntitle:')).toBe(true);
     expect(frontmatterValue(result.text, 'seo_description')).toBe('A hand-written description.');
     expect(result.text).toContain('Five grader generations have scored martechsignal.com');
+  });
+
+  it('refuses an insertion it cannot check, because the file has no value to compare with before', () => {
+    const withoutDescription = draft.replace(/seo_description: .*\n/, '');
+    const result = applyFrontmatterEdit(
+      withoutDescription,
+      description('The body excerpt, which the build uses instead.', 'A hand-written description.'),
+    );
+    expect(result).toMatchObject({ ok: false, code: 'stale' });
+    if (result.ok) return;
+    expect(result.reason).toContain('sourceHashOf');
+    expect(result.details).toMatchObject({ key: 'seo_description' });
+  });
+
+  it('refuses a file whose sha256 is not the one the change was drafted against', () => {
+    const result = applyFrontmatterEdit(draft, {
+      ...title('Claude SEO benchmark: the living score tracker', 'Claude SEO benchmark: the record'),
+      sourceHash: 'a'.repeat(64),
+    });
+    expect(result).toMatchObject({ ok: false, code: 'stale' });
+    if (result.ok) return;
+    expect(result.details).toMatchObject({ expected: 'a'.repeat(64), actual: sourceHashOf(draft) });
   });
 
   it('refuses stale text', () => {
@@ -134,5 +160,49 @@ describe('frontmatter editor: shapes it cannot edit', () => {
   it('refuses a file without frontmatter', () => {
     const result = applyFrontmatterEdit('# Just markdown\n', title('old', 'new'));
     expect(result).toMatchObject({ ok: false, code: 'not_found' });
+  });
+});
+
+describe('frontmatter editor: the pilot dialect', () => {
+  const current = 'Claude SEO benchmark: the living score tracker';
+  const write = (after: string) => applyFrontmatterEdit(draft, title(current, after), { dialect: 'strip_quotes' });
+
+  it('writes a value with double quotes inside single quotes, and the pilot parser reads it back', () => {
+    const result = write('The "best" tools');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.text).toContain(`seo_title: 'The "best" tools'`);
+    expect(parsePilotFrontmatter(result.text).meta.seo_title).toBe('The "best" tools');
+  });
+
+  it('writes a value with single quotes inside double quotes, and the pilot parser reads it back', () => {
+    const result = write("It's the best tool");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.text).toContain('seo_title: "It\'s the best tool"');
+    expect(parsePilotFrontmatter(result.text).meta.seo_title).toBe("It's the best tool");
+  });
+
+  it('round-trips a colon, a hash and a per cent sign', () => {
+    const result = write('MCP: a stack #1 at 100%');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(parsePilotFrontmatter(result.text).meta.seo_title).toBe('MCP: a stack #1 at 100%');
+  });
+
+  it('refuses a value the pilot parser would change', () => {
+    const cases = ['say "hi"', '"quoted"', "'quoted'", 'trailing space ', ' leading space', '# a heading'];
+    for (const after of cases) {
+      const result = write(after);
+      expect(result, after).toMatchObject({ ok: false, code: 'unsupported' });
+    }
+    const both = write(`It's the "best"`);
+    expect(both).toMatchObject({ ok: false, code: 'unsupported' });
+  });
+
+  it('reads the current value the way the pilot does when checking before', () => {
+    const document = `---\nseo_title: "A \\"quoted\\" title"\n---\nBody\n`;
+    const result = applyFrontmatterEdit(document, title('A \\"quoted\\" title', 'A plainer title'), { dialect: 'strip_quotes' });
+    expect(result.ok).toBe(true);
   });
 });

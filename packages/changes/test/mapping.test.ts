@@ -7,18 +7,34 @@ const parsed = parseMapping(JSON.parse(mappingJson));
 if (!parsed.ok) throw new Error(`the example mapping does not parse: ${parsed.reason}`);
 const mapping = parsed.mapping;
 
+// Real drafts from TimChr78/martechsignal content/drafts/, kept as small excerpts in the fixture
+// set: their slugs are what the build turns into routes, and they are not derivable from the names.
+const pilotDrafts = [
+  'agent-fleet-in-the-wild-2026-10-19.md',
+  'agent-delegate-not-user-2026-11-11.md',
+  'claude-seo-benchmark-2026-09-27.md',
+  'mcp-martech-2026-07-29.md',
+];
+const draftTexts = new Map(
+  pilotDrafts.map((name) => [`content/drafts/${name}`, readFileSync(new URL(`./fixtures/pilot/${name}`, import.meta.url), 'utf8')]),
+);
+
 const files = [
   'index.html',
   'about/index.html',
   'authors/tim-christensen/index.html',
   'blog/claude-seo-benchmark/index.html',
-  'content/drafts/claude-seo-benchmark-2026-09-27.md',
-  'content/drafts/other-post-2026-01-01.md',
+  ...[...draftTexts.keys()],
   'sitemap.xml',
   'tools/nocobase/index.html',
 ];
 
 const listFiles = async (prefix: string) => files.filter((file) => file.startsWith(prefix));
+const readFile = async (path: string) => {
+  const text = draftTexts.get(path);
+  if (text === undefined) throw new Error(`the fixture set has no file ${path}`);
+  return text;
+};
 
 describe('source mapping: the pilot', () => {
   it('resolves the home page to the repository root', async () => {
@@ -31,8 +47,8 @@ describe('source mapping: the pilot', () => {
     expect(result).toMatchObject({ ok: true, path: 'about/index.html', editor: 'html', confidence: 'exact', affectedRoutes: ['/about/'] });
   });
 
-  it('resolves a blog route through the dated draft glob', async () => {
-    const result = await resolveSource(mapping, '/blog/claude-seo-benchmark/', { listFiles, changeType: 'meta.title' });
+  it('resolves a blog route by the draft frontmatter slug, not the file name', async () => {
+    const result = await resolveSource(mapping, '/blog/claude-seo-benchmark/', { listFiles, readFile, changeType: 'meta.title' });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.path).toBe('content/drafts/claude-seo-benchmark-2026-09-27.md');
@@ -40,11 +56,30 @@ describe('source mapping: the pilot', () => {
     expect(result.confidence).toBe('glob');
     expect(result.fields.title).toEqual(['seo_title', 'title']);
     expect(result.fields.description).toEqual(['seo_description']);
+    expect(result.dialect).toBe('strip_quotes');
     expect(result.affectedRoutes).toEqual(['/blog/claude-seo-benchmark/']);
   });
 
+  it('resolves a route whose slug repeats the whole dated file name', async () => {
+    const result = await resolveSource(mapping, '/blog/agent-fleet-in-the-wild-2026-10-19/', { listFiles, readFile });
+    expect(result).toMatchObject({ ok: true, path: 'content/drafts/agent-fleet-in-the-wild-2026-10-19.md' });
+  });
+
+  it('resolves a route from the title when the draft has no slug', async () => {
+    const result = await resolveSource(mapping, '/blog/mcp-rewrites-the-integration-economics-of-your-marketing-stack/', {
+      listFiles,
+      readFile,
+    });
+    expect(result).toMatchObject({ ok: true, path: 'content/drafts/mcp-martech-2026-07-29.md' });
+  });
+
+  it('finds the draft whose slug shares nothing with its file name', async () => {
+    const result = await resolveSource(mapping, '/blog/agent-delegate-not-user/', { listFiles, readFile });
+    expect(result).toMatchObject({ ok: true, path: 'content/drafts/agent-delegate-not-user-2026-11-11.md' });
+  });
+
   it('refuses a generated tool page with the reason and the build script to edit', async () => {
-    const result = await resolveSource(mapping, '/tools/nocobase/', { listFiles });
+    const result = await resolveSource(mapping, '/tools/nocobase/', { listFiles, readFile });
     expect(result).toMatchObject({ ok: false, code: 'unsupported' });
     if (result.ok) return;
     expect(result.reason).toContain('tools/build_tools.py');
@@ -52,17 +87,26 @@ describe('source mapping: the pilot', () => {
   });
 
   it('refuses a blog route with no matching draft file', async () => {
-    const result = await resolveSource(mapping, '/blog/no-such-post/', { listFiles });
+    const result = await resolveSource(mapping, '/blog/no-such-post/', { listFiles, readFile });
     expect(result).toMatchObject({ ok: false, code: 'not_found' });
   });
 
-  it('refuses an ambiguous dated draft', async () => {
-    const ambiguous = async (prefix: string) =>
-      [...files, 'content/drafts/claude-seo-benchmark-2026-10-01.md'].filter((file) => file.startsWith(prefix));
-    const result = await resolveSource(mapping, '/blog/claude-seo-benchmark/', { listFiles: ambiguous });
+  it('refuses a slug two drafts claim', async () => {
+    const twin = 'content/drafts/claude-seo-benchmark-2026-10-01.md';
+    const withTwin = async (prefix: string) => [...files, twin].filter((file) => file.startsWith(prefix));
+    const readTwin = async (path: string) =>
+      path === twin ? draftTexts.get('content/drafts/claude-seo-benchmark-2026-09-27.md')! : readFile(path);
+    const result = await resolveSource(mapping, '/blog/claude-seo-benchmark/', { listFiles: withTwin, readFile: readTwin });
     expect(result).toMatchObject({ ok: false, code: 'ambiguous' });
     if (result.ok) return;
-    expect(result.details).toMatchObject({ candidates: expect.arrayContaining(['content/drafts/claude-seo-benchmark-2026-10-01.md']) });
+    expect(result.details).toMatchObject({ candidates: expect.arrayContaining([twin]) });
+  });
+
+  it('refuses a slug-resolved rule without a way to read the drafts', async () => {
+    const result = await resolveSource(mapping, '/blog/claude-seo-benchmark/', { listFiles });
+    expect(result).toMatchObject({ ok: false, code: 'unsupported' });
+    if (result.ok) return;
+    expect(result.reason).toContain('readFile');
   });
 
   it('refuses JSON-LD on a frontmatter source and names the build template', async () => {
@@ -152,5 +196,25 @@ describe('source mapping: patterns and validation', () => {
     expect(result).toMatchObject({ ok: false, code: 'unsupported' });
     if (result.ok) return;
     expect(result.reason).toContain('overwritten at the next build');
+  });
+
+  it('refuses the file a glob resolved to when the build writes it', async () => {
+    const custom = parseMapping({
+      rules: [{ routes: '/posts/:slug/', source: 'content/*/:slug.md', editor: 'markdown_frontmatter' }],
+      generated: ['content/archive/*.md'],
+    });
+    if (!custom.ok) throw new Error(custom.reason);
+    const generatedOnly = async (prefix: string) => ['content/archive/old.md'].filter((file) => file.startsWith(prefix));
+    const result = await resolveSource(custom.mapping, '/posts/old/', { listFiles: generatedOnly });
+    expect(result).toMatchObject({ ok: false, code: 'unsupported' });
+    if (result.ok) return;
+    expect(result.reason).toContain('overwritten at the next build');
+    expect(result.details).toMatchObject({ path: 'content/archive/old.md', generated: true });
+
+    const sourceOnly = async (prefix: string) => ['content/live/old.md'].filter((file) => file.startsWith(prefix));
+    expect(await resolveSource(custom.mapping, '/posts/old/', { listFiles: sourceOnly })).toMatchObject({
+      ok: true,
+      path: 'content/live/old.md',
+    });
   });
 });

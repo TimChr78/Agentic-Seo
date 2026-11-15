@@ -113,9 +113,11 @@ describe('version_file deploy detection', () => {
 });
 
 describe('github_deployments detection', () => {
+  type StatusEntry = string | { state: string; createdAt: string };
+
   function github(
     deployments: { id: number; sha: string }[],
-    statuses: Record<number, string[]>,
+    statuses: Record<number, StatusEntry[]>,
     compareStatus: 'ahead' | 'behind' | 'identical' | 'diverged',
   ) {
     return {
@@ -125,15 +127,14 @@ describe('github_deployments detection', () => {
           sha: deployment.sha,
           ref: 'main',
           environment: 'production',
-          createdAt: `2026-11-1${index}T00:00:00Z`,
+          // Newest first, as GitHub returns them.
+          createdAt: `2026-11-${20 - index}T00:00:00Z`,
         })),
       listDeploymentStatuses: async (id: number) =>
-        (statuses[id] ?? []).map((state, index) => ({
-          id: index,
-          state,
-          description: null,
-          createdAt: '2026-11-15T00:00:00Z',
-        })),
+        (statuses[id] ?? []).map((entry, index) => {
+          const status = typeof entry === 'string' ? { state: entry, createdAt: '2026-11-15T00:00:00Z' } : entry;
+          return { id: index, state: status.state, description: null, createdAt: status.createdAt };
+        }),
       compareCommits: async () => ({ status: compareStatus, aheadBy: 0, behindBy: 0, totalCommits: 0 }),
     };
   }
@@ -180,6 +181,35 @@ describe('github_deployments detection', () => {
     const result = await detectGitHubDeployment({
       mergeSha: MERGE,
       github: github([{ id: 1, sha: DEPLOYED }], { 1: ['failure', 'in_progress'] }, 'identical'),
+    });
+    expect(result).toMatchObject({ state: 'unknown' });
+  });
+
+  it('does not count a deployment that succeeded and was later deactivated', async () => {
+    // GitHub returns statuses newest first: `inactive` is what the deployment is now.
+    const result = await detectGitHubDeployment({
+      mergeSha: MERGE,
+      github: github([{ id: 1, sha: DEPLOYED }], { 1: ['inactive', 'success'] }, 'identical'),
+    });
+    expect(result).toMatchObject({ state: 'unknown' });
+    if (result.state !== 'unknown') return;
+    expect(result.reason).toContain('not a success');
+  });
+
+  it('orders statuses by created_at instead of trusting the array', async () => {
+    // A success first in the array but older than the inactive status that followed it.
+    const result = await detectGitHubDeployment({
+      mergeSha: MERGE,
+      github: github(
+        [{ id: 1, sha: DEPLOYED }],
+        {
+          1: [
+            { state: 'success', createdAt: '2026-11-14T00:00:00Z' },
+            { state: 'inactive', createdAt: '2026-11-15T00:00:00Z' },
+          ],
+        },
+        'identical',
+      ),
     });
     expect(result).toMatchObject({ state: 'unknown' });
   });

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ChangeTypeName, SourceEditor } from './change-types';
+import { pilotSlug } from './pilot';
 import { type Refusal, refuse } from './refusal';
 
 // The source mapping (ADR-0007 review update): the explicit, ordered configuration a person writes
@@ -29,6 +30,14 @@ export const DEFAULT_FIELDS: FieldMap = {
   description: ['seo_description'],
 };
 
+/**
+ * How a `markdown_frontmatter` source quotes a written value. `yaml` writes standard double-quoted
+ * scalars. `strip_quotes` writes for a build that only removes surrounding quotes (the pilot's
+ * tools/build_blog.py:parse_frontmatter), so it must pick a quote the value does not contain and
+ * refuses values that would change under that parser.
+ */
+export type FrontmatterDialect = 'yaml' | 'strip_quotes';
+
 const GeneratedEntryInput = z.union([
   z.string().min(1).max(MAX_PATH),
   z.strictObject({
@@ -52,8 +61,22 @@ export const SourceRuleSchema = z.strictObject({
     .string()
     .min(1)
     .max(MAX_PATH)
-    .describe('A repository path template for that route, e.g. content/drafts/:slug-*.md; * matches a dated file name'),
+    .describe(
+      'A repository path template for that route, e.g. content/drafts/:slug-*.md (* matches a dated file name); with resolveBy frontmatter_slug, a glob of the files to read, e.g. content/drafts/*.md',
+    ),
   editor: z.enum(['html', 'markdown_frontmatter']).describe('How the source is edited'),
+  resolveBy: z
+    .enum(['path', 'frontmatter_slug'])
+    .default('path')
+    .describe(
+      "How the route finds its file: 'path' fills the source template from the route (a `*` in it is a file glob); 'frontmatter_slug' reads the `slug` (or slugified `title`) of every file matching the source glob, which is how a build names a post after its content rather than its file name",
+    ),
+  frontmatterDialect: z
+    .enum(['yaml', 'strip_quotes'])
+    .default('yaml')
+    .describe(
+      "markdown_frontmatter: how written values are quoted. 'yaml' is standard; 'strip_quotes' matches a build that only strips surrounding quotes (the pilot's build_blog.py)",
+    ),
   fields: z
     .record(z.string(), z.array(z.string().min(1).max(120)).min(1))
     .optional()
@@ -242,6 +265,16 @@ export interface ResolveDeps {
   listFiles: ListFiles;
   /** The change type, so an editor that cannot express it is refused with a reason before editing. */
   changeType?: ChangeTypeName;
+  /**
+   * Reads a repository file's text. Required by a `resolveBy: 'frontmatter_slug'` rule, which has
+   * to read each matching draft to learn the slug its build gives the post.
+   */
+  readFile?: (path: string) => Promise<string>;
+  /**
+   * Optional cache of file texts (keyed by repository path), so resolving several routes does not
+   * re-read every draft. A caller that resolves a page's routes in one job should pass one Map.
+   */
+  fileCache?: Map<string, Promise<string>>;
 }
 
 export interface SourceResolution {
@@ -257,6 +290,8 @@ export interface SourceResolution {
   affectedRoutes: string[];
   /** markdown_frontmatter only: which keys carry each field. */
   fields: FieldMap;
+  /** markdown_frontmatter only: how written values are quoted (`strip_quotes` for the pilot). */
+  dialect: FrontmatterDialect;
   /** The rule that supplied the source, as written. */
   rule: SourceRule;
   layout: boolean;
@@ -283,10 +318,11 @@ function fieldMap(rule: SourceRule): FieldMap {
 }
 
 function capabilityRefusal(rule: SourceRule, changeType: ChangeTypeName, path: string): Refusal {
+  const draft = path.includes('*') ? `a Markdown draft matching ${path}` : `the Markdown draft ${path}`;
   if (rule.editor === 'markdown_frontmatter' && changeType === 'schema.jsonld') {
     return refuse(
       'unsupported',
-      `The source for this route is the Markdown draft ${path}, whose frontmatter has no JSON-LD field. Add the structured data in the site's build template, or use a page with HTML source.`,
+      `The source for this route is ${draft}, whose frontmatter has no JSON-LD field. Add the structured data in the site's build template, or use a page with HTML source.`,
       { path, editor: rule.editor },
     );
   }
@@ -299,6 +335,98 @@ function capabilityRefusal(rule: SourceRule, changeType: ChangeTypeName, path: s
 
 function cannotExpress(rule: SourceRule, changeType: ChangeTypeName): boolean {
   return !EDITOR_CAPABILITIES[rule.editor].includes(changeType);
+}
+
+/** The successful resolution of one rule, with the rule's field map and quoting dialect. */
+function resolution(
+  rule: SourceRule,
+  path: string,
+  confidence: SourceResolution['confidence'],
+  affectedRoutes: string[],
+): SourceResolution {
+  return {
+    ok: true,
+    path,
+    editor: rule.editor,
+    confidence,
+    affectedRoutes,
+    fields: fieldMap(rule),
+    dialect: rule.frontmatterDialect,
+    rule,
+    layout: false,
+  };
+}
+
+/** The refusal for a path the site build writes, or null when the path is a real source. */
+function generatedRefusal(mapping: SiteMapping, path: string): Refusal | null {
+  const entry = generatedEntries(mapping).find((candidate) => pathMatchesGlob(candidate.path, path));
+  return entry ? refuse('unsupported', entry.reason, { path, generated: true }) : null;
+}
+
+/** Read a file through the caller's cache, so a page's routes share one pass over the drafts. */
+function readCached(deps: ResolveDeps, path: string, readFile: (path: string) => Promise<string>): Promise<string> {
+  const cache = deps.fileCache;
+  if (!cache) return readFile(path);
+  const cached = cache.get(path);
+  if (cached) return cached;
+  const reading = readFile(path);
+  cache.set(path, reading);
+  void reading.catch(() => cache.delete(path));
+  return reading;
+}
+
+/**
+ * Resolve a route whose build names the file after the post's frontmatter (`slug`, else the
+ * slugified `title`) rather than after the file name. The pilot's tools/build_blog.py does this, so
+ * `/blog/<slug>/` is `content/drafts/<anything>.md` whose content says `<slug>`.
+ */
+async function resolveByFrontmatterSlug(
+  mapping: SiteMapping,
+  rule: SourceRule,
+  values: Record<string, string>,
+  routePath: string,
+  deps: ResolveDeps,
+): Promise<SourceResolutionResult> {
+  const slug = values.slug ?? values['*'];
+  if (!slug) {
+    return refuse(
+      'invalid',
+      `The rule for ${routePath} resolves by frontmatter slug, so its route pattern needs :slug (or a splat) to name the post.`,
+      { routes: rule.routes },
+    );
+  }
+  const readFile = deps.readFile;
+  if (!readFile) {
+    return refuse(
+      'unsupported',
+      `The rule for ${routePath} resolves routes by frontmatter slug, which needs readFile() to read the drafts matching ${rule.source}.`,
+      { source: rule.source },
+    );
+  }
+  const prefix = globPrefix(rule.source);
+  const files = await deps.listFiles(prefix);
+  const candidates = files.filter((file) => pathMatchesGlob(rule.source, file)).sort();
+  const texts = await Promise.all(candidates.map((file) => readCached(deps, file, readFile)));
+  const matches = candidates.filter((_, index) => pilotSlug(texts[index] ?? '') === slug);
+
+  if (matches.length === 0) {
+    return refuse(
+      'not_found',
+      `No file matching ${rule.source} has the slug "${slug}" in its frontmatter (or a title that slugifies to it). Check the draft exists and its slug or title is what the route names.`,
+      { pattern: rule.source, slug, candidates },
+    );
+  }
+  if (matches.length > 1) {
+    return refuse(
+      'ambiguous',
+      `More than one draft has the slug "${slug}": ${matches.join(', ')}. Give the posts distinct slugs before changing this route.`,
+      { pattern: rule.source, slug, candidates: matches },
+    );
+  }
+  const found = matches[0]!;
+  const generated = generatedRefusal(mapping, found);
+  if (generated) return generated;
+  return resolution(rule, found, 'glob', [routePath]);
 }
 
 /**
@@ -318,12 +446,7 @@ export async function resolveSource(mapping: SiteMapping, route: string, deps: R
     matchedAnyRule = true;
     if (rule.layout) continue;
 
-    const resolved = fillTemplate(rule.source, values);
-    const confidence: SourceResolution['confidence'] = resolved.includes('*')
-      ? 'glob'
-      : routePattern(rule.routes).exact
-        ? 'exact'
-        : 'pattern';
+    const resolved = rule.resolveBy === 'frontmatter_slug' ? rule.source : fillTemplate(rule.source, values);
 
     if (rule.generated) {
       return refuse(
@@ -337,6 +460,14 @@ export async function resolveSource(mapping: SiteMapping, route: string, deps: R
     if (deps.changeType) {
       if (cannotExpress(rule, deps.changeType)) return capabilityRefusal(rule, deps.changeType, resolved);
     }
+
+    if (rule.resolveBy === 'frontmatter_slug') return resolveByFrontmatterSlug(mapping, rule, values, path, deps);
+
+    const confidence: SourceResolution['confidence'] = resolved.includes('*')
+      ? 'glob'
+      : routePattern(rule.routes).exact
+        ? 'exact'
+        : 'pattern';
 
     if (resolved.includes('*')) {
       const prefix = globPrefix(resolved);
@@ -362,31 +493,16 @@ export async function resolveSource(mapping: SiteMapping, route: string, deps: R
           },
         );
       }
-      return {
-        ok: true,
-        path: candidates[0]!,
-        editor: rule.editor,
-        confidence: 'glob',
-        affectedRoutes: [path],
-        fields: fieldMap(rule),
-        rule,
-        layout: false,
-      };
+      const candidate = candidates[0]!;
+      const generated = generatedRefusal(mapping, candidate);
+      if (generated) return generated;
+      return resolution(rule, candidate, 'glob', [path]);
     }
 
-    const generated = generatedEntries(mapping).find((entry) => pathMatchesGlob(entry.path, resolved));
-    if (generated) return refuse('unsupported', generated.reason, { path: resolved, generated: true });
+    const generated = generatedRefusal(mapping, resolved);
+    if (generated) return generated;
 
-    return {
-      ok: true,
-      path: resolved,
-      editor: rule.editor,
-      confidence,
-      affectedRoutes: [path],
-      fields: fieldMap(rule),
-      rule,
-      layout: false,
-    };
+    return resolution(rule, resolved, confidence, [path]);
   }
 
   return refuse(
@@ -425,6 +541,7 @@ export function resolveLayout(mapping: SiteMapping, route: string, deps: LayoutR
       confidence: resolved.includes('*') ? 'glob' : routePattern(rule.routes).exact ? 'exact' : 'pattern',
       affectedRoutes: [...new Set(reach.length ? reach : [path])],
       fields: fieldMap(rule),
+      dialect: rule.frontmatterDialect,
       rule,
       layout: true,
     };

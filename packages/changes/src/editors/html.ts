@@ -2,7 +2,8 @@ import { parseDocument } from 'htmlparser2';
 import type { ImageAltChange, MetaDescriptionChange, MetaTitleChange, SchemaJsonLdChange } from '../change-types';
 import { describeMatch, type JsonLdMatch, jsonLdBlockHash, matchesJsonLd, serialiseJsonLd } from '../jsonld';
 import { type Refusal, refuse } from '../refusal';
-import { sameImageSource } from '../urls';
+import { sourceHashRefusal } from '../source';
+import { imageSourceUrl, normaliseUrl } from '../urls';
 
 // The HTML editor. Files are edited at source offsets, not re-serialised: a whole-document
 // round-trip through a parser rewrites attribute quoting, entity spelling and whitespace, which
@@ -152,7 +153,7 @@ export function escapeHtml(value: string): string {
   return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 
-function lineEndingOf(html: string): string {
+function lineEndingOf(html: string): '\n' | '\r\n' {
   return html.includes('\r\n') ? '\r\n' : '\n';
 }
 
@@ -318,7 +319,7 @@ function editJsonLd(html: string, change: SchemaJsonLdChange): HtmlEditOutcome {
     if (matching.length > 0) {
       return refuse('conflict', `A JSON-LD block matching ${label} is already on the page. Use replace, or choose a different @type/@id.`);
     }
-    const markup = `<script type="application/ld+json">${serialiseJsonLd(change.after)}</script>`;
+    const markup = `<script type="application/ld+json">${serialiseJsonLd(change.after, lineEndingOf(html))}</script>`;
     const last = blocks[blocks.length - 1];
     const title = elements(root).find((node) => nameOf(node) === 'title');
     const inserted = last ? insertAfter(html, last.node, markup) : insertIntoHead(html, root, title, markup);
@@ -362,7 +363,7 @@ function editJsonLd(html: string, change: SchemaJsonLdChange): HtmlEditOutcome {
   const range = innerRange(block.node);
   const tag = block.node.startIndex === null ? null : scanTag(html, block.node.startIndex);
   if (!range || !tag) return refuse('invalid', 'The JSON-LD block could not be located in the file.');
-  return { ok: true, text: replaceRange(html, range.start, range.end, serialiseJsonLd(change.after)), changed: true };
+  return { ok: true, text: replaceRange(html, range.start, range.end, serialiseJsonLd(change.after, lineEndingOf(html))), changed: true };
 }
 
 /** Remove an element and the line it sits on, so the surrounding markup keeps its shape. */
@@ -381,20 +382,46 @@ function removeElement(html: string, startIndex: number, endIndex: number): stri
   return replaceRange(html, start, end, '');
 }
 
+/** The base a relative `<img src>` is resolved against: the document's `<base href>`, else the page URL. */
+function documentBase(root: DomNode, pageUrl: string): string | null {
+  const base = elements(root).find((node) => nameOf(node) === 'base');
+  const href = base ? attribute(base, 'href') : undefined;
+  const candidate = href?.trim() ? normaliseUrl(href, pageUrl) : normaliseUrl(pageUrl);
+  if (candidate === null || !/^https?:/i.test(candidate)) return null;
+  return candidate;
+}
+
 /** Set the alt of the one <img> whose src matches; refuse when none or several do. */
 function editImageAlt(html: string, change: ImageAltChange): HtmlEditOutcome {
   const root = parse(html);
-  const images = elements(root).filter((node) => nameOf(node) === 'img' && sameImageSource(attribute(node, 'src') ?? '', change.src));
+  // The page's own URL is what makes a relative src mean anything. Comparing paths alone would
+  // match an image on another host with the same path, and would miss `src="pic.png"` on
+  // `/blog/post/` that the crawler records as `/blog/post/pic.png`.
+  const base = documentBase(root, change.url);
+  if (base === null) {
+    return refuse(
+      'invalid',
+      `The change's page URL ${change.url} is not an absolute http(s) URL (or its <base href> is not one), so a relative image src cannot be resolved. Use the absolute URL from the crawl.`,
+      { url: change.url },
+    );
+  }
+  const wanted = normaliseUrl(change.src, base);
+  if (wanted === null) return refuse('invalid', `The change's image src "${change.src}" is not a URL.`, { src: change.src });
+  const images = elements(root).filter(
+    (node) => nameOf(node) === 'img' && imageSourceUrl(attribute(node, 'src'), attribute(node, 'srcset'), base) === wanted,
+  );
   if (images.length === 0)
-    return refuse('not_found', `No <img> in the file has src ${change.src}. Re-read the page: the image may be set by CSS or the build.`, {
+    return refuse('not_found', `No <img> in the file resolves to ${wanted}. Re-read the page: the image may be set by CSS or the build.`, {
       src: change.src,
+      url: wanted,
     });
   if (images.length > 1) {
     return refuse(
       'ambiguous',
-      `${images.length} <img> elements have src ${change.src}. Give the image a unique src or fix the duplicate before setting its alt.`,
+      `${images.length} <img> elements resolve to ${wanted}. Give the image a unique src or fix the duplicate before setting its alt.`,
       {
         src: change.src,
+        url: wanted,
       },
     );
   }
@@ -420,6 +447,8 @@ export function applyHtmlEdit(
   html: string,
   change: MetaTitleChange | MetaDescriptionChange | SchemaJsonLdChange | ImageAltChange,
 ): HtmlEditOutcome {
+  const hashProblem = sourceHashRefusal(change, html);
+  if (hashProblem) return hashProblem;
   switch (change.type) {
     case 'meta.title':
       return editTitle(html, change);

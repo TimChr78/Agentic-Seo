@@ -207,6 +207,21 @@ function redact(text: string): string {
   return redactCredentials(text);
 }
 
+/**
+ * A copy of a thrown error that is safe to keep as a `cause`: the message is redacted and nothing
+ * of the original stack or its own cause chain survives. A seam error can carry the request (and
+ * therefore the bearer token) in its text, and `Error.cause` is read by loggers and `util.inspect`,
+ * so the original must not be attached even when the outer message is clean.
+ */
+function sanitisedCause(error: unknown): Error {
+  if (error instanceof Error) {
+    const copy = new Error(redact(error.message));
+    copy.name = error.name;
+    return copy;
+  }
+  return new Error(redact(String(error)));
+}
+
 /** A path with each segment encoded, keeping the slashes. */
 function encodePath(value: string): string {
   return value.split('/').map(encodeURIComponent).join('/');
@@ -340,7 +355,7 @@ export class GitHubClient {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new GitHubError('network', `GitHub could not be reached: ${redact(message)}. Check the connection and retry the job.`, {
-        cause: error,
+        cause: sanitisedCause(error),
       });
     }
 

@@ -1,6 +1,7 @@
 import type { MetaDescriptionChange, MetaTitleChange } from '../change-types';
-import { DEFAULT_FIELDS, type FieldMap } from '../mapping';
+import { DEFAULT_FIELDS, type FieldMap, type FrontmatterDialect } from '../mapping';
 import { type Refusal, refuse } from '../refusal';
+import { sourceHashRefusal } from '../source';
 
 // The Markdown frontmatter editor. The pilot's blog posts are built by tools/build_blog.py from
 // `content/drafts/<slug>-<date>.md`; `<title>` comes from `seo_title or title` and the description
@@ -11,8 +12,21 @@ import { type Refusal, refuse } from '../refusal';
 // full parse-and-serialise would reorder keys, drop comments and rewrite quoting. A value that is
 // not a flat scalar (a block scalar, a flow collection, an indented nested map) is refused rather
 // than guessed at.
+//
+// Quoting is a mapping-rule choice (`frontmatterDialect`). `yaml` writes standard double-quoted
+// scalars with JSON escapes. `strip_quotes` writes for the pilot's own parser, which removes the
+// surrounding quotes and nothing else: it must pick a quote character the value does not contain
+// and refuse values it cannot carry, because JSON-style escapes would reach the live page as
+// backslashes.
 
 export type FrontmatterEditOutcome = { ok: true; text: string; changed: boolean } | Refusal;
+
+export interface FrontmatterOptions {
+  /** The mapping rule's field map; the default is the pilot's. */
+  fields?: FieldMap;
+  /** How to quote a written value; defaults to `yaml`. */
+  dialect?: FrontmatterDialect;
+}
 
 interface Line {
   text: string;
@@ -76,7 +90,13 @@ function keyLineOf(line: string, index: number): KeyLine | null {
 }
 
 /** A YAML scalar as the frontmatter spells it: the value plus the quote style to keep. */
-function scalar(raw: string): { value: string; quote: '"' | "'" | null } | Refusal {
+function scalar(raw: string, dialect: FrontmatterDialect = 'yaml'): { value: string; quote: '"' | "'" | null } | Refusal {
+  if (dialect === 'strip_quotes') {
+    // The pilot's parse_frontmatter does `val.strip('"').strip("'")`: it removes every surrounding
+    // quote and never unescapes, so a value is read back exactly as those two strips leave it.
+    const quote = raw.startsWith('"') ? '"' : raw.startsWith("'") ? "'" : null;
+    return { value: raw.replace(/^"+/, '').replace(/"+$/, '').replace(/^'+/, '').replace(/'+$/, ''), quote };
+  }
   if (raw.startsWith('"')) {
     if (!raw.endsWith('"') || raw.length < 2)
       return refuse('unsupported', 'A quoted frontmatter value is not closed; fix the YAML before changing it.');
@@ -109,7 +129,36 @@ function needsQuotes(value: string): boolean {
   return false;
 }
 
-function quoteValue(value: string, style: '"' | "'" | null): string {
+/** Why the pilot's parser cannot carry a value, or null when it can. */
+function stripQuotesProblem(value: string): string | null {
+  if (/\p{Cc}/u.test(value)) return 'it contains a control character or a line break, which a single-line frontmatter value cannot carry.';
+  if (value !== value.trim()) return 'it begins or ends with whitespace, which the parser strips.';
+  if (value.startsWith('#')) return 'it begins with "#", which YAML reads as a comment.';
+  if (/^["']|["']$/.test(value))
+    return 'it begins or ends with a quote, which the parser strips, so the page would show a different value.';
+  if (value.includes('"') && value.includes("'"))
+    return 'it contains both a double and a single quote, so no surrounding quote character survives the parser.';
+  return null;
+}
+
+/**
+ * Quote a value for the pilot's parser: a quote character the value does not contain, so the
+ * parser's strip leaves exactly the value behind.
+ */
+function quoteStripQuotes(value: string): string | Refusal {
+  const problem = stripQuotesProblem(value);
+  if (problem)
+    return refuse(
+      'unsupported',
+      `The frontmatter cannot carry this value in the site's strip_quotes dialect: ${problem} Rephrase it, or teach the site's build to unescape quotes.`,
+    );
+  if (value === '') return '""';
+  const quote = value.includes('"') ? "'" : '"';
+  return `${quote}${value}${quote}`;
+}
+
+function quoteValue(value: string, style: '"' | "'" | null, dialect: FrontmatterDialect): string | Refusal {
+  if (dialect === 'strip_quotes') return quoteStripQuotes(value);
   if (style === "'") return `'${value.replaceAll("'", "''")}'`;
   if (style === '"' || needsQuotes(value)) return JSON.stringify(value);
   return value;
@@ -153,13 +202,17 @@ function unsupportedShape(lines: Line[], fm: Frontmatter, key: KeyLine): Refusal
 
 /**
  * Edit one frontmatter field in place, preserving every other line byte for byte (line endings
- * included). `fields` is the mapping rule's field map; the default is the pilot's.
+ * included). `options.fields` is the mapping rule's field map; the default is the pilot's.
  */
 export function applyFrontmatterEdit(
   text: string,
   change: MetaTitleChange | MetaDescriptionChange,
-  fields: FieldMap = DEFAULT_FIELDS,
+  options: FrontmatterOptions = {},
 ): FrontmatterEditOutcome {
+  const hashProblem = sourceHashRefusal(change, text);
+  if (hashProblem) return hashProblem;
+  const fields = options.fields ?? DEFAULT_FIELDS;
+  const dialect: FrontmatterDialect = options.dialect ?? 'yaml';
   const fm = frontmatterOf(text);
   if ('ok' in fm) return fm;
   const lines = fm.lines;
@@ -187,18 +240,28 @@ export function applyFrontmatterEdit(
 
   if (!found) {
     // The page value is derived by the build (an excerpt for a description, for example), so there
-    // is nothing in this file to compare `before` with. Insert the primary key, which is how a
-    // person takes control of the value.
+    // is nothing in this file to compare `before` with. Inserting the primary key is how a person
+    // takes control of the value, but only the file's hash proves the draft saw a file that still
+    // has no such key: without it, a `before` the file cannot contradict would be accepted blindly.
     const key = wanted[0];
     if (!key) return refuse('invalid', 'The mapping has no frontmatter key for this field.');
-    const inserted: Line = { text: `${key}: ${quoteValue(change.after, null)}`, ending: lines[fm.open]!.ending || '\n' };
+    if (change.sourceHash === undefined) {
+      return refuse(
+        'stale',
+        `The frontmatter has no "${key}" key, so the value the page shows is derived by the site's build and \`before\` cannot be checked against this file. Re-read the source and draft the change again with its sourceHashOf() so the editor can prove the file has not changed.`,
+        { key },
+      );
+    }
+    const quoted = quoteValue(change.after, null, dialect);
+    if (typeof quoted !== 'string') return quoted;
+    const inserted: Line = { text: `${key}: ${quoted}`, ending: lines[fm.open]!.ending || '\n' };
     const next = [...lines.slice(0, fm.open + 1), inserted, ...lines.slice(fm.open + 1)];
     return { ok: true, text: fileText(next), changed: true };
   }
 
   const shape = unsupportedShape(lines, fm, found);
   if (shape) return shape;
-  const current = scalar(found.rawValue.trim());
+  const current = scalar(found.rawValue.trim(), dialect);
   if ('ok' in current) return current;
   if (current.value === change.after) return { ok: true, text, changed: false };
   if (current.value !== change.before) {
@@ -212,8 +275,10 @@ export function applyFrontmatterEdit(
     );
   }
 
+  const quoted = quoteValue(change.after, current.quote, dialect);
+  if (typeof quoted !== 'string') return quoted;
   const separator = found.separator === '' ? ' ' : found.separator;
-  lines[found.index] = { text: `${found.key}:${separator}${quoteValue(change.after, current.quote)}`, ending: lines[found.index]!.ending };
+  lines[found.index] = { text: `${found.key}:${separator}${quoted}`, ending: lines[found.index]!.ending };
   return { ok: true, text: fileText(lines), changed: true };
 }
 

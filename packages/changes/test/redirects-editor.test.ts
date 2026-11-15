@@ -68,6 +68,73 @@ describe('redirects editor: add', () => {
   });
 });
 
+describe('redirects editor: refused input', () => {
+  it('refuses a target that would write a second rule, even when the change was never parsed', () => {
+    const crafted = {
+      type: 'redirect',
+      from: '/target/',
+      to: '/target 301\n/admin https://evil.test 302\n#',
+      status: 301,
+      operation: 'add',
+    } as RedirectChange;
+    const result = applyRedirectEdit(redirects, crafted);
+    expect(result).toMatchObject({ ok: false, code: 'invalid' });
+    if (result.ok) return;
+    expect(result.reason).toContain('whitespace');
+  });
+
+  it('refuses a source with whitespace or without a leading slash', () => {
+    for (const from of ['/a b/', 'a/', 'https://example.com/a']) {
+      expect(applyRedirectEdit(redirects, add(from, '/b/')), from).toMatchObject({ ok: false, code: 'invalid' });
+    }
+  });
+
+  it('refuses a target that is not a path or an http(s) URL', () => {
+    for (const to of ['javascript:alert(1)', 'data:text/html,x', 'example.com/b']) {
+      expect(applyRedirectEdit(redirects, add('/a/', to)), to).toMatchObject({ ok: false, code: 'invalid' });
+    }
+    expect(applyRedirectEdit(redirects, add('/a/', 'https://example.com/b'))).toMatchObject({ ok: true });
+  });
+
+  it('refuses a file whose sha256 is not the one the change was drafted against', () => {
+    const result = applyRedirectEdit(redirects, { ...add('/a/', '/b/'), sourceHash: 'a'.repeat(64) });
+    expect(result).toMatchObject({ ok: false, code: 'stale' });
+  });
+});
+
+describe('redirects editor: rules that would chain', () => {
+  it('refuses adding a rule that makes an existing rule redirect twice', () => {
+    const document = '/a  /b  301\n';
+    const result = applyRedirectEdit(document, add('/b/', '/c/'));
+    expect(result).toMatchObject({ ok: false, code: 'conflict' });
+    if (result.ok) return;
+    expect(result.reason).toContain('/a');
+    expect(result.reason).toContain('/c');
+    expect(result.details).toMatchObject({ incoming: ['/a'], suggestion: '/c/' });
+  });
+
+  it('refuses adding a rule that closes a loop with an existing rule', () => {
+    const document = '/a  /b  301\n';
+    const result = applyRedirectEdit(document, add('/b/', '/a/'));
+    expect(result).toMatchObject({ ok: false, code: 'conflict' });
+    if (result.ok) return;
+    expect(result.reason).toMatch(/loop/i);
+  });
+
+  it('suggests the end of a longer outgoing chain for the incoming rule', () => {
+    const document = '/a  /b  301\n/c/  /d/  301\n';
+    const result = applyRedirectEdit(document, add('/b/', '/c/'));
+    expect(result).toMatchObject({ ok: false, code: 'conflict' });
+    if (result.ok) return;
+    expect(result.details).toMatchObject({ incoming: ['/a'], suggestion: '/d/' });
+  });
+
+  it('allows a rule whose source nothing points at', () => {
+    const document = '/a  /b  301\n';
+    expect(applyRedirectEdit(document, add('/c/', '/d/'))).toMatchObject({ ok: true });
+  });
+});
+
 describe('redirects editor: update and remove', () => {
   it('replaces one rule line and nothing else', () => {
     const before = { to: '/blog/claude-seo-benchmark/', status: 301 as const };

@@ -48,10 +48,25 @@ same shapes.
   `content/drafts/<slug>-<YYYY-MM-DD>.md` (YAML frontmatter) by `tools/build_blog.py`, tool and
   category pages from JSON catalogues by `tools/build_tools.py`, and the sitemap and `llms.txt` by
   `tools/build_indexes.py`. Editing a generated `index.html` survives until the next deploy and then
-  disappears, so the mapping resolves `/blog/<slug>/` to the dated draft and refuses a generated path
-  with the build script to change instead. The date suffix makes the source a glob
-  (`content/drafts/:slug-*.md`); a route that matches zero or several dated drafts is refused as
-  missing or ambiguous rather than guessed.
+  disappears, so the mapping resolves `/blog/<slug>/` to the draft and refuses a generated path with
+  the build script to change instead. The route is not the file name: `build_blog.py` takes
+  `slug = meta.get('slug') or slugify(title)`, and real drafts either declare a slug unrelated to
+  their file name or none at all, so the mapping's `resolveBy: "frontmatter_slug"` rule lists
+  `content/drafts/*.md`, reads each draft's slug (falling back to the slugified title) and refuses a
+  slug that zero or several drafts claim rather than guessing. Generated-path protection applies to
+  the file a glob or slug match resolves to, not only to literal paths.
+- **Frontmatter quoting follows the build's reader.** `build_blog.py`'s `parse_frontmatter` reads a
+  value as `val.strip().strip('"').strip("'")`: it removes surrounding quotes and never unescapes, so
+  a JSON-style `\"` written for YAML would reach the live `<title>` as a backslash. The pilot's rule
+  therefore sets `frontmatterDialect: "strip_quotes"`, which writes the value inside a quote character
+  it does not contain and refuses values that parser cannot carry (both quote kinds, a leading or
+  trailing quote, leading `#`, surrounding whitespace). The default `yaml` dialect keeps standard
+  quoting for sites that read their frontmatter with a YAML parser.
+- **A change can carry the source file's hash.** `before` catches a file that moved on for values the
+  file already carries, but not for one it does not: inserting a missing `seo_description` has nothing
+  to compare `before` with. A change may therefore carry `sourceHash` (sha256 of the file as read when
+  drafted); every editor refuses a file that hashes differently, and the frontmatter editor requires
+  it before inserting a key.
 - **The build decides which frontmatter key is the page title.** `build_blog.py` uses
   `seo_title or title` for `<title>` and `seo_description` for the meta description, falling back to a
   body excerpt. The mapping therefore names `seo_title` first and `title` second, and `seo_description`

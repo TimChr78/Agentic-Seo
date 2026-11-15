@@ -212,6 +212,66 @@ describe('HTML editor: image alt', () => {
   });
 });
 
+describe('HTML editor: image matching resolves the page URL', () => {
+  const PAGE = 'https://martechsignal.com/blog/post/';
+  const alt = (src: string, after = 'A picture') => ({
+    type: 'image.alt' as const,
+    url: PAGE,
+    src,
+    before: null,
+    after,
+  });
+  const documentWith = (markup: string) => `<html><head><title>Post</title></head><body>${markup}</body></html>`;
+
+  it('matches a relative src against the absolute URL the crawler records', () => {
+    const result = applyHtmlEdit(documentWith('<img src="pic.png">'), alt('https://martechsignal.com/blog/post/pic.png'));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.text).toContain('<img src="pic.png" alt="A picture">');
+  });
+
+  it('matches a root-relative src', () => {
+    const result = applyHtmlEdit(documentWith('<img src="/assets/pic.png">'), alt('https://martechsignal.com/assets/pic.png'));
+    expect(result.ok).toBe(true);
+  });
+
+  it('resolves against the document base href', () => {
+    const document = '<html><head><base href="/assets/"><title>Post</title></head><body><img src="pic.png"></body></html>';
+    const result = applyHtmlEdit(document, alt('https://martechsignal.com/assets/pic.png'));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.text).toContain('<img src="pic.png" alt="A picture">');
+  });
+
+  it('does not match the same path on another host', () => {
+    const result = applyHtmlEdit(
+      documentWith('<img src="https://cdn.other.test/assets/pic.png">'),
+      alt('https://martechsignal.com/assets/pic.png'),
+    );
+    expect(result).toMatchObject({ ok: false, code: 'not_found' });
+    if (result.ok) return;
+    expect(result.details).toMatchObject({ url: 'https://martechsignal.com/assets/pic.png' });
+  });
+
+  it('does not match a src on another host that shares only a path', () => {
+    const document = '<html><head><title>Post</title></head><body><img src="https://cdn.other.test/assets/pic.png"></body></html>';
+    expect(applyHtmlEdit(document, alt('/assets/pic.png'))).toMatchObject({ ok: false, code: 'not_found' });
+  });
+
+  it('falls back to the first srcset candidate when src is absent, as the crawler does', () => {
+    const document = documentWith('<img srcset="pic-480.webp 480w, pic.webp 1200w" sizes="100vw">');
+    const result = applyHtmlEdit(document, alt('https://martechsignal.com/blog/post/pic-480.webp'));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.text).toContain('<img srcset="pic-480.webp 480w, pic.webp 1200w" sizes="100vw" alt="A picture">');
+  });
+
+  it('refuses a page URL that cannot resolve a relative src', () => {
+    const result = applyHtmlEdit(documentWith('<img src="pic.png">'), { ...alt('/pic.png'), url: '/blog/post/' });
+    expect(result).toMatchObject({ ok: false, code: 'invalid' });
+  });
+});
+
 describe('HTML editor: JSON-LD', () => {
   const aboutBlock = () => findJsonLd(about, { '@type': 'AboutPage' });
 
@@ -344,6 +404,57 @@ describe('HTML editor: JSON-LD', () => {
     expect(result.text).toBe(
       '<html><head><title>x</title>\n<script type="application/ld+json">{\n  "@context": "https://schema.org",\n  "@type": "WebSite",\n  "name": "x"\n}</script></head><body></body></html>',
     );
+  });
+
+  it('writes a CRLF document with CRLF when adding a block', () => {
+    const crlf = about.replace(/\n/g, '\r\n');
+    const result = applyHtmlEdit(crlf, {
+      type: 'schema.jsonld',
+      url: 'https://martechsignal.com/about/',
+      operation: 'add',
+      match: { '@type': 'FAQPage' },
+      before: null,
+      after: { '@context': 'https://schema.org', '@type': 'FAQPage', name: 'Question & answer' },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(/(?<!\r)\n/.test(result.text)).toBe(false);
+    const added = result.text.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)?.at(-1) ?? '';
+    const body = added.replace('<script type="application/ld+json">', '').replace(/<\/script>$/, '');
+    expect(body.includes('\r\n  "@context"')).toBe(true);
+    expect(JSON.parse(body)['@type']).toBe('FAQPage');
+  });
+
+  it('writes a CRLF document with CRLF when replacing a block', () => {
+    const crlf = about.replace(/\n/g, '\r\n');
+    const found = findJsonLd(crlf, { '@type': 'AboutPage' });
+    expect(found).not.toBeNull();
+    const result = applyHtmlEdit(crlf, {
+      type: 'schema.jsonld',
+      url: 'https://martechsignal.com/about/',
+      operation: 'replace',
+      match: { '@type': 'AboutPage' },
+      before: found!.hash,
+      after: { '@context': 'https://schema.org', '@type': 'AboutPage', name: 'About us' },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(/(?<!\r)\n/.test(result.text)).toBe(false);
+    const replaced = findJsonLd(result.text, { '@type': 'AboutPage' });
+    expect(JSON.parse(replaced!.body)).toMatchObject({ name: 'About us' });
+  });
+
+  it('refuses a block whose file hash is not the one the change was drafted against', () => {
+    const result = applyHtmlEdit(about, {
+      type: 'schema.jsonld',
+      url: 'https://martechsignal.com/about/',
+      operation: 'add',
+      match: { '@type': 'FAQPage' },
+      before: null,
+      after: { '@type': 'FAQPage' },
+      sourceHash: 'a'.repeat(64),
+    });
+    expect(result).toMatchObject({ ok: false, code: 'stale' });
   });
 });
 

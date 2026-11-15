@@ -1,5 +1,5 @@
 import type { Change, EditorName } from '../change-types';
-import type { FieldMap } from '../mapping';
+import type { FieldMap, FrontmatterDialect } from '../mapping';
 import { type Refusal, refuse } from '../refusal';
 import { applyFrontmatterEdit } from './frontmatter';
 import { applyHtmlEdit } from './html';
@@ -9,6 +9,9 @@ import { applyRedirectEdit } from './redirects';
 // which editor a mapping rule chose. An editor that cannot express a change says so with a reason;
 // that check also exists in the mapping (before the file is read), and here as the last line of
 // defence for a caller that bypassed it.
+//
+// A change that carries `sourceHash` is checked against the file's own hash by each editor (see
+// `sourceHashRefusal`), so this entry point needs no separate staleness check.
 
 export type { FrontmatterEditOutcome } from './frontmatter';
 export { frontmatterValue } from './frontmatter';
@@ -26,10 +29,12 @@ export interface EditInput {
   change: Change;
   /** markdown_frontmatter: the mapping rule's field map. */
   fields?: FieldMap;
+  /** markdown_frontmatter: the mapping rule's quoting dialect. */
+  dialect?: FrontmatterDialect;
 }
 
 /** Apply a change to a file's text with the editor the mapping chose. */
-export function applyChange({ editor, text, change, fields }: EditInput): EditOutcome {
+export function applyChange({ editor, text, change, fields, dialect }: EditInput): EditOutcome {
   if (change.type === 'redirect') {
     if (editor !== 'netlify') return refuse('unsupported', `A redirect is edited in the redirects file, not by the ${editor} editor.`);
     return applyRedirectEdit(text, change);
@@ -42,5 +47,5 @@ export function applyChange({ editor, text, change, fields }: EditInput): EditOu
       `Markdown frontmatter has no field for a ${change.type} change. Add it in the site's build template instead.`,
     );
   }
-  return applyFrontmatterEdit(text, change, fields);
+  return applyFrontmatterEdit(text, change, { fields, dialect });
 }

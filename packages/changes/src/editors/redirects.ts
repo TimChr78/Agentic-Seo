@@ -1,5 +1,7 @@
 import type { RedirectChange } from '../change-types';
+import { redirectTokenProblem } from '../change-types';
 import { type Refusal, refuse } from '../refusal';
+import { sourceHashRefusal } from '../source';
 
 // The redirects editor for a Netlify/Cloudflare Pages `_redirects` file:
 //
@@ -7,9 +9,12 @@ import { type Refusal, refuse } from '../refusal';
 //   /old-page/  /new-page/  301
 //
 // Comments, ordering and every untouched line are preserved. A new rule is refused when it would
-// loop (`/a -> /b` while `/b -> /a` exists) or chain (`/a -> /b` while `/b -> /c` exists); a chain is
-// legal to a server, but it costs a round trip and hides the real target, so the refusal names the
-// final target to point at instead.
+// loop (`/a -> /b` while `/b -> /a` exists) or chain, in either direction: `/a -> /b` while
+// `/b -> /c` exists adds a hop after `/a`, and adding `/b -> /c` while `/a -> /b` exists adds a hop
+// before it. A chain is legal to a server, but it costs a round trip and hides the real target, so
+// the refusal names the final target to point at instead — or the rule to update in the same change
+// set. The fields are re-checked here even though the schema already validates them, because a
+// caller can build a change object without parsing it and one stray newline would inject a rule.
 
 export type RedirectEditOutcome = { ok: true; text: string; changed: boolean } | Refusal;
 
@@ -71,6 +76,12 @@ interface ChainVerdict {
   chain: string[];
 }
 
+/** Rules that already point at a path, which a new rule from that path would make chain. */
+interface IncomingVerdict {
+  kind: 'loop' | 'chain';
+  sources: string[];
+}
+
 /**
  * Follow the rules from a proposed target. A loop comes back as `loop`; a target that already
  * redirects comes back as `chain` with the final target, which is what the rule should point at.
@@ -102,6 +113,41 @@ function chainVerdict(lines: Line[], from: string, to: string, ignoreFrom: strin
   return chain.length > 0 ? { kind: 'chain', finalTarget, chain } : null;
 }
 
+/**
+ * The rules whose target is the new rule's source: they would gain a hop through it. A rule that
+ * also *is* the new target closes a loop (`/a -> /b` plus `/b -> /a`).
+ */
+function incomingVerdict(lines: Line[], from: string, to: string): IncomingVerdict | null {
+  const fromKey = normalisePath(from);
+  const toKey = normalisePath(to);
+  const sources: string[] = [];
+  let loop = false;
+  for (const line of lines) {
+    const rule = ruleOf(line.text, 0);
+    if (!rule || normalisePath(rule.to) !== fromKey) continue;
+    if (normalisePath(rule.from) === toKey) loop = true;
+    sources.push(rule.from);
+  }
+  if (loop) return { kind: 'loop', sources };
+  return sources.length > 0 ? { kind: 'chain', sources } : null;
+}
+
+/** Refuse a new rule when an existing one already points at its source. */
+function incomingRefusal(change: RedirectChange, target: string, finalTarget: string, verdict: IncomingVerdict): Refusal {
+  if (verdict.kind === 'loop') {
+    return refuse('conflict', `Redirecting ${change.from} to ${target} creates a loop with ${verdict.sources.join(', ')}.`, {
+      from: change.from,
+      chain: verdict.sources,
+    });
+  }
+  const list = verdict.sources.join(', ');
+  return refuse(
+    'conflict',
+    `${list} already ${verdict.sources.length === 1 ? 'redirects' : 'redirect'} to ${change.from}, so ${verdict.sources.length === 1 ? 'it' : 'they'} would redirect twice. Point ${list} at ${finalTarget} in the same change set, or add this rule after updating ${verdict.sources.length === 1 ? 'it' : 'them'}.`,
+    { from: change.from, incoming: verdict.sources, suggestion: finalTarget },
+  );
+}
+
 function detailOf(change: RedirectChange): { to: string; status: number } | Refusal {
   if (change.operation === 'remove') {
     if (!change.before) return refuse('invalid', 'A removed redirect needs the rule it removes (`before`).');
@@ -123,12 +169,21 @@ function stale(rule: RuleLine, before: { to: string; status: number }, from: str
 
 /** Add, update or remove one rule in a Netlify-format redirects file. */
 export function applyRedirectEdit(text: string, change: RedirectChange): RedirectEditOutcome {
+  const hashProblem = sourceHashRefusal(change, text);
+  if (hashProblem) return hashProblem;
   const lines = splitLines(text);
   const rules = lines.map((line, index) => ruleOf(line.text, index)).filter((rule): rule is RuleLine => rule !== null);
   const from = normalisePath(change.from);
   const existing = rules.find((rule) => normalisePath(rule.from) === from);
   const target = detailOf(change);
   if ('ok' in target) return target;
+
+  const fromProblem = redirectTokenProblem(change.from, 'from');
+  if (fromProblem) return refuse('invalid', fromProblem, { from: change.from });
+  if (change.operation !== 'remove') {
+    const toProblem = redirectTokenProblem(target.to, 'to');
+    if (toProblem) return refuse('invalid', toProblem, { to: target.to });
+  }
 
   if (change.operation === 'add') {
     if (existing) {
@@ -143,6 +198,8 @@ export function applyRedirectEdit(text: string, change: RedirectChange): Redirec
         chain: verdict.chain,
       });
     }
+    const incoming = incomingVerdict(lines, change.from, target.to);
+    if (incoming) return incomingRefusal(change, target.to, verdict?.finalTarget ?? target.to, incoming);
     if (verdict) {
       return refuse(
         'conflict',

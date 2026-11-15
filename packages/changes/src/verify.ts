@@ -96,7 +96,10 @@ export function checkPageAgainst(change: Change, page: PageFacts): PageCheck {
     case 'image.alt': {
       const problem = fetched(page);
       if (problem) return { ok: false, detail: problem };
-      const images = (page.html?.images ?? []).filter((image) => image.src !== null && sameImageSource(image.src, expectation.src));
+      // The crawler resolves a relative src against the page it ended on, so the comparison uses
+      // the same base: the path alone is not enough when the image could be on another host.
+      const base = page.finalUrl || page.url;
+      const images = (page.html?.images ?? []).filter((image) => image.src !== null && sameImageSource(image.src, expectation.src, base));
       if (images.length === 0) return { ok: false, detail: `No image with src ${expectation.src} is on the page.` };
       if (images.length > 1)
         return { ok: false, detail: `${images.length} images with src ${expectation.src} are on the page; the change must identify one.` };

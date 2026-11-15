@@ -1,3 +1,4 @@
+import { inspect } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { GitHubClient, GitHubError } from '../src/github';
 import { closeFakeServers, type FakeCall, type FakeReply, startFakeServer } from './support';
@@ -315,6 +316,29 @@ describe('GitHub client: failures', () => {
     expect(error.code).toBe('unauthorized');
     expect(error.message).toContain('fine-grained token');
     expect(error.message).not.toContain(TOKEN);
+  });
+
+  it('keeps the token out of the whole error object when the request seam throws', async () => {
+    const client = new GitHubClient({
+      token: TOKEN,
+      owner: OWNER,
+      repo: REPO,
+      baseUrl: 'http://127.0.0.1:9',
+      request: async () => {
+        throw new Error(`socket hang up while sending (authorization: Bearer ${TOKEN})`);
+      },
+    });
+    const error = await rejection(client.getDefaultBranch());
+    expect(error.code).toBe('network');
+    // The message is redacted, but the cause chain, the details and `util.inspect` are all read by
+    // loggers, so every one of them has to be clean too.
+    const texts: string[] = [error.message, inspect(error), JSON.stringify(error.details ?? null)];
+    let current: unknown = error;
+    while (current instanceof Error) {
+      texts.push(current.message, inspect(current));
+      current = current.cause;
+    }
+    for (const text of texts) expect(text).not.toContain(TOKEN);
   });
 });
 

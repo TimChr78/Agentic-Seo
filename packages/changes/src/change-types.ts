@@ -22,6 +22,18 @@ const MAX_URL = 2_048;
 
 const Url = z.string().min(1).max(MAX_URL).describe('The absolute URL of the page the change is about, e.g. https://example.com/about/');
 
+/**
+ * The sha256 of the source file as it was when the change was drafted (`sourceHashOf`). Optional:
+ * a change that does not carry one is checked against `before` alone. When it does, every editor
+ * refuses a file that hashes to something else, which is what makes an edit safe when the file does
+ * not carry the value being replaced: the frontmatter editor requires it to insert a missing key.
+ */
+const SourceHash = z
+  .string()
+  .regex(/^[0-9a-f]{64}$/, 'Use the sha256 hex of the source file, from sourceHashOf().')
+  .optional()
+  .describe('The sha256 of the source file when the change was drafted; the editor refuses a file that differs (stale)');
+
 /** `@type` and/or `@id`, the two fields a JSON-LD block can be identified by. */
 export const JsonLdMatchSchema = z
   .strictObject({
@@ -40,6 +52,7 @@ export const MetaTitleChange = z.strictObject({
   url: Url,
   before: z.string().max(MAX_TEXT).describe('The title the page shows now; the editor refuses if the file disagrees'),
   after: z.string().min(1).max(MAX_TEXT).describe('The title to write, without HTML'),
+  sourceHash: SourceHash,
 });
 
 export const MetaDescriptionChange = z.strictObject({
@@ -47,6 +60,7 @@ export const MetaDescriptionChange = z.strictObject({
   url: Url,
   before: z.string().max(MAX_TEXT).nullable().describe('The description the page shows now; null when it has none, which inserts the tag'),
   after: z.string().min(1).max(MAX_TEXT).describe('The description to write, without HTML'),
+  sourceHash: SourceHash,
 });
 
 export const SchemaJsonLdChange = z
@@ -61,6 +75,7 @@ export const SchemaJsonLdChange = z
       .nullable()
       .describe('The hash of the block being replaced or removed; null for add'),
     after: z.unknown().nullable().describe('The JSON-LD object to write (a schema.org node or a @graph); null when removing'),
+    sourceHash: SourceHash,
   })
   .superRefine((change, ctx) => {
     if (change.operation === 'add') {
@@ -87,21 +102,70 @@ export const ImageAltChange = z.strictObject({
   src: z.string().min(1).max(MAX_URL).describe('The image src as the page shows it; the absolute URL from PageFacts is accepted'),
   before: z.string().max(MAX_TEXT).nullable().describe('The alt the image has now; null when the attribute is missing'),
   after: z.string().max(MAX_TEXT).describe('The alt to write; an empty string marks a decorative image'),
+  sourceHash: SourceHash,
 });
 
 const RedirectStatus = z.union([z.literal(301), z.literal(302), z.literal(307), z.literal(308)]);
 
+/**
+ * Why a value cannot be written to a Netlify/Cloudflare Pages redirects file, or null when it can.
+ *
+ * The format is whitespace-separated with one rule per line and `#` for comments, so a value that
+ * carries whitespace or a control character would be read back as extra fields — a target of
+ * `/target 301\n/admin https://evil.test 302\n#` writes a second, unreviewed rule — and a `#` would
+ * start a comment. The source is a path, never a URL; the target is a path or an absolute http(s)
+ * URL (`javascript:` and `data:` are not redirects).
+ */
+export function redirectTokenProblem(value: string, role: 'from' | 'to'): string | null {
+  const what = role === 'from' ? 'source' : 'target';
+  if (/[\s\p{Cc}]/u.test(value)) {
+    return `The redirect ${what} contains whitespace or a control character, which would split it into extra fields in the redirects file.`;
+  }
+  if (value.includes('#')) return `The redirect ${what} contains "#", which starts a comment in a redirects file.`;
+  if (value.startsWith('//')) {
+    return `The redirect ${what} starts with "//", a protocol-relative URL; give a path ("/...") or an absolute http(s) URL.`;
+  }
+  if (value.startsWith('/')) return null;
+  if (role === 'from') return 'The redirect source must be a path starting with "/".';
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'http:' || url.protocol === 'https:') return null;
+  } catch {
+    // Fall through to the shared message: it is not an absolute URL either.
+  }
+  return 'The redirect target must be a path starting with "/" or an absolute http(s) URL.';
+}
+
+const RedirectFrom = z
+  .string()
+  .min(1)
+  .max(MAX_URL)
+  .refine((value) => redirectTokenProblem(value, 'from') === null, {
+    message: 'Give a path starting with "/" with no whitespace, control characters or "#".',
+  })
+  .describe('The path that redirects, e.g. /old-page/');
+
+const RedirectTo = z
+  .string()
+  .min(1)
+  .max(MAX_URL)
+  .refine((value) => redirectTokenProblem(value, 'to') === null, {
+    message: 'Give a path starting with "/" or an absolute http(s) URL, with no whitespace, control characters or "#".',
+  })
+  .describe('The new target: a path or an absolute http(s) URL');
+
 export const RedirectChange = z
   .strictObject({
     type: z.literal('redirect'),
-    from: z.string().min(1).max(MAX_URL).describe('The path that redirects, e.g. /old-page/'),
-    to: z.string().min(1).max(MAX_URL).optional().describe('The new target: a path or an absolute URL; not used by remove'),
+    from: RedirectFrom,
+    to: RedirectTo.optional().describe('The new target: a path or an absolute URL; not used by remove'),
     status: RedirectStatus.optional().describe('The status to answer with; not used by remove'),
     operation: z.enum(['add', 'update', 'remove']),
     before: z
-      .strictObject({ to: z.string().min(1).max(MAX_URL), status: RedirectStatus })
+      .strictObject({ to: RedirectTo, status: RedirectStatus })
       .optional()
       .describe('The rule as it is now, for update and remove; the editor refuses if the file disagrees'),
+    sourceHash: SourceHash,
   })
   .superRefine((change, ctx) => {
     if (change.operation !== 'remove') {

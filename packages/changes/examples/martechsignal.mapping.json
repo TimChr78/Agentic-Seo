@@ -13,8 +13,10 @@
     },
     {
       "routes": "/blog/:slug/",
-      "source": "content/drafts/:slug-*.md",
+      "source": "content/drafts/*.md",
       "editor": "markdown_frontmatter",
+      "resolveBy": "frontmatter_slug",
+      "frontmatterDialect": "strip_quotes",
       "fields": {
         "title": ["seo_title", "title"],
         "description": ["seo_description"]

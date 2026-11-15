@@ -1,6 +1,6 @@
 import type { FetchAllowList, HostResolver } from '@agentic-seo/fetch';
 import { safeFetch } from '@agentic-seo/fetch';
-import type { CompareStatus, GitHubClient } from './github';
+import type { CompareStatus, GitHubClient, GitHubDeployment, GitHubDeploymentStatus } from './github';
 
 // Deployment detection (ADR-0007 review update: merge is not deployment). Two adapters:
 //
@@ -146,6 +146,30 @@ export interface GitHubDeploymentsOptions {
   perPage?: number;
 }
 
+function timeOf(iso: string | null): number {
+  if (!iso) return 0;
+  const parsed = Date.parse(iso);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+/** The newest deployment first, whatever order the API sent (GitHub documents newest first). */
+function newestDeployments(deployments: readonly GitHubDeployment[]): GitHubDeployment[] {
+  return [...deployments].sort((left, right) => timeOf(right.createdAt) - timeOf(left.createdAt));
+}
+
+/**
+ * The status that describes where a deployment stands now. GitHub returns statuses newest first;
+ * the order is sorted here rather than trusted, and a tie keeps the earlier (newer) entry. Only
+ * this status counts: a deployment that once succeeded and was later deactivated is not deployed.
+ */
+function latestStatus(statuses: readonly GitHubDeploymentStatus[]): GitHubDeploymentStatus | null {
+  let latest: GitHubDeploymentStatus | null = null;
+  for (const status of statuses) {
+    if (latest === null || timeOf(status.createdAt) > timeOf(latest.createdAt)) latest = status;
+  }
+  return latest;
+}
+
 /** Detect a Git-integrated deploy from the GitHub Deployments API. */
 export async function detectGitHubDeployment(options: GitHubDeploymentsOptions): Promise<DeployResult> {
   const detector: DeployDetectorName = 'github_deployments';
@@ -159,14 +183,16 @@ export async function detectGitHubDeployment(options: GitHubDeploymentsOptions):
     }
 
     let successful: { sha: string } | null = null;
-    for (const deployment of deployments) {
+    for (const deployment of newestDeployments(deployments)) {
       const statuses = await options.github.listDeploymentStatuses(deployment.id);
-      if (!statuses.some((status) => status.state === 'success')) continue;
+      // The current status decides: `inactive`, `failure`, `queued` and `in_progress` all mean the
+      // deployment is not serving this commit, however green an earlier status was.
+      if (latestStatus(statuses)?.state !== 'success') continue;
       successful = { sha: deployment.sha };
       break;
     }
     if (!successful) {
-      return { state: 'unknown', detector, reason: 'No deployment in the recent history has a successful status.' };
+      return { state: 'unknown', detector, reason: 'The newest status of every recent deployment is not a success.' };
     }
 
     const comparison = await options.github.compareCommits(options.mergeSha, successful.sha);

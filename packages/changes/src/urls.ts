@@ -1,17 +1,48 @@
-// Small URL comparisons shared by the editor (which sees a file's relative src) and the verifier
-// (which sees the crawler's absolute src). They compare the path and query rather than the host,
-// because the origin is implied by the site either way.
+// URL comparisons shared by the editors (which see a file's relative src) and the verifier (which
+// sees the crawler's absolute src). Both sides resolve a value the way a browser does and compare
+// complete URLs: the same path on another host is a different image, and a relative src means what
+// the page's base makes it mean. A comparison that looked only at the path could edit an image that
+// the page never shows, or miss the one it does.
 
-/** Whether two image srcs name the same image, absolute or relative. */
-export function sameImageSource(left: string, right: string): boolean {
-  if (left === right) return true;
+/**
+ * A URL as the crawler records it (`packages/crawl/src/facts.ts`): resolved against `base`, with the
+ * scheme and host lowercased, the default port dropped and the fragment removed. `null` when the
+ * value is not a URL — a caller then falls back to an exact string comparison.
+ */
+export function normaliseUrl(value: string, base?: string): string | null {
   try {
-    const a = new URL(left, 'https://placeholder.invalid');
-    const b = new URL(right, 'https://placeholder.invalid');
-    return a.pathname === b.pathname && a.search === b.search;
+    const url = new URL(value, base);
+    url.hash = '';
+    return url.href;
   } catch {
-    return false;
+    return null;
   }
+}
+
+/** The first candidate of a `srcset` value: the URL before its width/density descriptor. */
+export function firstSrcsetSource(srcset: string | undefined): string | null {
+  const first = srcset?.split(',')[0]?.trim().split(/\s+/)[0];
+  return first ? first : null;
+}
+
+/**
+ * The absolute URL an `<img>` loads: its `src`, or the first `srcset` candidate when `src` is
+ * absent or empty. This mirrors the crawler (`PageImage.src` in `packages/crawl/src/facts.ts`), so
+ * the URL the editor matches is the URL the verifier later sees.
+ */
+export function imageSourceUrl(src: string | undefined, srcset: string | undefined, base: string): string | null {
+  const direct = src?.trim();
+  if (direct) return normaliseUrl(direct, base);
+  const candidate = firstSrcsetSource(srcset);
+  return candidate === null ? null : normaliseUrl(candidate, base);
+}
+
+/** Whether two image srcs name the same image once both are resolved and normalised. */
+export function sameImageSource(left: string, right: string, base?: string): boolean {
+  const a = normaliseUrl(left, base);
+  const b = normaliseUrl(right, base);
+  if (a === null || b === null) return left === right;
+  return a === b;
 }
 
 /** Whether two URLs are the same after resolving a relative one against a base. */

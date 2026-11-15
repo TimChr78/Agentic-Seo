@@ -81,6 +81,29 @@ describe('change catalogue', () => {
     ).toBe(false);
     expect(parseChange({ type: 'meta.title', url: 'https://example.com/', before: 'x' }).ok).toBe(false);
   });
+
+  it('rejects a redirect whose fields would write an extra rule', () => {
+    const injection = parseChange({
+      type: 'redirect',
+      from: '/target/',
+      to: '/target 301\n/admin https://evil.test 302\n#',
+      status: 301,
+      operation: 'add',
+    });
+    expect(injection).toMatchObject({ ok: false, code: 'invalid' });
+    expect(parseChange({ type: 'redirect', from: '/a b/', to: '/c/', status: 301, operation: 'add' }).ok).toBe(false);
+    expect(parseChange({ type: 'redirect', from: '/a/', to: 'javascript:alert(1)', status: 301, operation: 'add' }).ok).toBe(false);
+    expect(
+      parseChange({ type: 'redirect', from: '/a/', to: '/b/', status: 301, operation: 'update', before: { to: '/c d/', status: 301 } }).ok,
+    ).toBe(false);
+    expect(parseChange({ type: 'redirect', from: '/a/', to: 'https://example.com/b', status: 301, operation: 'add' }).ok).toBe(true);
+  });
+
+  it('accepts a source hash on any content change and rejects a malformed one', () => {
+    const hash = 'a'.repeat(64);
+    expect(parseChange({ ...titleChange, sourceHash: hash }).ok).toBe(true);
+    expect(parseChange({ ...titleChange, sourceHash: 'not-a-hash' }).ok).toBe(false);
+  });
 });
 
 describe('expectedAfter', () => {
