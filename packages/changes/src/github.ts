@@ -115,10 +115,21 @@ export interface GitHubCommit {
   parents: string[];
 }
 
-/** One blob entry of a tree, with the git object SHA. */
+/**
+ * One entry of a tree, with everything that decides what the path is: the git object SHA, the object
+ * type (`blob`, `tree`, or `commit` for a submodule) and the mode (`100644` regular, `100755`
+ * executable, `120000` symlink, `160000` submodule).
+ *
+ * All four matter to the apply worker's adoption check. The blob SHA alone cannot tell an
+ * executable file from a regular one, a symlink from the file it points at, or a submodule from a
+ * directory that happens to be checked in; a pull request that changed any of those is not the
+ * content a person reviewed.
+ */
 export interface GitHubTreeEntry {
   path: string;
   sha: string;
+  type: string;
+  mode: string;
 }
 
 export type CompareStatus = 'ahead' | 'behind' | 'diverged' | 'identical';
@@ -149,6 +160,12 @@ export interface CommitFile {
   path: string;
   /** The new contents; `null` deletes the file. */
   content: string | null;
+  /**
+   * The git mode to write (`100644` regular, `100755` executable, `120000` symlink). Defaults to
+   * `100644`; the apply worker passes the mode the file has at the base commit, so a commit it
+   * creates republishes nothing but the reviewed text.
+   */
+  mode?: string;
 }
 
 export interface CommitAuthor {
@@ -527,17 +544,24 @@ export class GitHubClient {
   }
 
   /**
-   * Every blob under a prefix at a ref, with its git object SHA. A retried apply job compares this
-   * map with the one it would write, so a branch holding anything else is never adopted.
+   * Every entry under a prefix at a ref, with its git object type, mode and SHA. A retried apply job
+   * compares this with the tree it would write, so a branch holding anything else — another file, a
+   * deleted one, a different mode or a submodule — is never adopted.
    */
   async listTreeEntries(ref: string, prefix = ''): Promise<{ entries: GitHubTreeEntry[]; truncated: boolean }> {
-    const { data } = await this.get<{ tree?: { path?: string; type?: string; sha?: string }[]; truncated?: boolean }>(
+    const { data } = await this.get<{ tree?: { path?: string; type?: string; mode?: string; sha?: string }[]; truncated?: boolean }>(
       `/repos/${this.slug}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
       { notFound: `the tree at ${ref}` },
     );
     const entries = (data.tree ?? [])
-      .filter((entry) => entry.type === 'blob' && typeof entry.path === 'string' && typeof entry.sha === 'string')
-      .map((entry) => ({ path: entry.path!, sha: entry.sha! }))
+      .filter((entry) => typeof entry.path === 'string' && typeof entry.sha === 'string')
+      .map((entry) => ({
+        path: entry.path!,
+        sha: entry.sha!,
+        type: entry.type ?? 'blob',
+        // GitHub always sends the mode; the regular-file default keeps an older response usable.
+        mode: entry.mode ?? '100644',
+      }))
       .filter((entry) => entry.path.startsWith(prefix));
     return { entries, truncated: data.truncated === true };
   }
@@ -594,7 +618,7 @@ export class GitHubClient {
       base_tree: baseTree,
       tree: input.files.map((file) => ({
         path: file.path,
-        mode: '100644',
+        mode: file.mode ?? '100644',
         type: 'blob',
         sha: file.content === null ? null : blobs.get(file.path),
       })),

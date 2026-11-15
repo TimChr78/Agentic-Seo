@@ -178,6 +178,23 @@ export async function loadRun(tx: Tx, workspaceId: string, artifactId: string): 
   return run;
 }
 
+/**
+ * The run row, locked until the transaction ends, so a check that spans other rows is not raced.
+ *
+ * `changes.rollback` needs it: "is another rollback of this change set open?" is a question about
+ * rows that do not exist yet, and a lock on the original (plus the partial unique index in 0010)
+ * is what makes two simultaneous requests see each other instead of both proposing.
+ */
+export async function lockRun(tx: Tx, workspaceId: string, artifactId: string): Promise<ChangeSetRun> {
+  const [run] = await tx
+    .select()
+    .from(schema.changeSetRuns)
+    .where(and(eq(schema.changeSetRuns.workspaceId, workspaceId), eq(schema.changeSetRuns.artifactId, artifactId)))
+    .for('update');
+  if (!run) throw new ChangeSetNotFound(artifactId);
+  return run;
+}
+
 /** A missing run row, distinguishable from any other failure so a command can name what is missing. */
 export class ChangeSetNotFound extends Error {
   constructor(readonly artifactId: string) {
@@ -300,6 +317,27 @@ export async function settleRollbackOf(tx: Tx, rollbackRun: ChangeSetRun): Promi
   if (!original || original.state === 'rolled_back') return;
   const live = ['deployed', 'verified', 'rolled_back', ...TERMINAL_STATES];
   if (!(live as readonly string[]).includes(original.state)) return;
+  // A rollback that does not cover every original change never completes the rollback. The original
+  // keeps its state — some of its changes are still live — and the log says which, because marking
+  // it rolled_back would claim a site change nobody made (ADR-0007, safe rollback).
+  if (rollbackRun.uncoveredChanges.length) {
+    await recordEvent(tx, {
+      workspaceId: rollbackRun.workspaceId,
+      artifactId: original.artifactId,
+      fromState: original.state,
+      toState: original.state,
+      actor: { type: 'system' },
+      reason: `Rollback ${rollbackRun.artifactId} was verified, but it does not cover every change in this change set: ${rollbackRun.uncoveredChanges.length} could not be inverted (${rollbackRun.uncoveredChanges
+        .map((entry) => entry.reason)
+        .join(' ')}). This change set is not rolled back; reverse the rest by hand.`,
+      evidence: {
+        rollbackArtifactId: rollbackRun.artifactId,
+        uncoveredChanges: rollbackRun.uncoveredChanges,
+        deployedSha: rollbackRun.deployedSha,
+      },
+    });
+    return;
+  }
   await transition(tx, original, 'rolled_back', {
     reason: `Rolled back by change set ${rollbackRun.artifactId}, which was verified on ${rollbackRun.deployedSha ?? 'the deployed commit'}.`,
     actor: { type: 'system' },

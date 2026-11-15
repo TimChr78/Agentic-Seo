@@ -9,7 +9,18 @@ import { activeConnection, commandClient, type GitHubConnection, githubAppError,
 import { draftChanges, inverseOf } from './draft';
 import { changeSetImpact, contentOfRun, sourcePathsOf } from './impact';
 import { describeRevalidation, revalidateChangeSet } from './revalidate';
-import { actorOf, type ChangeSetRun, eventsOf, findRun, latestVerifications, loadRun, OPEN_STATES, recordEvent, transition } from './state';
+import {
+  actorOf,
+  type ChangeSetRun,
+  eventsOf,
+  findRun,
+  latestVerifications,
+  loadRun,
+  lockRun,
+  OPEN_STATES,
+  recordEvent,
+  transition,
+} from './state';
 
 const ChangeSetId = z.string().regex(/^chg_[0-9a-f]{32}$/, 'A change set id: chg_ followed by 32 hex characters');
 const SiteId = z.string().uuid().describe('Site id');
@@ -77,6 +88,9 @@ const RunView = z.object({
   deployedSha: z.string().nullable(),
   rollbackOf: z.string().nullable(),
   rollbackChangeSetId: z.string().nullable(),
+  uncoveredChanges: z
+    .array(z.object({ index: z.number().int(), reason: z.string() }))
+    .describe('For a rollback proposal: the original changes it cannot reverse, with the reason'),
   verificationAttempts: z.number().int(),
   lastError: z.string().nullable(),
   stateChangedAt: z.string(),
@@ -144,6 +158,7 @@ function runView(run: ChangeSetRun): z.output<typeof RunView> {
     deployedSha: run.deployedSha,
     rollbackOf: run.rollbackOf,
     rollbackChangeSetId: run.rollbackChangeSetId,
+    uncoveredChanges: run.uncoveredChanges,
     verificationAttempts: run.verificationAttempts,
     lastError: run.lastError,
     stateChangedAt: run.stateChangedAt.toISOString(),
@@ -871,6 +886,7 @@ export const changesRequestApply = defineCommand({
       siteId: run.siteId,
       artifactId: run.artifactId,
       content,
+      rollbackOf: run.rollbackOf,
     });
     return {
       actionClass: impact.actionClass,
@@ -938,6 +954,7 @@ export const changesRequestApply = defineCommand({
       siteId: run.siteId,
       artifactId: artifact.id,
       content,
+      rollbackOf: run.rollbackOf,
     });
 
     const [workspace] = await ctx.tx
@@ -1027,23 +1044,51 @@ export const changesRequestApply = defineCommand({
   },
 });
 
+/**
+ * The one refusal for a second open rollback of the same original, whether it was seen by the
+ * in-flight check (which knows the proposal's id) or by the partial unique index (which does not).
+ */
+function rollbackInFlight(originalId: string, proposalId: string | null): AppError {
+  return new AppError(
+    'conflict',
+    proposalId
+      ? `Change set ${proposalId} is already a rollback of ${originalId}. Wait for it to be verified, or close it, before proposing another.`
+      : `Another rollback of ${originalId} was proposed at the same moment. Wait for it to be verified, or close it, before proposing another.`,
+  );
+}
+
+/** Whether a write lost a race on a unique index (`unique_violation`), e.g. 0010's rollback guard. */
+function isUniqueViolation(error: unknown): boolean {
+  const direct = (error as { code?: unknown } | null)?.code;
+  const cause = (error as { cause?: { code?: unknown } } | null)?.cause?.code;
+  return direct === '23505' || cause === '23505';
+}
+
 export const changesRollback = defineCommand({
   name: 'changes.rollback',
   title: 'Propose a rollback',
   description:
-    'Creates a new draft change set that reverses an applied change set. When every touched file still matches the merge commit the inverse edits are exact; when later edits landed they are drafted against the current files and the files that moved are named. The rollback is a change set like any other: nothing is written to GitHub here, its pull request opens only after a person approves it, and the original becomes rolled_back only when the rollback is verified. Refused before the change set was merged, and refuses a second open rollback while one is still in flight. Free.',
+    'Creates a new draft change set that reverses an applied change set. When every original change can be inverted and every touched file still matches the merge commit the inverse edits are exact; when later edits landed they are drafted against the current files, and a change that cannot be inverted from the change record (an inserted meta description, a replaced JSON-LD block) is listed in uncoveredChanges instead of being silently dropped. Such a proposal is never exact, is judged with the original change set’s action class and reach, and never marks the original rolled back. The rollback is a change set like any other: nothing is written to GitHub here, and its pull request opens only after a person approves it. Refused before the change set was merged, and refuses a second open rollback while one is still in flight. Free.',
   input: z.object({
     changeSetId: ChangeSetId,
     note: z.string().min(1).max(1000).describe('Why this is being rolled back, for the reviewer'),
   }),
   output: z.object({
     changeSetId: z.string().describe('The new draft rollback change set'),
-    mode: z.enum(['exact', 'proposed']).describe('exact: every touched file still matches the merge; proposed: later edits landed'),
-    filesUnchanged: z.boolean(),
+    mode: z
+      .enum(['exact', 'proposed'])
+      .describe(
+        'exact: every change is covered and every touched file still matches the merge; proposed: a file moved or a change cannot be inverted',
+      ),
+    filesUnchanged: z.boolean().describe('Whether every touched file still matches the merge commit'),
     actionClass: z.string().describe('The class the rollback inherits from the original change set'),
     reach: ReachView.describe('The traffic at risk, from the original change set’s affected URLs'),
     reason: z.string(),
-    skipped: z.array(z.object({ index: z.number().int(), reason: z.string() })),
+    uncoveredChanges: z
+      .array(z.object({ index: z.number().int(), reason: z.string() }))
+      .describe(
+        'Original changes this rollback cannot reverse, with the reason; any entry makes the proposal non-exact and blocks rolled_back',
+      ),
     next: z.string(),
   }),
   permission: 'changes:apply',
@@ -1052,7 +1097,8 @@ export const changesRollback = defineCommand({
   target: (input) => input.changeSetId,
   handler: async (input, ctx) => {
     const ws = ctx.principal.workspaceId;
-    const run = await loadRun(ctx.tx, ws, input.changeSetId);
+    // Locked before the in-flight check: a second request waits here, then sees the first proposal.
+    const run = await lockRun(ctx.tx, ws, input.changeSetId);
     if (!run.mergeCommitSha) {
       throw new AppError('conflict', `Change set ${input.changeSetId} has not been merged, so there is nothing to roll back.`);
     }
@@ -1070,12 +1116,7 @@ export const changesRollback = defineCommand({
           inArray(schema.changeSetRuns.state, [...OPEN_STATES]),
         ),
       );
-    if (inFlight) {
-      throw new AppError(
-        'conflict',
-        `Change set ${inFlight.artifactId} is already a rollback of ${input.changeSetId}. Wait for it to be verified, or close it, before proposing another.`,
-      );
-    }
+    if (inFlight) throw rollbackInFlight(input.changeSetId, inFlight.artifactId);
 
     const content = await contentOfRun(ctx.tx, run);
     if (!content) throw new AppError('invalid_input', 'The change set content is not readable, so its changes cannot be reversed.');
@@ -1104,7 +1145,7 @@ export const changesRollback = defineCommand({
 
     // The inverse of each change, re-resolved and applied against the current files.
     const inverses: Change[] = [];
-    const skipped: { index: number; reason: string }[] = [];
+    const uncoveredChanges: { index: number; reason: string }[] = [];
     for (const [index, drafted] of content.changes.entries()) {
       // The file as it is now: the inverse's `before` has to be what the file carries today, or a
       // rollback proposed after a later edit would be refused by its own editor as stale.
@@ -1116,12 +1157,12 @@ export const changesRollback = defineCommand({
       }
       const inverse = inverseOf(drafted, currentText);
       if (inverse.ok) inverses.push(inverse.change);
-      else skipped.push({ index, reason: inverse.reason });
+      else uncoveredChanges.push({ index, reason: inverse.reason });
     }
     if (!inverses.length) {
       throw new AppError(
         'conflict',
-        `None of this change set’s changes can be reversed from the change record (${skipped.map((entry) => entry.reason).join(' ')}). Revert the merge commit ${run.mergeCommitSha} by hand.`,
+        `None of this change set’s changes can be reversed from the change record (${uncoveredChanges.map((entry) => entry.reason).join(' ')}). Revert the merge commit ${run.mergeCommitSha} by hand.`,
       );
     }
 
@@ -1145,14 +1186,15 @@ export const changesRollback = defineCommand({
       );
     }
 
-    // The rollback inherits the original's action class and reach, so approving it is judged exactly
-    // like approving the original change again. Its own changes carry the same types, which is what
-    // changes.requestApply recomputes; this answer is for the caller and the review screen.
+    // The rollback inherits the original's action class and reach: approving it is judged exactly
+    // like approving the original change again, even when this proposal covers only some of its
+    // changes. `changeSetImpact` reads the original's own content for both.
     const impact = await changeSetImpact(ctx.tx, {
       workspaceId: ws,
       siteId: site.id,
       artifactId: run.artifactId,
       content: drafted,
+      rollbackOf: input.changeSetId,
     });
 
     const validated = (await validateContent('change_set', drafted, 'draft')) as unknown as typeof drafted;
@@ -1178,15 +1220,24 @@ export const changesRollback = defineCommand({
     });
 
     const at = new Date();
-    const exact = moved.length === 0;
-    await ctx.tx.insert(schema.changeSetRuns).values({
-      workspaceId: ws,
-      artifactId: id,
-      siteId: site.id,
-      state: 'draft',
-      draftedAt: at,
-      rollbackOf: input.changeSetId,
-    });
+    // Exact only when the rollback covers every original change AND every file it touches is still
+    // the merge's version. A partial inverse is never exact, however still the files are.
+    const exact = moved.length === 0 && uncoveredChanges.length === 0;
+    try {
+      await ctx.tx.insert(schema.changeSetRuns).values({
+        workspaceId: ws,
+        artifactId: id,
+        siteId: site.id,
+        state: 'draft',
+        draftedAt: at,
+        rollbackOf: input.changeSetId,
+        uncoveredChanges,
+      });
+    } catch (error) {
+      // The partial unique index from 0010: another request proposed a rollback in the meantime.
+      if (isUniqueViolation(error)) throw rollbackInFlight(input.changeSetId, null);
+      throw error;
+    }
     await recordEvent(ctx.tx, {
       workspaceId: ws,
       artifactId: id,
@@ -1194,13 +1245,15 @@ export const changesRollback = defineCommand({
       toState: 'draft',
       actor: actorOf(ctx),
       reason: exact
-        ? `Rollback of ${input.changeSetId}: every touched file still matches the merge commit, so the inverse edits are exact.`
-        : `Rollback of ${input.changeSetId}: ${moved.join(', ')} changed after the merge, so the inverse edits are drafted against the current files.`,
-      evidence: { rollbackOf: input.changeSetId, paths, moved },
+        ? `Rollback of ${input.changeSetId}: every change is covered and every touched file still matches the merge commit, so the inverse edits are exact.`
+        : uncoveredChanges.length
+          ? `Rollback of ${input.changeSetId}: ${uncoveredChanges.length} of ${content.changes.length} changes cannot be inverted from the change record (${uncoveredChanges.map((entry) => entry.reason).join(' ')}), so it is a proposal and cannot complete the rollback.`
+          : `Rollback of ${input.changeSetId}: ${moved.join(', ')} changed after the merge, so the inverse edits are drafted against the current files.`,
+      evidence: { rollbackOf: input.changeSetId, paths, moved, uncoveredChanges },
     });
 
-    // Link the proposal on the original without moving it: only a verified rollback makes the
-    // original `rolled_back` (ADR-0007, safe rollback). The event records that a proposal exists.
+    // Link the proposal on the original without moving it: only a verified rollback that covers
+    // every original change makes the original `rolled_back` (ADR-0007, safe rollback).
     await ctx.tx
       .update(schema.changeSetRuns)
       .set({ rollbackChangeSetId: id, updatedAt: at })
@@ -1211,20 +1264,22 @@ export const changesRollback = defineCommand({
       fromState: run.state,
       toState: run.state,
       actor: actorOf(ctx),
-      reason: `Rollback proposed as change set ${id} (${exact ? 'exact' : 'proposed'}). The original changes state only when the rollback is verified.`,
-      evidence: { rollbackArtifactId: id, mode: exact ? 'exact' : 'proposed', moved, skipped },
+      reason: `Rollback proposed as change set ${id} (${exact ? 'exact' : 'proposed'}). The original changes state only when a rollback that covers every change is verified.`,
+      evidence: { rollbackArtifactId: id, mode: exact ? 'exact' : 'proposed', moved, uncoveredChanges },
     });
 
     return {
       changeSetId: id,
       mode: exact ? ('exact' as const) : ('proposed' as const),
-      filesUnchanged: exact,
+      filesUnchanged: moved.length === 0,
       actionClass: impact.actionClass,
       reach: impact.reach,
       reason: exact
-        ? 'Every touched file still matches the merge commit, so the rollback is an exact inverse. Review it and request approval; its pull request opens after approval.'
-        : `${moved.join(', ')} changed after the merge, so the rollback is drafted against the current files. Review it and request approval; its pull request opens after approval.`,
-      skipped,
+        ? 'Every change is covered and every touched file still matches the merge commit, so the rollback is an exact inverse. Review it and request approval; its pull request opens after approval.'
+        : uncoveredChanges.length
+          ? `${uncoveredChanges.length} of ${content.changes.length} changes cannot be inverted from the change record, so the rollback is a proposal: it reverses the rest and cannot mark the original rolled back. ${uncoveredChanges.map((entry) => entry.reason).join(' ')}`
+          : `${moved.join(', ')} changed after the merge, so the rollback is drafted against the current files. Review it and request approval; its pull request opens after approval.`,
+      uncoveredChanges,
       next: `Review it with changes.get, then submit it with changes.requestApply: ${id}.`,
     };
   },

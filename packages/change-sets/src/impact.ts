@@ -6,7 +6,7 @@ import { schema, type Tx } from '@agentic-seo/db';
 import { estimateReach } from '@agentic-seo/search-data';
 import { and, eq, inArray } from 'drizzle-orm';
 import { findGitHubConnection, GITHUB_CONNECTOR_ID } from './connector';
-import { type ChangeSetRun, OPEN_STATES } from './state';
+import { type ChangeSetRun, findRun, OPEN_STATES } from './state';
 
 // What a change set does to the world (agents-and-autonomy §3): the action class of its strongest
 // change, the traffic at risk over every URL it touches, and the fixed rules that make a person's
@@ -145,12 +145,24 @@ export interface ChangeSetImpactResult {
   conflicts: ChangeSetConflict[];
 }
 
-/** The impact of publishing one change set, from its content. */
+/**
+ * The original change set a rollback reverses, when its content is readable. A rollback is judged by
+ * the change it undoes, not by the subset of inverses it happens to carry: a rollback that restores
+ * one of three changes is not a smaller change than the original, and a partial inverse must never
+ * drop a class (or a URL's risk) that the original was approved with.
+ */
+async function originContentOf(tx: Tx, workspaceId: string, rollbackOf: string): Promise<ChangeSetContent | null> {
+  const origin = await findRun(tx, workspaceId, rollbackOf);
+  return origin ? contentOfRun(tx, origin) : null;
+}
+
+/** The impact of publishing one change set, from its content (or the original it rolls back). */
 export async function changeSetImpact(
   tx: Tx,
-  input: { workspaceId: string; siteId: string; artifactId: string; content: ChangeSetContent },
+  input: { workspaceId: string; siteId: string; artifactId: string; content: ChangeSetContent; rollbackOf?: string | null },
 ): Promise<ChangeSetImpactResult> {
-  const urls = affectedUrlsOf(input.content);
+  const basis = input.rollbackOf ? ((await originContentOf(tx, input.workspaceId, input.rollbackOf)) ?? input.content) : input.content;
+  const urls = affectedUrlsOf(basis);
   const reach = await estimateReach(tx, { workspaceId: input.workspaceId, siteId: input.siteId, urls });
   const conflicts = await conflictsFor(tx, input);
   const needsPerson: string[] = [];
@@ -161,14 +173,16 @@ export async function changeSetImpact(
     );
   }
   for (const conflict of conflicts) needsPerson.push(conflictReason(conflict));
-  return { actionClass: strongestClass(input.content.changes.map((drafted) => drafted.change)), reach, needsPerson, conflicts };
+  return { actionClass: strongestClass(basis.changes.map((drafted) => drafted.change)), reach, needsPerson, conflicts };
 }
 
 /** The estimator packages/artifacts asks for when a change set is published through any door. */
-registerChangeSetImpactEstimator(async ({ tx, workspaceId, siteId, content }) => {
+registerChangeSetImpactEstimator(async ({ tx, workspaceId, siteId, content, artifactId }) => {
   const parsed = changeSetContentSchema.safeParse(content);
   if (!parsed.success || !siteId) return { actionClass: 'draft' as const };
-  const impact = await changeSetImpact(tx, { workspaceId, siteId, artifactId: '', content: parsed.data });
+  // A rollback through `artifacts.requestPublish` keeps the original's class and reach too.
+  const rollbackOf = artifactId ? ((await findRun(tx, workspaceId, artifactId))?.rollbackOf ?? null) : null;
+  const impact = await changeSetImpact(tx, { workspaceId, siteId, artifactId: artifactId ?? '', content: parsed.data, rollbackOf });
   return {
     actionClass: impact.actionClass,
     reach: impact.reach,

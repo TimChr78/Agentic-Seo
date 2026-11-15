@@ -14,8 +14,9 @@ export * from './verify';
 export * from './verify-fetch';
 export * from './worker';
 
-import { registerChangeSetPublishHook } from './publish-hook';
+import { registerChangeSetClosedHook, registerChangeSetPublishHook } from './publish-hook';
 
-// The publish hook is registered when the package loads, so the artifact approval flow and the
-// change-set apply job cannot be wired separately and drift apart.
+// The hooks are registered when the package loads, so the artifact approval flow and the change-set
+// apply job cannot be wired separately and drift apart.
 registerChangeSetPublishHook();
+registerChangeSetClosedHook();

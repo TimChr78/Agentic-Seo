@@ -1,5 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { approve as approvalsApprove, updateDraft as artifactsUpdateDraft, createArtifact, requestPublish } from '@agentic-seo/artifacts';
+import {
+  approve as approvalsApprove,
+  reject as approvalsReject,
+  updateDraft as artifactsUpdateDraft,
+  createArtifact,
+  importConfig,
+  requestPublish,
+} from '@agentic-seo/artifacts';
 import {
   type AgentActionEntry,
   type AnyCommand,
@@ -10,6 +17,7 @@ import {
 } from '@agentic-seo/commands';
 import { setCrawlFetchSeams } from '@agentic-seo/crawl';
 import { createDb, type Db, schema, type Tx } from '@agentic-seo/db';
+import { normalizePageUrl } from '@agentic-seo/search-data';
 import { localKeyProvider } from '@agentic-seo/secrets';
 import { sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -756,6 +764,97 @@ describe.skipIf(!hasTestDatabase())('change sets and the GitHub connector', () =
     expect(github.pullRequests[0]!.state).toBe('closed');
   });
 
+  /** The change an earlier attempt carried into a pull request, whose response was then lost. */
+  async function interruptedApply() {
+    const created = await call(changesCreate, createBody([titleChange('/about/', 'Old about', 'New about')]));
+    const submitted = await call(changesRequestApply, { changeSetId: created.changeSetId, note: 'Apply.' });
+    await call(approvalsApprove, { approvalId: submitted.approvalId }, personB);
+    github.timeoutNextPullRequest = true;
+    const pending = jobs.splice(0);
+    expect(pending.map((job) => job.identifier)).toEqual([CHANGES_APPLY_TASK]);
+    await expect(runChangesApplyTask(db, pending[0]!.payload, deps())).rejects.toThrow(/did not answer|could not be reached|GitHub/i);
+    expect(github.pullRequests).toHaveLength(1);
+    return { changeSetId: created.changeSetId as string, payload: pending[0]!.payload, branch: `aseo/${created.changeSetId}-v1` };
+  }
+
+  // Everything a pushed commit can change about a tree entry that a blob-SHA comparison cannot see:
+  // the mode (executable bit, symlink), a submodule added, moved or removed, and a file added or
+  // deleted. Each must refuse adoption, because none of it is what the person approved.
+  const tampering: {
+    what: string;
+    reason: RegExp;
+    /** The base repository already holds a submodule at vendor/lib. */
+    submodule?: boolean;
+    /** Rewrites the pull request's commit on the base so its tree holds something else. */
+    tamper: (fake: FakeGitHub, branch: string) => unknown;
+  }[] = [
+    {
+      what: 'an executable bit on the edited page',
+      reason: /changes the mode of about\/index\.html to 100755/,
+      tamper: (fake, branch) =>
+        fake.rewriteHead(branch, (entries) => {
+          const entry = entries.get('about/index.html')!;
+          entries.set('about/index.html', { ...entry, mode: '100755' });
+        }),
+    },
+    {
+      what: 'a symlink where the edited page was',
+      reason: /changes the mode of about\/index\.html to 120000/,
+      tamper: (fake, branch) =>
+        fake.rewriteHead(branch, (entries) => {
+          const entry = entries.get('about/index.html')!;
+          entries.set('about/index.html', { ...entry, mode: '120000' });
+        }),
+    },
+    {
+      what: 'an added submodule',
+      reason: /it adds vendor\/lib/,
+      tamper: (fake, branch) =>
+        fake.rewriteHead(branch, (entries) => entries.set('vendor/lib', { type: 'commit', mode: '160000', sha: 'a'.repeat(40) })),
+    },
+    {
+      what: 'a changed submodule',
+      reason: /it changes vendor\/lib/,
+      submodule: true,
+      tamper: (fake, branch) =>
+        fake.rewriteHead(branch, (entries) => entries.set('vendor/lib', { type: 'commit', mode: '160000', sha: 'b'.repeat(40) })),
+    },
+    {
+      what: 'a deleted submodule',
+      reason: /it deletes vendor\/lib/,
+      submodule: true,
+      tamper: (fake, branch) => fake.rewriteHead(branch, (entries) => entries.delete('vendor/lib')),
+    },
+    {
+      what: 'an extra file',
+      reason: /it adds sneaky\.txt/,
+      tamper: (fake, branch) => fake.rewriteHead(branch, (entries, blob) => entries.set('sneaky.txt', blob('not reviewed'))),
+    },
+    {
+      what: 'a deleted file',
+      reason: /it deletes contact\/index\.html/,
+      tamper: (fake, branch) => fake.rewriteHead(branch, (entries) => entries.delete('contact/index.html')),
+    },
+  ];
+
+  it.each(tampering)('refuses to adopt a pull request that carries $what', async ({ tamper, reason, submodule }) => {
+    if (submodule) github.pushEntry(DEFAULT_BRANCH, 'vendor/lib', { type: 'commit', mode: '160000', sha: 'a'.repeat(40) });
+    const { changeSetId, payload, branch } = await interruptedApply();
+    tamper(github, branch);
+
+    await runChangesApplyTask(db, payload, deps());
+
+    const status = await call(changesStatus, { changeSetId });
+    expect(status.run.state).toBe('in_review');
+    expect(status.run.approvedVersion).toBeNull();
+    expect(status.run.approvedHeadSha).toBeNull();
+    expect(status.run.lastError).toMatch(/not the reviewed change/);
+    expect(status.run.lastError).toMatch(reason);
+    // The pull request Agentic SEO opened on its own branch is closed; no second one exists.
+    expect(github.pullRequests).toHaveLength(1);
+    expect(github.pullRequests[0]!.state).toBe('closed');
+  });
+
   it('resumes an interrupted commit sequence after the branch and a blob were created', async () => {
     const created = await call(changesCreate, createBody([titleChange('/about/', 'Old about', 'New about')]));
     const submitted = await call(changesRequestApply, { changeSetId: created.changeSetId, note: 'Apply.' });
@@ -1013,6 +1112,164 @@ describe.skipIf(!hasTestDatabase())('change sets and the GitHub connector', () =
     expect(proposed.run).toMatchObject({ state: 'draft', rollbackOf: changeSetId });
     const content = await call(changesGet, { changeSetId: rollback.changeSetId });
     expect(JSON.stringify(content.content)).toContain('Even newer about');
+  });
+
+  /** A live Search Console connection and one fresh page row, so a reach estimate is known. */
+  async function seedSearchConsole() {
+    const property = `sc-domain:${domain}`;
+    await db.admin.query(
+      `INSERT INTO connections (workspace_id, id, site_id, connector, label, settings, state)
+       VALUES ($1, $2, $3, 'google-search-console', 'Google Search Console', $4::jsonb, 'active')`,
+      [workspace, `con_${randomUUID().replace(/-/g, '')}`, siteId, JSON.stringify({ property })],
+    );
+    await db.admin.query(
+      `INSERT INTO gsc_page_aggregates
+         (workspace_id, site_id, property, date, page, page_key, country, device, clicks, impressions, ctr, position, is_final)
+       VALUES ($1, $2, $3, current_date, $4, $5, '', '', 12, 400, 0.03, 4, true)`,
+      [workspace, siteId, property, `${site.origin}/about/`, normalizePageUrl(`${site.origin}/about/`)],
+    );
+  }
+
+  it('proposes one rollback when two requests arrive at the same moment', async () => {
+    const { changeSetId, prNumber } = await openPullRequest();
+    const mergeSha = github.merge(prNumber);
+    site.setPage('/about/', pageHtml('New about', 'Old description'));
+    site.setVersion(mergeSha);
+    await poll();
+    await drain();
+
+    const outcomes = await Promise.allSettled([
+      call(changesRollback, { changeSetId, note: 'First request.' }),
+      call(changesRollback, { changeSetId, note: 'Second request.' }),
+    ]);
+    expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
+    const refused = outcomes.find((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected');
+    expect(String(refused?.reason)).toMatch(/already a rollback|same moment/);
+
+    // Exactly one proposal exists for the original, and it is linked to it.
+    const { rows } = await db.admin.query<{ artifact_id: string }>(
+      'SELECT artifact_id FROM change_set_runs WHERE workspace_id = $1 AND rollback_of = $2',
+      [workspace, changeSetId],
+    );
+    expect(rows).toHaveLength(1);
+    const original = await call(changesStatus, { changeSetId });
+    expect(original.run.rollbackChangeSetId).toBe(rows[0]!.artifact_id);
+    expect(original.run.state).toBe('verified');
+  });
+
+  it('allows another rollback after a person rejects the proposal', async () => {
+    const { changeSetId, prNumber } = await openPullRequest();
+    const mergeSha = github.merge(prNumber);
+    site.setPage('/about/', pageHtml('New about', 'Old description'));
+    site.setVersion(mergeSha);
+    await poll();
+    await drain();
+
+    const rollback = await call(changesRollback, { changeSetId, note: 'The title tested badly.' });
+    const submitted = await call(changesRequestApply, { changeSetId: rollback.changeSetId, note: 'Roll it back.' });
+    expect(submitted.status).toBe('in_review');
+    await call(approvalsReject, { approvalId: submitted.approvalId, note: 'Not this week.' }, personB);
+
+    // The rejected version is closed for good, so the run no longer looks open.
+    const rejected = await call(changesStatus, { changeSetId: rollback.changeSetId });
+    expect(rejected.run.state).toBe('closed');
+    expect(rejected.events.at(-1)?.reason).toMatch(/rejected/);
+
+    const second = await call(changesRollback, { changeSetId, note: 'Second attempt.' });
+    expect(second.changeSetId).not.toBe(rollback.changeSetId);
+    expect((await call(changesStatus, { changeSetId })).run.state).toBe('verified');
+  });
+
+  it('refuses change-set content through config.import, for a new artifact and an existing one', async () => {
+    const created = await call(changesCreate, createBody([titleChange('/about/', 'Old about', 'New about')]));
+    const stored = (await call(changesGet, { changeSetId: created.changeSetId })).content as Record<string, unknown>;
+
+    // A fresh id: the import would insert the draft itself instead of going through changes.create.
+    const fresh = {
+      format: 'agentic-seo/artifacts@1',
+      artifacts: [{ id: `chg_${'a'.repeat(32)}`, type: 'change_set', name: 'Imported change set', siteId, content: stored }],
+    };
+    await expect(call(importConfig, { bundle: fresh, dryRun: false })).rejects.toThrow(
+      /changes\.create to draft one or changes\.updateDraft/,
+    );
+
+    // An existing one: a bundle whose title differs must not edit the draft either.
+    const existing = {
+      format: 'agentic-seo/artifacts@1',
+      artifacts: [
+        {
+          id: created.changeSetId,
+          type: 'change_set',
+          name: 'Imported change set',
+          siteId,
+          content: { ...stored, title: 'Changed by the import' },
+        },
+      ],
+    };
+    await expect(call(importConfig, { bundle: existing, dryRun: false })).rejects.toThrow(/changes\.updateDraft/);
+    expect(((await call(changesGet, { changeSetId: created.changeSetId })).content as { title: string }).title).toBe(
+      'Rewrite a page title',
+    );
+  });
+
+  it('proposes a partial rollback that is not exact and never marks the original rolled back', async () => {
+    await seedSearchConsole();
+    // A title change (invertible) plus an inserted meta description (a change cannot remove one).
+    const created = await call(
+      changesCreate,
+      createBody(
+        [
+          titleChange('/about/', 'Old about', 'New about'),
+          { type: 'meta.description', url: pageUrl('/contact/'), before: null, after: 'A fresh description' },
+        ],
+        { title: 'Rewrite a title and add a description' },
+      ),
+    );
+    expect(created.changes).toHaveLength(2);
+    const submitted = await call(changesRequestApply, { changeSetId: created.changeSetId, note: 'Apply.' });
+    await call(approvalsApprove, { approvalId: submitted.approvalId }, personB);
+    await drain();
+    const open = await call(changesStatus, { changeSetId: created.changeSetId });
+    const mergeSha = github.merge(open.run.prNumber as number);
+    site.setPage('/about/', pageHtml('New about', 'Old description'));
+    site.setPage('/contact/', pageHtml('Contact', 'A fresh description'));
+    site.setVersion(mergeSha);
+    await poll();
+    await drain();
+    expect((await call(changesStatus, { changeSetId: created.changeSetId })).run.state).toBe('verified');
+
+    const rollback = await call(changesRollback, { changeSetId: created.changeSetId, note: 'Both changes were wrong.' });
+    // One change cannot be inverted, so this is a proposal, never exact.
+    expect(rollback).toMatchObject({ mode: 'proposed', filesUnchanged: true, actionClass: 'site.content' });
+    expect(rollback.uncoveredChanges).toHaveLength(1);
+    expect(rollback.uncoveredChanges[0]!.index).toBe(1);
+    expect(rollback.uncoveredChanges[0]!.reason).toMatch(/cannot remove one/);
+    // The reach is the original change set's (two changes, every route their sources render), not
+    // the one URL the covered inverse touches: it equals what changes.requestApply estimated then.
+    expect(rollback.reach).toEqual(submitted.reach);
+    expect(rollback.reach.kind === 'known' && rollback.reach.affectedUrls).toBeGreaterThan(1);
+
+    const proposal = await call(changesStatus, { changeSetId: rollback.changeSetId });
+    expect(proposal.run.state).toBe('draft');
+    expect(proposal.run.uncoveredChanges).toHaveLength(1);
+
+    // Completing it reverses the title and still must not claim the whole change set is rolled back.
+    const second = await call(changesRequestApply, { changeSetId: rollback.changeSetId, note: 'Roll the title back.' });
+    await call(approvalsApprove, { approvalId: second.approvalId }, personB);
+    await drain();
+    const rollbackRun = await call(changesStatus, { changeSetId: rollback.changeSetId });
+    const rollbackPr = github.pullRequests.find((candidate) => candidate.head === rollbackRun.run.branch)!;
+    expect(github.filesAt(rollbackPr.head)?.get('about/index.html')).toContain('<title>Old about</title>');
+    const rollbackMerge = github.merge(rollbackPr.number);
+    site.setPage('/about/', pageHtml('Old about', 'Old description'));
+    site.setVersion(rollbackMerge);
+    await poll();
+    await drain();
+
+    expect((await call(changesStatus, { changeSetId: rollback.changeSetId })).run.state).toBe('verified');
+    const original = await call(changesStatus, { changeSetId: created.changeSetId });
+    expect(original.run.state).toBe('verified');
+    expect(original.events.at(-1)?.reason).toMatch(/does not cover every change/);
   });
 
   /** A throwaway Graphile schema, so a test can see a transactionally queued job without the worker. */

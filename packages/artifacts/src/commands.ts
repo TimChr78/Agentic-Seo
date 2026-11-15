@@ -246,6 +246,33 @@ export const publishHooks: ((
   version: number,
 ) => Promise<void>)[] = [];
 
+/**
+ * Called inside the transaction when a version is closed **without** being published: its approval
+ * request was rejected, or its draft was discarded. A type whose own lifecycle row mirrors the
+ * artifact's (a change set's run) uses it to move that row on, so nothing waits for a decision that
+ * already happened. `how` says which door closed it, for the reason the type writes.
+ */
+export const versionClosedHooks: ((
+  ctx: CommandContext,
+  artifact: { id: string; type: string; workspaceId: string },
+  version: number,
+  how: 'rejected' | 'discarded',
+) => Promise<void>)[] = [];
+
+/** Runs the closed-version hooks for these artifacts, after their version state was written. */
+async function closeHooksFor(
+  ctx: CommandContext,
+  members: { artifactId: string; version: number }[],
+  how: 'rejected' | 'discarded',
+): Promise<void> {
+  if (!versionClosedHooks.length) return;
+  for (const member of members) {
+    const a = await loadArtifact(ctx, member.artifactId);
+    const artifact = { id: a.id, type: a.type, workspaceId: ctx.principal.workspaceId };
+    for (const hook of versionClosedHooks) await hook(ctx, artifact, member.version, how);
+  }
+}
+
 async function publishVersion(ctx: CommandContext, artifactId: string, number: number) {
   // Locked before the live version is read: two publishes of one artifact must not both supersede
   // the same version and each leave their own marked published.
@@ -433,8 +460,11 @@ function refuseAgentsFor(ctx: CommandContext, type: string) {
  * hash and diff). The generic commands would accept a caller's version of those fields, and the
  * apply worker would then commit content nobody resolved; only the type's own commands, which read
  * the repository and derive them, may write it.
+ *
+ * Exported because `config.import` inserts drafts itself: an import is a third door onto the same
+ * table, and it must refuse exactly what `artifacts.create` and `artifacts.updateDraft` refuse.
  */
-function refuseServerOwned(type: string) {
+export function refuseServerOwned(type: string) {
   const def = artifactTypes[type as ArtifactType] as { serverOwned?: boolean; label: string } | undefined;
   if (!def?.serverOwned) return;
   throw new AppError(
@@ -892,6 +922,11 @@ export const discardDraft = defineCommand({
     // The app role cannot delete versions; this function deletes exactly the drafts after the live
     // version and moves the artifact back to it.
     await ctx.tx.execute(sql`SELECT discard_artifact_drafts(${a.id})`);
+    await closeHooksFor(
+      ctx,
+      discarded.map((version) => ({ artifactId: a.id, version })),
+      'discarded',
+    );
     return { artifactId: a.id, version: a.publishedVersion, state: 'published' as const, discardedVersions: discarded };
   },
 });
@@ -1638,6 +1673,7 @@ export const approve = defineCommand({
  */
 async function closeRejected(ctx: CommandContext, members: { id: string; artifactId: string; version: number }[], reason: string) {
   for (const m of members) await setVersionState(ctx, m.artifactId, m.version, 'rejected');
+  await closeHooksFor(ctx, members, 'rejected');
   await ctx.tx
     .update(schema.approvalRequests)
     .set({ status: 'rejected', decidedBy: 'policy:archived', decidedAt: new Date(), decisionNote: reason, holdUntil: null })
@@ -1713,6 +1749,9 @@ export const reject = defineCommand({
           ),
         ),
       );
+    // The versions are closed for good: a type whose own row mirrored them (a change set's run)
+    // moves on here, in the same transaction, rather than blocking the next attempt forever.
+    await closeHooksFor(ctx, members, 'rejected');
     return { status: 'rejected' as const, artifactId: r.artifactId, version: r.version };
   },
 });

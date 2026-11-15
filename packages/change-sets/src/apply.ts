@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { ChangeSetContent } from '@agentic-seo/artifacts';
-import { applyChange, type Change, type GitHubClient, GitHubError, sourceHashOf } from '@agentic-seo/changes';
+import { applyChange, type Change, type GitHubClient, GitHubError, type GitHubTreeEntry, sourceHashOf } from '@agentic-seo/changes';
 import type { Db } from '@agentic-seo/db';
 import { schema } from '@agentic-seo/db';
 import type { KeyProvider } from '@agentic-seo/secrets';
@@ -118,21 +118,57 @@ export function gitBlobSha(text: string): string {
     .digest('hex');
 }
 
+/**
+ * The file list for the one commit this apply writes: every re-applied text at its path, with the
+ * mode the path already had at the base. Writing the base mode (rather than a fixed `100644`) is
+ * what keeps an executable file executable and a symlink a symlink, so the commit holds only the
+ * reviewed text and nothing else — which is also the tree the adoption check compares against.
+ */
+function commitFilesOf(texts: ReadonlyMap<string, string>, baseEntries: ReadonlyMap<string, GitHubTreeEntry>) {
+  return [...texts].map(([path, text]) => ({
+    path,
+    content: text,
+    mode: baseEntries.get(path)?.mode ?? '100644',
+  }));
+}
+
 export type HeadCheck = { ok: true } | { ok: false; reason: string };
+
+/** The tree this apply would write: the base entries, with our text as a blob at its base mode. */
+function plannedEntries(
+  baseEntries: ReadonlyMap<string, GitHubTreeEntry>,
+  texts: ReadonlyMap<string, string>,
+): Map<string, GitHubTreeEntry> {
+  const planned = new Map(baseEntries);
+  for (const [path, text] of texts) {
+    const base = baseEntries.get(path);
+    if (!base) continue;
+    planned.set(path, { path, type: 'blob', mode: base.mode, sha: gitBlobSha(text) });
+  }
+  return planned;
+}
+
+/** A tree entry in one line, so a refusal can say what the unexpected entry actually is. */
+function describeEntry(entry: GitHubTreeEntry): string {
+  return `${entry.type === 'commit' ? 'submodule' : entry.type} in mode ${entry.mode}`;
+}
 
 /**
  * Whether a commit is exactly the commit this apply would create: one parent, the expected base,
- * and a tree that is the base tree with our file contents at our paths and nothing else changed.
+ * and a tree identical to the base tree with our file contents at their original paths and modes.
  *
  * A retried job must never adopt a branch or pull request that carries anything else — that would
- * turn "the response was lost" into "someone else's push was approved". A commit that differs in
- * any path, or whose parent is not the base, is refused; the caller invalidates the approval.
+ * turn "the response was lost" into "someone else's push was approved". Every entry is compared in
+ * full (path, type, mode and SHA): the blob SHA alone hides an executable-bit change, a symlink
+ * that replaced a file, or a submodule that appeared, moved or went away. A truncated tree answer
+ * proves nothing, so it refuses adoption too.
  */
 export async function headMatchesPlan(
   client: GitHubClient,
   headSha: string,
   baseSha: string,
   texts: ReadonlyMap<string, string>,
+  baseEntries?: ReadonlyMap<string, GitHubTreeEntry>,
 ): Promise<HeadCheck> {
   const commit = await client.getCommit(headSha);
   if (commit.parents.length !== 1 || commit.parents[0] !== baseSha) {
@@ -142,32 +178,49 @@ export async function headMatchesPlan(
       reason: `its commit ${headSha} has ${commit.parents.length === 1 ? 'the parent' : 'the parents'} ${parents}, and the expected base is ${baseSha}`,
     };
   }
-  const [baseTree, headTree] = await Promise.all([client.listTreeEntries(baseSha), client.listTreeEntries(headSha)]);
-  if (baseTree.truncated || headTree.truncated) {
+  const [base, head] = await Promise.all([
+    baseEntries ? Promise.resolve(null) : client.listTreeEntries(baseSha),
+    client.listTreeEntries(headSha),
+  ]);
+  if (base?.truncated || head.truncated) {
     return { ok: false, reason: 'GitHub truncated the file list, so the commit’s contents cannot be verified' };
   }
-  const base = new Map(baseTree.entries.map((entry) => [entry.path, entry.sha]));
-  const head = new Map(headTree.entries.map((entry) => [entry.path, entry.sha]));
-  for (const path of head.keys()) {
-    if (!base.has(path) && !texts.has(path)) {
+  const baseMap = baseEntries ?? new Map((base?.entries ?? []).map((entry) => [entry.path, entry]));
+  const headMap = new Map(head.entries.map((entry) => [entry.path, entry]));
+
+  // Every path we write must be a file at the base, so the planned tree is well defined.
+  for (const path of texts.keys()) {
+    const entry = baseMap.get(path);
+    if (!entry) return { ok: false, reason: `the base commit ${baseSha} does not contain ${path}` };
+    if (entry.type !== 'blob') return { ok: false, reason: `${path} is a ${describeEntry(entry)} at the base commit, not a file` };
+  }
+  for (const path of headMap.keys()) {
+    if (!baseMap.has(path) && !texts.has(path)) {
       return { ok: false, reason: `it adds ${path}, which this change set does not write` };
     }
   }
-  for (const path of base.keys()) {
-    if (!head.has(path)) {
+  for (const path of baseMap.keys()) {
+    if (!headMap.has(path)) {
       return { ok: false, reason: `it deletes ${path}, which this change set does not touch` };
     }
   }
-  for (const [path, text] of texts) {
-    const entry = head.get(path);
-    if (!entry) return { ok: false, reason: `it does not contain ${path}` };
-    if (entry !== gitBlobSha(text)) {
-      return { ok: false, reason: `the contents of ${path} are not the reviewed edit` };
+  const planned = plannedEntries(baseMap, texts);
+  for (const [path, entry] of headMap) {
+    const expected = planned.get(path);
+    if (!expected) continue; // An unplanned addition or deletion has already been refused above.
+    if (entry.type !== expected.type) {
+      return {
+        ok: false,
+        reason: `it turns ${path} into a ${describeEntry(entry)}, and the reviewed change keeps it a ${expected.type}`,
+      };
     }
-  }
-  for (const [path, sha] of base) {
-    if (!texts.has(path) && head.get(path) !== sha) {
-      return { ok: false, reason: `it changes ${path}, which this change set does not touch` };
+    if (entry.mode !== expected.mode) {
+      return { ok: false, reason: `it changes the mode of ${path} to ${entry.mode}, and the reviewed change keeps ${expected.mode}` };
+    }
+    if (entry.sha !== expected.sha) {
+      return texts.has(path)
+        ? { ok: false, reason: `the contents of ${path} are not the reviewed edit` }
+        : { ok: false, reason: `it changes ${path}, which this change set does not touch` };
     }
   }
   return { ok: true };
@@ -320,7 +373,23 @@ export async function runChangesApply(db: Db, payload: { workspaceId: string; ar
     }
     const texts = new Map<string, string>();
     const changed: string[] = [];
+    // The base tree is read once: it decides the mode each file keeps in the commit and which paths
+    // are files at all. A truncated answer cannot prove what the tree holds, so nothing is written.
+    const baseTree = await client.listTreeEntries(base.sha);
+    if (baseTree.truncated) {
+      return await fail(
+        `GitHub truncated the file list at ${base.sha}, so the commit this change set would create cannot be verified. Redraft it or try again later.`,
+        'failed',
+        { baseSha: base.sha },
+      );
+    }
+    const baseEntries = new Map<string, GitHubTreeEntry>(baseTree.entries.map((entry) => [entry.path, entry]));
     for (const [path, hash] of expected) {
+      const baseEntry = baseEntries.get(path);
+      if (baseEntry?.type !== 'blob') {
+        changed.push(path);
+        continue;
+      }
       let file: { content: string };
       try {
         file = await client.getFile(path, base.sha);
@@ -377,7 +446,7 @@ export async function runChangesApply(db: Db, payload: { workspaceId: string; ar
       // A previous attempt created it and lost the response. Adopt only when its head is exactly the
       // commit this run would write; anything else is not what approval covered.
       const prNumber = pr.number;
-      const check = await headMatchesPlan(client, pr.headSha, base.sha, texts);
+      const check = await headMatchesPlan(client, pr.headSha, base.sha, texts, baseEntries);
       if (!check.ok) {
         // The branch name is ours, so the pull request on it is the one this job opened.
         await client.closePullRequest(prNumber).catch((error: unknown) => {
@@ -399,11 +468,11 @@ export async function runChangesApply(db: Db, payload: { workspaceId: string; ar
           branch,
           baseSha: base.sha,
           message: commitMessage,
-          files: [...texts].map(([path, text]) => ({ path, content: text })),
+          files: commitFilesOf(texts, baseEntries),
         });
         headSha = committed.commitSha;
       } else if (existing) {
-        const check = await headMatchesPlan(client, existing, base.sha, texts);
+        const check = await headMatchesPlan(client, existing, base.sha, texts, baseEntries);
         if (!check.ok) {
           return await invalidate(
             `The branch ${branch} an earlier attempt created is not the reviewed change: ${check.reason}. The approval was withdrawn; delete the branch or redraft and approve again.`,
@@ -417,7 +486,7 @@ export async function runChangesApply(db: Db, payload: { workspaceId: string; ar
           branch,
           baseSha: base.sha,
           message: commitMessage,
-          files: [...texts].map(([path, text]) => ({ path, content: text })),
+          files: commitFilesOf(texts, baseEntries),
         });
         headSha = committed.commitSha;
       }

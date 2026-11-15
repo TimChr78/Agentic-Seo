@@ -1012,6 +1012,8 @@ export const changeSetRuns = pgTable(
     rollbackOf: text('rollback_of'),
     /** The latest rollback proposal for this change set; the original changes state only when it is verified. */
     rollbackChangeSetId: text('rollback_change_set_id'),
+    /** A rollback's changes that could not be inverted, with the reason; empty for everything else. */
+    uncoveredChanges: jsonb('uncovered_changes').$type<{ index: number; reason: string }[]>().notNull().default([]),
     /** Verification attempts that ended in a fetch failure; the third gives up with evidence. */
     verificationAttempts: integer('verification_attempts').notNull().default(0),
     lastError: text('last_error'),

@@ -27,10 +27,16 @@ export interface FakeCall {
 
 const DONE = Symbol('handled');
 
+/** One path in the fake repository's tree: what the git tree API reports for it. */
+export interface FakeTreeEntry {
+  type: 'blob' | 'commit';
+  mode: string;
+  sha: string;
+}
+
 interface Commit {
-  /** The tree sha the client sees; a commit's whole file set. */
+  /** The tree sha the client sees; a commit's whole entry set. */
   tree: string;
-  files: Map<string, string>;
   parents: string[];
   message: string;
 }
@@ -63,7 +69,7 @@ export class FakeGitHub {
   readonly repo = 'site';
   readonly branches = new Map<string, string>();
   readonly commits = new Map<string, Commit>();
-  readonly trees = new Map<string, Map<string, string>>();
+  readonly trees = new Map<string, Map<string, FakeTreeEntry>>();
   readonly blobs = new Map<string, string>();
   readonly pullRequests: FakePullRequest[] = [];
   readonly calls: FakeCall[] = [];
@@ -82,15 +88,23 @@ export class FakeGitHub {
   ) {
     const initial = this.newSha();
     const tree = `tree-${initial}`;
-    const snapshot = new Map(Object.entries(files));
+    const snapshot = new Map<string, FakeTreeEntry>();
+    for (const [path, content] of Object.entries(files)) snapshot.set(path, this.blobEntry(content));
     this.trees.set(tree, snapshot);
-    this.commits.set(initial, { tree, files: snapshot, parents: [], message: 'seed' });
+    this.commits.set(initial, { tree, parents: [], message: 'seed' });
     this.branches.set(defaultBranch, initial);
   }
 
   private newSha(): string {
     this.counter += 1;
     return this.counter.toString(16).padStart(40, '0');
+  }
+
+  /** A regular-file entry for some content, stored as a blob. */
+  private blobEntry(content: string): FakeTreeEntry {
+    const sha = blobSha(content);
+    this.blobs.set(sha, content);
+    return { type: 'blob', mode: '100644', sha };
   }
 
   async start(): Promise<this> {
@@ -141,10 +155,21 @@ export class FakeGitHub {
     response.end(payload);
   }
 
-  filesAt(ref: string): Map<string, string> | null {
+  /** The entries at a branch or commit, or null when it does not exist. */
+  private entriesAt(ref: string): Map<string, FakeTreeEntry> | null {
     const sha = this.branches.get(ref) ?? (this.commits.has(ref) ? ref : null);
     if (!sha) return null;
-    return this.commits.get(sha)?.files ?? null;
+    const commit = this.commits.get(sha);
+    if (!commit) return null;
+    return this.trees.get(commit.tree) ?? new Map();
+  }
+
+  filesAt(ref: string): Map<string, string> | null {
+    const entries = this.entriesAt(ref);
+    if (!entries) return null;
+    const files = new Map<string, string>();
+    for (const [path, entry] of entries) if (entry.type === 'blob') files.set(path, this.blobs.get(entry.sha) ?? '');
+    return files;
   }
 
   /** The commit a branch points at, or null. */
@@ -154,14 +179,51 @@ export class FakeGitHub {
 
   /** Writes a file straight onto a branch, the way a person editing the pull request would. */
   pushToBranch(branch: string, files: Record<string, string>): string {
-    const parent = this.branches.get(branch);
-    if (!parent) throw new Error(`no branch ${branch}`);
-    const copy = new Map(this.commits.get(parent)!.files);
-    for (const [path, content] of Object.entries(files)) copy.set(path, content);
+    const entries = new Map(this.entriesAt(branch) ?? []);
+    for (const [path, content] of Object.entries(files)) entries.set(path, this.blobEntry(content));
+    return this.commitOn(branch, entries, 'push');
+  }
+
+  /**
+   * Writes any tree entry onto a branch, the way a pushed commit can: a different mode (an
+   * executable bit, a symlink), a submodule, or a deletion with `null`. A test uses it to model what
+   * a pull request can carry that the reviewed change did not.
+   */
+  pushEntry(branch: string, path: string, entry: FakeTreeEntry | null): string {
+    const entries = new Map(this.entriesAt(branch) ?? []);
+    if (entry === null) entries.delete(path);
+    else entries.set(path, entry);
+    return this.commitOn(branch, entries, 'push');
+  }
+
+  /**
+   * Rewrites a branch's head commit as a single commit on its base with a mutated entry set: the way
+   * a squashed or force-pushed pull-request commit can carry something the reviewed change did not.
+   */
+  rewriteHead(branch: string, mutate: (entries: Map<string, FakeTreeEntry>, blob: (content: string) => FakeTreeEntry) => void): string {
+    const headSha = this.branches.get(branch);
+    if (!headSha) throw new Error(`no branch ${branch}`);
+    const head = this.commits.get(headSha);
+    if (!head) throw new Error(`no commit ${headSha}`);
+    const entries = new Map(this.trees.get(head.tree) ?? []);
+    mutate(entries, (content) => this.blobEntry(content));
     const sha = this.newSha();
     const tree = `tree-${sha}`;
-    this.trees.set(tree, copy);
-    this.commits.set(sha, { tree, files: copy, parents: [parent], message: 'push' });
+    this.trees.set(tree, entries);
+    this.commits.set(sha, { tree, parents: head.parents.slice(0, 1), message: head.message });
+    this.branches.set(branch, sha);
+    for (const pr of this.pullRequests) if (pr.head === branch) pr.headSha = sha;
+    return sha;
+  }
+
+  /** A commit with the given entries whose parent is the branch's head. */
+  private commitOn(branch: string, entries: Map<string, FakeTreeEntry>, message: string): string {
+    const parent = this.branches.get(branch);
+    if (!parent) throw new Error(`no branch ${branch}`);
+    const sha = this.newSha();
+    const tree = `tree-${sha}`;
+    this.trees.set(tree, entries);
+    this.commits.set(sha, { tree, parents: [parent], message });
     this.branches.set(branch, sha);
     for (const pr of this.pullRequests) if (pr.head === branch) pr.headSha = sha;
     return sha;
@@ -178,13 +240,12 @@ export class FakeGitHub {
   merge(number: number): string {
     const pr = this.pullRequests.find((candidate) => candidate.number === number);
     if (!pr) throw new Error(`no pull request #${number}`);
-    const head = this.commits.get(this.branches.get(pr.head)! ?? pr.headSha)!;
+    const head = new Map(this.entriesAt(pr.head) ?? this.entriesAt(pr.headSha) ?? []);
     const baseSha = this.branches.get(pr.base)!;
     const sha = this.newSha();
     const tree = `tree-${sha}`;
-    const files = new Map(head.files);
-    this.trees.set(tree, files);
-    this.commits.set(sha, { tree, files, parents: [baseSha, pr.headSha], message: `Merge #${number}` });
+    this.trees.set(tree, head);
+    this.commits.set(sha, { tree, parents: [baseSha, this.branches.get(pr.head) ?? pr.headSha], message: `Merge #${number}` });
     this.branches.set(pr.base, sha);
     pr.merged = true;
     pr.state = 'closed';
@@ -302,40 +363,46 @@ export class FakeGitHub {
       return DONE;
     }
     if (rest[0] === 'git' && rest[1] === 'trees' && method === 'POST') {
-      const body = (call.body ?? {}) as { base_tree?: string; tree?: { path: string; sha: string | null }[] };
-      const baseFiles = this.trees.get(String(body.base_tree ?? '')) ?? new Map<string, string>();
-      const files = new Map(baseFiles);
+      const body = (call.body ?? {}) as {
+        base_tree?: string;
+        tree?: { path: string; mode?: string; type?: string; sha: string | null }[];
+      };
+      const entries = new Map(this.trees.get(String(body.base_tree ?? '')) ?? new Map<string, FakeTreeEntry>());
       for (const entry of body.tree ?? []) {
-        if (entry.sha === null) files.delete(entry.path);
-        else files.set(entry.path, this.blobs.get(entry.sha) ?? '');
+        if (entry.sha === null) entries.delete(entry.path);
+        else
+          entries.set(entry.path, {
+            type: entry.type === 'commit' ? 'commit' : 'blob',
+            mode: entry.mode ?? '100644',
+            sha: entry.sha,
+          });
       }
       const sha = this.newSha();
-      this.trees.set(sha, files);
+      this.trees.set(sha, entries);
       this.json(response, 201, { sha });
       return DONE;
     }
     if (rest[0] === 'git' && rest[1] === 'commits' && method === 'POST') {
       const body = (call.body ?? {}) as { message?: string; tree?: string; parents?: string[] };
       const tree = String(body.tree ?? '');
-      const files = this.trees.get(tree) ?? new Map<string, string>();
       const sha = this.newSha();
-      this.commits.set(sha, { tree, files, parents: body.parents ?? [], message: body.message ?? '' });
+      this.commits.set(sha, { tree, parents: body.parents ?? [], message: body.message ?? '' });
       this.json(response, 201, { sha });
       return DONE;
     }
     if (rest[0] === 'contents' && method === 'GET') {
       const path = rest.slice(1).join('/');
       const ref = url.searchParams.get('ref') ?? this.branches.get(this.defaultBranch)!;
-      const files = this.filesAt(ref);
-      const content = files?.get(path);
-      if (content === undefined) {
+      const entry = this.entriesAt(ref)?.get(path);
+      if (entry?.type !== 'blob') {
         this.json(response, 404, { message: 'Not Found' });
         return DONE;
       }
+      const content = this.blobs.get(entry.sha) ?? '';
       this.json(response, 200, {
         type: 'file',
         path,
-        sha: blobSha(content),
+        sha: entry.sha,
         size: Buffer.byteLength(content, 'utf8'),
         encoding: 'base64',
         content: Buffer.from(content, 'utf8').toString('base64'),
@@ -344,14 +411,14 @@ export class FakeGitHub {
     }
     if (rest[0] === 'git' && rest[1] === 'trees' && method === 'GET') {
       const ref = decodeRef(rest[2] ?? '');
-      const files = this.filesAt(ref);
-      if (!files) {
+      const entries = this.entriesAt(ref);
+      if (!entries) {
         this.json(response, 404, { message: 'Not Found' });
         return DONE;
       }
       this.json(response, 200, {
         truncated: false,
-        tree: [...files].map(([path, content]) => ({ path, type: 'blob', sha: blobSha(content) })),
+        tree: [...entries].map(([path, entry]) => ({ path, type: entry.type, mode: entry.mode, sha: entry.sha })),
       });
       return DONE;
     }

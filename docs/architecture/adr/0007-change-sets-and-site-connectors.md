@@ -138,11 +138,14 @@ The change-set half of this ADR, implemented as `packages/change-sets` on top of
 - **A retried apply job adopts only the commit it would write.** The branch name is
   `aseo/<change-set id>-v<version>`. Before creating anything the job looks for the branch and for a
   pull request with that head; it adopts one only when that commit's single parent is the expected
-  base and its tree is the base tree with our file blobs at our paths and no other path changed.
-  Anything else (a push after the attempt, an extra file, a different edit) is not adopted: the
-  approval is withdrawn and the change set returns to review. A branch created before the commit
-  (base head, no commit) resumes the multi-file commit from the base. A response lost after GitHub
-  created the PR therefore still cannot produce a second one.
+  base and its tree is identical to the base tree with our file blobs at our paths and their base
+  modes. Entries are compared in full — path, object type, mode and SHA — because a blob SHA alone
+  hides an executable bit, a symlink where a file was, or a submodule that appeared, moved or went
+  away; a truncated tree answer proves nothing and refuses adoption too. Anything else (a push after
+  the attempt, an extra file, a different edit) is not adopted: the approval is withdrawn and the
+  change set returns to review. A branch created before the commit (base head, no commit) resumes
+  the multi-file commit from the base. A response lost after GitHub created the PR therefore still
+  cannot produce a second one.
 - **Verification fetches the URL each change is about.** A redirect change stores `from` as a path
   (that is what the redirects file holds), so verification resolves it against the site's own origin
   (primary domain, https) before fetching and checks both the status and the resolved `Location`. A
@@ -158,9 +161,22 @@ The change-set half of this ADR, implemented as `packages/change-sets` on top of
 - **A rollback re-reads the current value for its inverse.** The inverse of a change whose file kept
   moving is drafted against the file as it is now (`before` is today's value, `after` restores the
   original), because the editor would otherwise refuse the rollback as stale. A change that cannot be
-  inverted from the change record (an inserted description, a replaced or removed JSON-LD block whose
-  contents were never stored) is reported as skipped; when nothing can be inverted the rollback names
-  the merge commit to revert by hand instead of proposing a partial revert.
+  inverted from the change record is **uncovered**: `meta.description` cannot be removed by a change
+  (the schema requires a non-empty `after`, and no editor can delete the tag), and a replaced or
+  removed JSON-LD block's previous contents were never stored. An uncovered change is recorded on the
+  proposal in `uncovered_changes` with its reason; the proposal still reverses the rest (dropping it
+  silently would report a partial revert as a complete one), but it is **never `exact`**, it is judged
+  with the **original change set's action class and reach** (a subset is not a smaller change), and
+  it **never marks the original `rolled_back`** — the original keeps its state and the event on it
+  names what is still live. Only a rollback that covers every original change can complete one. When
+  nothing can be inverted the command refuses and names the merge commit to revert by hand.
+- **One open rollback per original, and a rejected proposal releases it.** `changes.rollback` locks
+  the original run row (`FOR UPDATE`) before asking whether a rollback is already in flight, and a
+  partial unique index on `(workspace_id, rollback_of)` over the open states backs the same rule up,
+  so two simultaneous requests produce one proposal and one clear refusal. A rejected
+  `approvals.reject` or a discarded draft closes the proposal's run (`closed`) through a
+  version-closed hook in the artifact package — the same way a publish moves the run to `approved` —
+  because a run left in `in_review` would block the next attempt forever.
 - **`deploy_not_detected` is terminal and visible.** It is a distinct state, not `failed`: the merge
   happened and the site did not serve it, which is a pipeline problem a person fixes by looking at
   the deploy, then rolling back or re-running. An `unknown` detector answer (no version file, a
@@ -187,12 +203,13 @@ earlier one.
   edit must reproduce the stored diff byte for byte, and the stored change must equal the editor's
   verify target. A mismatch refuses the submission and names the field.
 - **Apply (`changes_apply`).** After re-reading the base head for the stale check, the worker runs
-  the same re-derivation before writing anything. It then commits only those re-applied texts. If it
-  finds a branch or pull request from an earlier attempt, it adopts it only when the head commit has
-  exactly one parent (the base) and a tree that is the base tree with our blobs at our paths and no
-  other path changed; anything else returns the change set to `in_review`, withdraws the approval and
-  closes the pull request Agentic SEO opened. A branch that still points at the base resumes the
-  commit (fast-forward from base only).
+  the same re-derivation before writing anything. It then commits only those re-applied texts, each
+  at the mode the file already had at the base. If it finds a branch or pull request from an earlier
+  attempt, it adopts it only when the head commit has exactly one parent (the base) and a tree whose
+  entries (path, type, mode, SHA) are exactly the base tree with our blobs at our paths; an executable
+  bit, a symlink, a submodule or any added/deleted path is a refusal. Anything else returns the change
+  set to `in_review`, withdraws the approval and closes the pull request Agentic SEO opened. A branch
+  that still points at the base resumes the commit (fast-forward from base only).
 - **Pull request and merge (`changes_poll`).** The poller compares the pull request head with
   `approved_head_sha` before any progression. An open PR that moved on returns to `in_review`, and a
   PR that was **merged** with a different head goes to `failed` with "merged with commits that were
@@ -204,7 +221,11 @@ earlier one.
   lost. Redirect sources are resolved against the site's own origin before fetching and checked
   end to end (status and `Location`).
 - **Rollback.** `changes.rollback` writes no GitHub state. It creates a draft rollback change set
-  linked as `rollback_of`, with the original's action class and reach. Its pull request opens only
-  through the approved apply worker, and the original becomes `rolled_back` only when that change set
-  is verified; a rejected or abandoned proposal leaves the original exactly as it was.
+  linked as `rollback_of`, judged with the original's action class and reach. Its pull request opens
+  only through the approved apply worker. It calls itself `exact` only when it covers every original
+  change and every touched file still matches the merge; a change it cannot invert is listed in
+  `uncovered_changes` with the reason, and such a proposal never marks the original `rolled_back`.
+  The original becomes `rolled_back` only when a rollback that covers every change is verified; a
+  rejected or abandoned proposal closes its run and leaves the original exactly as it was, so another
+  may be requested.
 

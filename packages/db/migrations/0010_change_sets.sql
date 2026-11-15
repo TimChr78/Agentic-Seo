@@ -54,6 +54,10 @@ CREATE TABLE change_set_runs (
   -- The latest rollback proposal for this change set. The original stays where it is until the
   -- rollback change set is verified; a rejected or abandoned proposal leaves this set for another one.
   rollback_change_set_id text,
+  -- A rollback's changes that could not be inverted from the change record, with the reason. A
+  -- proposal with any uncovered change is never called exact, and it never marks the original
+  -- rolled_back: only a rollback that covers every original change can claim that (ADR-0007).
+  uncovered_changes jsonb NOT NULL DEFAULT '[]',
   -- Verification attempts that ended in a fetch failure; the third one gives up with evidence.
   verification_attempts integer NOT NULL DEFAULT 0,
   -- A sentence a person can act on ("The file changed since this change set was drafted").
@@ -85,6 +89,12 @@ CREATE INDEX change_set_runs_pr ON change_set_runs (workspace_id, artifact_id) W
 -- whose apply job never ran, and a deployed one whose verification never ran.
 CREATE INDEX change_set_runs_reconcile ON change_set_runs (state, approved_at, deployed_at)
   WHERE state IN ('approved', 'deployed');
+-- One open rollback proposal per original change set. `changes.rollback` locks the original row
+-- before it asks whether one exists, so two simultaneous requests serialise; this index is the
+-- database's own guarantee, for any path that forgets the lock.
+CREATE UNIQUE INDEX change_set_runs_one_open_rollback ON change_set_runs (workspace_id, rollback_of)
+  WHERE rollback_of IS NOT NULL
+    AND state IN ('draft', 'in_review', 'approved', 'applying', 'pr_open', 'merged', 'deploying', 'deployed');
 
 -- Append-only: one row per transition, with who caused it and the evidence a reviewer needs. There
 -- is no audit outbox yet (the brief is explicit), so this log is what the change-set screen reads.

@@ -56,6 +56,8 @@ export type ChangeSetImpactEstimator = (input: {
   workspaceId: string;
   siteId: string | null;
   content: unknown;
+  /** The artifact being published, so a rollback can be judged by the change set it reverses. */
+  artifactId?: string;
 }) => Promise<ChangeSetImpact>;
 
 let changeSetEstimator: ChangeSetImpactEstimator | undefined;
@@ -101,6 +103,7 @@ export async function publishImpact(
         workspaceId: ctx.principal?.workspaceId ?? '',
         siteId: live?.siteId ?? null,
         content: version?.content ?? null,
+        artifactId: m.id,
       });
       cls = estimated.actionClass;
       if (estimated.reach) reach = estimated.reach;
