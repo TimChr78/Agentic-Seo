@@ -164,7 +164,8 @@ export const descriptionTooLong = defineCheck({
   scope: 'page',
   kind: 'deterministic',
   evaluator: 'page',
-  appliesTo: (page) => isOkHtml(page) && (page.html?.metaDescription ?? '') !== '',
+  // A present-but-empty description (`''`) is too short too; only an absent one (`null`) is `description.missing`.
+  appliesTo: (page) => isOkHtml(page) && page.html?.metaDescription != null,
   explain:
     'The meta description is longer than the space Google shows, so it is truncated. The end of the description, often the call to action, is cut off. Shorten it to about 155 characters or 990 pixels.',
   references: [SNIPPET],
@@ -191,7 +192,8 @@ export const descriptionTooShort = defineCheck({
   scope: 'page',
   kind: 'deterministic',
   evaluator: 'page',
-  appliesTo: (page) => isOkHtml(page) && (page.html?.metaDescription ?? '') !== '',
+  // A present-but-empty description (`''`) is too short too; only an absent one (`null`) is `description.missing`.
+  appliesTo: (page) => isOkHtml(page) && page.html?.metaDescription != null,
   explain:
     'The meta description is shorter than 50 characters. A very short description gives Google little to show and wastes the snippet. Write a fuller summary of the page.',
   references: [SNIPPET],

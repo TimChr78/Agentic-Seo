@@ -192,7 +192,7 @@ export const canonicalToRedirect = defineCheck({
     'The declared canonical points at a URL that redirects. Google has to follow the redirect to find the canonical, which weakens the signal. Point the canonical at the final URL after the redirect.',
   references: [CANONICAL],
   definition:
-    'Fails for each crawled 200 HTML page whose declared canonical points at another URL that returns a 3xx redirect rather than a 200 response. Evidence: the page URL, the canonical target and the redirect status.',
+    'Fails for each crawled 200 HTML page whose declared canonical points at another URL whose snapshot, looked up by the requested URL (`url`, not `final_url`), has a non-empty `redirects` chain: the canonical target redirects, whatever the final status is. Evidence: the page URL, the canonical target, the first hop’s status and `location`, and the final URL.',
 });
 
 export const canonicalToNoindex = defineCheck({
@@ -222,7 +222,7 @@ export const canonicalChainOrCycle = defineCheck({
     'Canonical declarations form a chain or a cycle instead of pointing straight at one URL. Google follows chains inconsistently, and a cycle leaves no canonical version at all. Point every page’s canonical directly at the final URL.',
   references: [CANONICAL],
   definition:
-    'Fails for each crawled 200 HTML page whose declared canonical points at another crawled page that declares a different canonical, forming a chain of two or more canonical hops, or whose chain returns to a URL already in it, forming a cycle. Follow only same-site targets. Evidence: the ordered chain of URLs from the page to the URL with no further canonical, or to the first repeated URL in a cycle.',
+    'Follow canonical edges from each crawled 200 HTML page whose declared canonical points at another URL (compare normalised URLs). An edge is a page’s declared canonical when it differs from the page’s own URL; a page that declares itself canonical, or declares none, or was not crawled, or is off-site, ends the walk. Fails when the walk takes two or more edges before it ends (a chain), or reaches a URL already visited through a non-self edge (a cycle, e.g. /a → /b → /a). /a → /b where /b is self-canonical passes. Evidence: the ordered list of URLs walked, ending at the terminal URL or at the first repeated URL.',
 });
 
 export const indexabilityChecks = [

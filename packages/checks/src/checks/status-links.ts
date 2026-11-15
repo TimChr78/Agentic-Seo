@@ -201,7 +201,7 @@ export const linksToRedirect = defineCheck({
     'An internal link points at a URL that redirects rather than at the final URL. Every click takes an extra hop and the link signal lands on the redirect. Update the link to the destination.',
   references: [LINKS_CRAWLABLE, REDIRECTS],
   definition:
-    'Fails for each internal link edge whose target URL answers with a 3xx redirect instead of a 200 response. Evidence: the target URL, the redirect status, the source page and the anchor text; one evidence item per source page.',
+    'Fails for each internal link edge whose target, looked up by the requested URL (`url`, not `final_url`) of its snapshot, has a non-empty `redirects` chain: the link points at a redirecting URL, whatever the final status is. Evidence: the target URL, the first hop’s status and `location`, the final URL, the source page and the anchor text; one evidence item per source page.',
 });
 
 export const linksNofollowInternal = defineCheck({

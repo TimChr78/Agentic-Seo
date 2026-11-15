@@ -455,7 +455,7 @@ export const finalizeFixtures: Record<string, { pass: string; fail: string }> = 
   },
   'canonical.to_redirect': {
     pass: '/a canonicalises to /b, which returns 200.',
-    fail: '/a canonicalises to /old, which returns 301 to /new.',
+    fail: '/a canonicalises to /old, which returns 301 to /new; /new returns 200, so the snapshot of /old has status 200 and one redirect hop.',
   },
   'canonical.to_noindex': {
     pass: '/a canonicalises to /b, which returns 200 with no noindex directive.',
@@ -471,7 +471,7 @@ export const finalizeFixtures: Record<string, { pass: string; fail: string }> = 
   },
   'links.to_redirect': {
     pass: 'Every internal link target returns 200.',
-    fail: '/ links to /old, which returns 301 to /new.',
+    fail: '/ links to /old, which returns 301 to /new; /new returns 200, so the snapshot of /old has status 200 and one redirect hop.',
   },
   'title.duplicate': {
     pass: 'Every indexable page has a unique title.',

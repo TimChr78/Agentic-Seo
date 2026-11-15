@@ -111,7 +111,7 @@ Fails for each crawled 200 HTML page whose declared canonical points at another 
 
 ### `canonical.to_redirect` — The canonical points at a redirecting URL
 
-Fails for each crawled 200 HTML page whose declared canonical points at another URL that returns a 3xx redirect rather than a 200 response. Evidence: the page URL, the canonical target and the redirect status.
+Fails for each crawled 200 HTML page whose declared canonical points at another URL whose snapshot, looked up by the requested URL (`url`, not `final_url`), has a non-empty `redirects` chain: the canonical target redirects, whatever the final status is. Evidence: the page URL, the canonical target, the first hop’s status and `location`, and the final URL.
 
 ### `canonical.to_noindex` — The canonical points at a noindex page
 
@@ -119,7 +119,7 @@ Fails for each crawled 200 HTML page whose declared canonical points at another 
 
 ### `canonical.chain_or_cycle` — Canonicals form a chain or a cycle
 
-Fails for each crawled 200 HTML page whose declared canonical points at another crawled page that declares a different canonical, forming a chain of two or more canonical hops, or whose chain returns to a URL already in it, forming a cycle. Follow only same-site targets. Evidence: the ordered chain of URLs from the page to the URL with no further canonical, or to the first repeated URL in a cycle.
+Follow canonical edges from each crawled 200 HTML page whose declared canonical points at another URL (compare normalised URLs). An edge is a page’s declared canonical when it differs from the page’s own URL; a page that declares itself canonical, or declares none, or was not crawled, or is off-site, ends the walk. Fails when the walk takes two or more edges before it ends (a chain), or reaches a URL already visited through a non-self edge (a cycle, e.g. /a → /b → /a). /a → /b where /b is self-canonical passes. Evidence: the ordered list of URLs walked, ending at the terminal URL or at the first repeated URL.
 
 ### `links.broken_internal` — An internal link points at a broken URL
 
@@ -127,7 +127,7 @@ Fails for each internal link edge whose target URL was fetched and returned a 4x
 
 ### `links.to_redirect` — An internal link points at a redirect
 
-Fails for each internal link edge whose target URL answers with a 3xx redirect instead of a 200 response. Evidence: the target URL, the redirect status, the source page and the anchor text; one evidence item per source page.
+Fails for each internal link edge whose target, looked up by the requested URL (`url`, not `final_url`) of its snapshot, has a non-empty `redirects` chain: the link points at a redirecting URL, whatever the final status is. Evidence: the target URL, the first hop’s status and `location`, the final URL, the source page and the anchor text; one evidence item per source page.
 
 ### `title.duplicate` — Several pages share a title
 

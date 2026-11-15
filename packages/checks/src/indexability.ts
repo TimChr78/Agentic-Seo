@@ -20,20 +20,22 @@ export interface ScopedRobotDirective {
   directive: string;
 }
 
-const AGENT_PATTERN = /^(?:\*|[a-z][a-z0-9_-]*)$/;
+const AGENT_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const NOINDEX = new Set(['noindex', 'none']);
-
-function looksLikeUserAgent(value: string): boolean {
-  const agent = value.toLowerCase();
-  return (
-    AGENT_PATTERN.test(agent) &&
-    (agent === '*' || agent.includes('bot') || agent.includes('google') || agent.includes('agenticseo') || agent.includes('spider'))
-  );
-}
+/** Directives that take a value after a colon (`max-snippet: 20`), so the prefix is not a user agent. */
+const PARAMETERISED = new Set(['max-snippet', 'max-image-preview', 'max-video-preview', 'unavailable_after']);
+/**
+ * The user agents whose scoped rules decide Google web search indexing. Google documents that a
+ * rule scoped to a named crawler applies to that crawler only, so `googlebot-news: noindex` or
+ * `slurp: noindex` leave the page indexable for Google web search.
+ */
+const GOOGLE_AGENTS = new Set(['googlebot']);
 
 /**
  * Parses `X-Robots-Tag` into directives, including the user-agent-scoped form Google documents
- * (`googlebot: noindex`). A directive without a scope applies to every crawler.
+ * (`googlebot: noindex`). A directive without a scope applies to every crawler. Any token before a
+ * colon is a user agent unless it is a parameterised directive (`max-snippet: 20`); a scope lasts
+ * until the next scoped segment, as in `googlebot: noindex, nofollow`.
  */
 export function xRobotsDirectives(header: string | null): ScopedRobotDirective[] {
   if (!header) return [];
@@ -45,12 +47,20 @@ export function xRobotsDirectives(header: string | null): ScopedRobotDirective[]
     const colon = segment.indexOf(':');
     let rest = segment;
     if (colon > 0) {
-      const prefix = segment.slice(0, colon).trim();
-      if (looksLikeUserAgent(prefix)) {
-        currentAgent = prefix.toLowerCase();
+      const prefix = segment.slice(0, colon).trim().toLowerCase();
+      if (PARAMETERISED.has(prefix)) {
+        out.push({ userAgent: currentAgent, directive: prefix });
+        continue;
+      }
+      if (AGENT_PATTERN.test(prefix)) {
+        currentAgent = prefix;
         rest = segment.slice(colon + 1).trim();
-      } else {
-        currentAgent = null;
+        const inner = rest.indexOf(':');
+        // `googlebot: max-snippet: 20`: a parameterised directive inside a scope.
+        if (inner > 0 && PARAMETERISED.has(rest.slice(0, inner).trim().toLowerCase())) {
+          out.push({ userAgent: currentAgent, directive: rest.slice(0, inner).trim().toLowerCase() });
+          continue;
+        }
       }
     }
     for (const token of rest.split(/[\s;]+/)) {
@@ -61,12 +71,10 @@ export function xRobotsDirectives(header: string | null): ScopedRobotDirective[]
   return out;
 }
 
-/** Whether an X-Robots-Tag header contains an effective noindex for Googlebot or every crawler. */
+/** Whether an X-Robots-Tag header contains an effective noindex for Google web search. */
 export function xRobotsNoindex(header: string | null): boolean {
   return xRobotsDirectives(header).some(
-    ({ userAgent, directive }) =>
-      NOINDEX.has(directive) &&
-      (userAgent === null || userAgent === '*' || userAgent.includes('googlebot') || userAgent.includes('agenticseo')),
+    ({ userAgent, directive }) => NOINDEX.has(directive) && (userAgent === null || GOOGLE_AGENTS.has(userAgent)),
   );
 }
 

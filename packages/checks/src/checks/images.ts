@@ -22,6 +22,8 @@ export const imageMissingAlt = defineCheck({
     'An image has no alt attribute. When the image fails to load, or a screen reader reads the page, there is no description. Add alt text that describes the image’s content; use alt="" only for decoration.',
   references: [IMAGES, IMG_ELEMENT],
   fix: { change: 'image.alt' },
+  // No CSS selector in the evidence: facts hold the resolved absolute src, which an attribute
+  // selector cannot match against `src="/photo.png"`; the URL and the document position identify it.
   run: (page) => {
     const images = (page.html?.images ?? [])
       .map((image, index) => ({ image, index }))
@@ -30,7 +32,7 @@ export const imageMissingAlt = defineCheck({
     return fail(
       images.map(({ image, index }) => ({
         subject: `${page.finalUrl}#image-${index + 1}`,
-        selector: image.src ? `img[src="${image.src}"]` : 'img',
+        detail: `Image ${index + 1} of ${page.html?.images.length ?? 0} in document order.`,
         value: image.src ?? 'no src',
         expected: 'alt text that describes the image',
       })),
@@ -59,7 +61,7 @@ export const imageLinkMissingAlt = defineCheck({
     return fail(
       images.map(({ image, index }) => ({
         subject: `${page.finalUrl}#image-${index + 1}`,
-        selector: image.src ? `a img[src="${image.src}"]` : 'a img',
+        detail: `Image ${index + 1} of ${page.html?.images.length ?? 0} in document order.`,
         value: image.src ?? 'no src',
         expected: 'alt text that describes the link destination',
       })),
@@ -87,7 +89,7 @@ export const imageNoDimensions = defineCheck({
     return fail(
       images.map(({ image, index }) => ({
         subject: `${page.finalUrl}#image-${index + 1}`,
-        selector: image.src ? `img[src="${image.src}"]` : 'img',
+        detail: `Image ${index + 1} of ${page.html?.images.length ?? 0} in document order.`,
         value: `width=${image.width ?? 'missing'}, height=${image.height ?? 'missing'}`,
         expected: 'width and height attributes with the intrinsic size',
       })),

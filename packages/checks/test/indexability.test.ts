@@ -43,6 +43,12 @@ describe('X-Robots-Tag parsing', () => {
       { userAgent: 'googlebot', directive: 'nofollow' },
     ]);
     expect(xRobotsDirectives('bingbot: noarchive')).toEqual([{ userAgent: 'bingbot', directive: 'noarchive' }]);
+    expect(xRobotsDirectives('slurp: noindex')).toEqual([{ userAgent: 'slurp', directive: 'noindex' }]);
+    expect(xRobotsDirectives('max-snippet: 20, noindex')).toEqual([
+      { userAgent: null, directive: 'max-snippet' },
+      { userAgent: null, directive: 'noindex' },
+    ]);
+    expect(xRobotsDirectives('googlebot: max-snippet: 20')).toEqual([{ userAgent: 'googlebot', directive: 'max-snippet' }]);
   });
 
   it('applies noindex to Googlebot and to every crawler, not to another bot', () => {
@@ -50,6 +56,10 @@ describe('X-Robots-Tag parsing', () => {
     expect(xRobotsNoindex('googlebot: noindex')).toBe(true);
     expect(xRobotsNoindex('none')).toBe(true);
     expect(xRobotsNoindex('bingbot: noindex')).toBe(false);
+    // Review of #17: every named crawler is a scope, and only Googlebot's scope decides Google indexing.
+    for (const other of ['slurp: noindex', 'agenticseo: noindex', 'notgooglebot: noindex', 'googlebot-news: noindex'])
+      expect(xRobotsNoindex(other), other).toBe(false);
+    expect(xRobotsNoindex('slurp: noindex, googlebot: noindex')).toBe(true);
     expect(xRobotsNoindex(null)).toBe(false);
   });
 
@@ -76,13 +86,18 @@ describe('pixelWidth', () => {
 });
 
 describe('isValidHreflang', () => {
-  it('accepts BCP 47 language tags and x-default', () => {
-    for (const code of ['en', 'en-GB', 'en-gb', 'zh-Hans', 'zh-Hans-CN', 'es-419', 'x-default'])
+  it('accepts ISO 639-1 languages with an optional script and ISO 3166-1 region, and x-default', () => {
+    for (const code of ['en', 'en-GB', 'en-gb', 'zh-Hans', 'zh-Hans-CN', 'zh-hant-tw', 'de-AT', 'x-default'])
       expect(isValidHreflang(code), code).toBe(true);
   });
 
   it('refuses malformed codes and bare words', () => {
     for (const code of ['', 'e', 'english', 'en_US', 'en-', '-en', 'en-GB-extra', 'EN_gb']) expect(isValidHreflang(code), code).toBe(false);
+  });
+
+  it('refuses codes Google does not support: numeric regions, reserved regions, unknown subtags (review of #17)', () => {
+    for (const code of ['es-419', 'en-UK', 'en-EU', 'zz-ZZ', 'en-ZZ', 'en-XA', 'xx', 'en-Abcd', 'eng-GB'])
+      expect(isValidHreflang(code), code).toBe(false);
   });
 });
 

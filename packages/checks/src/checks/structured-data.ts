@@ -214,7 +214,8 @@ export const schemaMissingRequired = defineCheck({
     for (const [index, block] of blocks.entries()) {
       for (const node of nodesOf(block, index)) {
         for (const type of node.types) {
-          const rules = REQUIRED[type];
+          // Own properties only: `@type` is page input, and "constructor" or "__proto__" must not reach Object.prototype.
+          const rules = Object.hasOwn(REQUIRED, type) ? REQUIRED[type] : undefined;
           if (!rules) continue;
           const missing = rules.required.filter((property) => !hasProperty(node.value, property));
           if (
@@ -281,7 +282,7 @@ export const schemaMissingRecommended = defineCheck({
     for (const [index, block] of blocks.entries()) {
       for (const node of nodesOf(block, index)) {
         for (const type of node.types) {
-          for (const property of RECOMMENDED[type] ?? []) {
+          for (const property of (Object.hasOwn(RECOMMENDED, type) ? RECOMMENDED[type] : undefined) ?? []) {
             if (hasProperty(node.value, property)) continue;
             const key = `${node.key}:${type}:${property}`;
             if (seen.has(key)) continue;
