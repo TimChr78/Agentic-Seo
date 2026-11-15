@@ -91,10 +91,13 @@ test('a person turns an audit issue into a recommendation', async ({ page }) => 
 
   // The recommendation's own screen: consequence first, then the tabs. An issue-created
   // recommendation names no page, and drafting starts from an empty change list.
-  await expect(page.getByRole('heading', { level: 1, name: ISSUE_TITLE })).toBeVisible({ timeout: 20_000 });
+  // Wait for the navigation itself: the issue and the recommendation share the same heading, so a
+  // heading assertion alone can pass on the page we are leaving.
+  await expect(page).toHaveURL(/\/recommendations\/rcm_[0-9a-f]{32}$/, { timeout: 20_000 });
+  await expect(page.getByRole('heading', { level: 1, name: ISSUE_TITLE })).toBeVisible();
   await expect(page.getByText(/Expected: CTR \+5–10%/).first()).toBeVisible();
   await expect(page.getByText(/draft a change set and name each edit/)).toBeVisible();
-  recommendationId = page.url().split('/recommendations/')[1]!;
+  recommendationId = new URL(page.url()).pathname.split('/recommendations/')[1]!;
   expect(recommendationId).toMatch(/^rcm_[0-9a-f]{32}$/);
   const draft = page.getByRole('button', { name: 'Draft change set' });
   await expect(draft).toBeEnabled();
@@ -130,9 +133,10 @@ test('the GitHub connection carries a drafted change set to an approved pull req
   await draft.getByLabel(/Value to write/).fill('Pricing plans and prices');
   await draft.getByRole('button', { name: 'Draft change set' }).click();
 
-  // The change-set screen the draft produced, at its draft state.
-  await expect(ownerPage.getByRole('heading', { level: 1, name: ISSUE_TITLE })).toBeVisible({ timeout: 20_000 });
-  changeSetId = ownerPage.url().split('/changes/')[1]!;
+  // The change-set screen the draft produced, at its draft state. Wait for its URL: the
+  // recommendation and the change set carry the same title heading.
+  await expect(ownerPage).toHaveURL(/\/changes\/chg_[0-9a-f]{32}$/, { timeout: 20_000 });
+  changeSetId = new URL(ownerPage.url()).pathname.split('/changes/')[1]!;
   expect(changeSetId).toMatch(/^chg_[0-9a-f]{32}$/);
   expect(await runState(changeSetId)).toBe('draft');
 
