@@ -1,3 +1,4 @@
+import { ChangeSchema } from '@agentic-seo/changes';
 import { isoDateTime } from '@agentic-seo/core';
 import { z } from 'zod';
 
@@ -280,6 +281,86 @@ function placeholder(phase: number) {
   });
 }
 
+// A change set (ADR-0007, domain-model.md §4): an ordered set of typed changes to one site through
+// one connector, each already resolved to the source file it edits, with the base commit, the
+// file's hash at drafting time and the rendered diff. The site comes from the artifact row, never
+// from the content, so a change set cannot be re-pointed at another site by editing its JSON.
+//
+// Drafting resolves and applies every change in memory (packages/change-sets), which is why the
+// stored shape carries the resolution: applying the change set later re-reads each file and
+// compares `sourceHash`, so a source that moved on is caught before a branch is created. The diff
+// is stored because the reviewer sees it without the source file being re-read.
+const changeSetSource = z.strictObject({
+  path: z.string().min(1).max(1024).describe('The repository file this change edits, e.g. about/index.html'),
+  editor: z.enum(['html', 'markdown_frontmatter', 'netlify']).describe('The editor that wrote the change'),
+  confidence: z
+    .enum(['exact', 'pattern', 'glob'])
+    .describe('How the mapping found the file: an exact route, a route pattern, or a glob of drafts'),
+  affectedRoutes: z
+    .array(z.string().min(1).max(2048))
+    .min(1)
+    .max(500)
+    .describe('Every route the edit reaches; a layout source lists all routes it renders, which is what reach counts'),
+  fields: z
+    .record(z.string(), z.array(z.string().min(1).max(120)).min(1))
+    .optional()
+    .describe('markdown_frontmatter only: change field -> frontmatter keys, from the mapping rule'),
+  dialect: z
+    .enum(['yaml', 'strip_quotes'])
+    .optional()
+    .describe('markdown_frontmatter only: how the build quotes a written value (the pilot uses strip_quotes)'),
+});
+
+const changeSetFileDiff = z.strictObject({
+  path: z.string().min(1).max(1024),
+  status: z.enum(['added', 'modified', 'deleted']),
+  unified: z.string().max(200_000).describe('A unified diff with a/ and b/ headers; empty when nothing changed'),
+  additions: z.number().int().min(0),
+  deletions: z.number().int().min(0),
+});
+
+const changeSetChange = z.strictObject({
+  change: ChangeSchema.describe('The typed edit (packages/changes); applying it writes source.path'),
+  source: changeSetSource,
+  baseSha: z
+    .string()
+    .regex(/^[0-9a-f]{7,64}$/, 'A commit SHA: 40 hex characters from GitHub')
+    .describe('The base branch head the change was resolved against'),
+  sourceHash: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/, 'The sha256 of the source file, from sourceHashOf()')
+    .describe('The file at baseSha; the apply job refuses a file that hashes differently now'),
+  diff: changeSetFileDiff,
+});
+
+const changeSet = z.strictObject({
+  connector: z.literal('github').describe('The connector that applies this change set; only GitHub pull requests in Phase 1'),
+  title: z.string().trim().min(1).max(200).describe('What this change set does, in one line; the pull request title'),
+  summary: z.string().trim().min(1).max(2000).describe('Why these changes, and what evidence backs them'),
+  recommendationId: z
+    .string()
+    .regex(/^rcm_[0-9a-f]{32}$/, 'A recommendation id, e.g. from recommendations.create')
+    .optional()
+    .describe('The recommendation this change set implements, when there is one'),
+  changes: z.array(changeSetChange).min(1).max(50).describe('The edits in order; several may touch one file, and the diff is the net edit'),
+  verificationPlan: z
+    .string()
+    .trim()
+    .min(1)
+    .max(2000)
+    .describe('What a re-fetch after deployment must show; the verification job checks every affected URL against it'),
+  rollbackPlan: z
+    .string()
+    .trim()
+    .min(1)
+    .max(2000)
+    .describe('How to undo this: a revert pull request while the files still match, or a new proposed change set'),
+});
+export type ChangeSetContent = z.output<typeof changeSet>;
+export type ChangeSetDraftedChange = z.output<typeof changeSetChange>;
+/** The content schema, for packages that build or check a change set (packages/change-sets). */
+export const changeSetContentSchema = changeSet;
+
 export const artifactTypes = {
   note: { prefix: 'not', label: 'Note', description: 'Free-form note, used to exercise the artifact system.', content: note },
   site_context: {
@@ -321,7 +402,7 @@ export const artifactTypes = {
     prefix: 'chg',
     label: 'Change set',
     description: 'An ordered set of changes to one site through one connector, with a diff and a rollback plan.',
-    content: placeholder(1),
+    content: changeSet,
   },
   content_brief: {
     prefix: 'brf',

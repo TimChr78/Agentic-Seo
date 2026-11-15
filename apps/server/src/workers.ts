@@ -1,7 +1,16 @@
 import { runQueuedPromptTests } from '@agentic-seo/ai';
 import { cleanupExpiredOAuthWorkspaceSelections } from '@agentic-seo/auth';
+import {
+  CHANGES_APPLY_TASK,
+  CHANGES_POLL_TASK,
+  CHANGES_VERIFY_TASK,
+  runChangesApplyTask,
+  runChangesPollTask,
+  runChangesVerifyTask,
+} from '@agentic-seo/change-sets';
 import { type CrawlChunkPayload, PgHostLimiter, reconcileCrawls, runCrawlChunk } from '@agentic-seo/crawl';
 import type { Db } from '@agentic-seo/db';
+import { buildUserAgent } from '@agentic-seo/fetch';
 import { GSC_CONNECTOR_ID, refreshDueConnections } from '@agentic-seo/integrations';
 import { createProviderGateway } from '@agentic-seo/providers';
 import { runGscSync } from '@agentic-seo/search-data';
@@ -60,6 +69,9 @@ export const CRONTAB = [
   `*/5 * * * * ${CONNECTIONS_REFRESH_TASK}`,
   `0 3 * * * ${GSC_SYNC_TASK}`,
   `* * * * * ${CRAWL_RECONCILE_TASK}`,
+  // Change sets wait on GitHub and a deploy; five minutes is the latency the change-set screen
+  // promises, and the poller only reads what is already open.
+  `*/5 * * * * ${CHANGES_POLL_TASK}`,
 ].join('\n');
 
 /** Options the crawl tasks accept; the version goes into the honest user agent. */
@@ -140,7 +152,34 @@ export function taskListFor(db: Db, kp: KeyProvider, config?: Config, options: C
       });
       if (result.dispatched || result.finalized || result.repaired) logger.info(result, 'crawl reconciler ran');
     },
+    // A change set's three jobs share one dependency bag; `enqueue` is per job because Graphile's
+    // addJob belongs to the helper the handler receives.
+    [CHANGES_APPLY_TASK]: async (payload, helpers) => {
+      await runChangesApplyTask(db, payload, {
+        kp,
+        enqueue: (identifier, job, options) => helpers.addJob(identifier, job, options ?? {}).then(() => undefined),
+      });
+    },
+    [CHANGES_POLL_TASK]: async (_payload, helpers) => {
+      await runChangesPollTask(db, {
+        kp,
+        userAgent: userAgentFor(options),
+        enqueue: (identifier, job, jobOptions) => helpers.addJob(identifier, job, jobOptions ?? {}).then(() => undefined),
+      });
+    },
+    [CHANGES_VERIFY_TASK]: async (payload, helpers) => {
+      await runChangesVerifyTask(db, payload, {
+        kp,
+        userAgent: userAgentFor(options),
+        enqueue: (identifier, job, jobOptions) => helpers.addJob(identifier, job, jobOptions ?? {}).then(() => undefined),
+      });
+    },
   };
+}
+
+/** The honest user agent every change-set fetch uses (verification re-fetches the site's pages). */
+function userAgentFor(options: CrawlWorkerOptions): string {
+  return buildUserAgent({ version: options.crawlVersion ?? VERSION });
 }
 
 export interface WorkerHandle {

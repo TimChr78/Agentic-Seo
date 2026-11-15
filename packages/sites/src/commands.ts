@@ -473,6 +473,20 @@ export const siteChecklist = defineCommand({
         ),
       )
       .limit(1);
+    // A site connector is the change set's way in (ADR-0007): 'github' is the only one Phase 1
+    // ships, registered by packages/change-sets. Active only: a revoked connection applies nothing.
+    const [siteConnector] = await ctx.tx
+      .select({ id: schema.connections.id })
+      .from(schema.connections)
+      .where(
+        and(
+          eq(schema.connections.workspaceId, ws),
+          eq(schema.connections.siteId, site.id),
+          eq(schema.connections.connector, 'github'),
+          eq(schema.connections.state, 'active'),
+        ),
+      )
+      .limit(1);
     return {
       siteVerified: site.verifiedAt !== null,
       searchConsole: gsc !== undefined,
@@ -480,8 +494,7 @@ export const siteChecklist = defineCommand({
       // Audits arrive with the crawler, so the count is honestly zero.
       audits: 0,
       dataForSeoKey: key !== undefined,
-      // The GitHub CMS connector arrives with Phase 1's change sets.
-      siteConnector: false,
+      siteConnector: siteConnector !== undefined,
     };
   },
 });

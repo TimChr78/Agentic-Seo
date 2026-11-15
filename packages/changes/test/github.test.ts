@@ -224,6 +224,23 @@ describe('GitHub client: pull requests', () => {
     });
   });
 
+  it('finds a pull request by its head branch, so a retried job can adopt it', async () => {
+    const fake = await startFakeServer(
+      router({
+        'GET /repos/acme/site/pulls': () => ({ body: [{ ...prBody, state: 'open', merged: false, merge_commit_sha: null }] }),
+      }),
+    );
+    const client = clientFor(fake.origin);
+    const found = await client.findPullRequestByHead('aseo/chg_abc-v1', { state: 'all' });
+    expect(found).toMatchObject({ number: 7, state: 'open', headSha: 'head7' });
+    expect(fake.calls[0]!.path).toBe('/repos/acme/site/pulls?head=acme%3Aaseo%2Fchg_abc-v1&per_page=10&state=all');
+  });
+
+  it('answers null when no pull request has that head', async () => {
+    const fake = await startFakeServer(router({ 'GET /repos/acme/site/pulls': () => ({ body: [] }) }));
+    expect(await clientFor(fake.origin).findPullRequestByHead('aseo/none')).toBeNull();
+  });
+
   it('lists the PR commits and returns the head SHA to compare with the approved one', async () => {
     const fake = await startFakeServer(
       router({

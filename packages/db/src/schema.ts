@@ -962,3 +962,113 @@ export const crawlHostPacing = pgTable('crawl_host_pacing', {
   nextStartAt: ts('next_start_at').notNull().defaultNow(),
   pausedUntil: ts('paused_until'),
 });
+
+// ---------------------------------------------------------------------------------------------
+// Change sets (Phase 1 task F, ADR-0007). The content is the `change_set` artifact; these tables
+// are its lifecycle: where the change is in the world (drafted, approved, in a pull request,
+// merged, deployed, verified), the append-only evidence for each transition, and the per-change
+// verification rows.
+// ---------------------------------------------------------------------------------------------
+
+/** Every state a change-set run can be in (see 0010_change_sets.sql for the meaning of each). */
+export type ChangeSetState =
+  | 'draft'
+  | 'in_review'
+  | 'approved'
+  | 'applying'
+  | 'pr_open'
+  | 'merged'
+  | 'deploying'
+  | 'deployed'
+  | 'verified'
+  | 'verification_failed'
+  | 'deploy_not_detected'
+  | 'closed'
+  | 'stale'
+  | 'rolled_back'
+  | 'superseded'
+  | 'failed';
+
+export const changeSetRuns = pgTable(
+  'change_set_runs',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    /** The `chg_…` artifact; one run row per change set. */
+    artifactId: text('artifact_id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    state: text('state').$type<ChangeSetState>().notNull(),
+    /** The artifact version approved for application; the apply job refuses a different one. */
+    approvedVersion: integer('approved_version'),
+    /** The pull-request head SHA the approval covers; a later push returns the set to review. */
+    approvedHeadSha: text('approved_head_sha'),
+    approvalId: text('approval_id'),
+    branch: text('branch'),
+    prNumber: integer('pr_number'),
+    prUrl: text('pr_url'),
+    headSha: text('head_sha'),
+    mergeCommitSha: text('merge_commit_sha'),
+    deployedSha: text('deployed_sha'),
+    /** The change set this row rolls back, when it is a rollback. */
+    rollbackOf: text('rollback_of'),
+    /** Verification attempts that ended in a fetch failure; the third gives up with evidence. */
+    verificationAttempts: integer('verification_attempts').notNull().default(0),
+    lastError: text('last_error'),
+    stateChangedAt: ts('state_changed_at').notNull().defaultNow(),
+    draftedAt: ts('drafted_at').notNull().defaultNow(),
+    submittedAt: ts('submitted_at'),
+    approvedAt: ts('approved_at'),
+    appliedAt: ts('applied_at'),
+    mergedAt: ts('merged_at'),
+    deployedAt: ts('deployed_at'),
+    verifiedAt: ts('verified_at'),
+    closedAt: ts('closed_at'),
+    failedAt: ts('failed_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.artifactId] }),
+    index('change_set_runs_site').on(t.workspaceId, t.siteId, t.state),
+    index('change_set_runs_pr').on(t.workspaceId, t.artifactId),
+  ],
+);
+
+/** Who caused a transition: a person, an agent, or the worker itself. */
+export type ChangeSetActor = 'person' | 'agent' | 'system';
+
+/** One transition, appended and never rewritten. */
+export const changeSetEvents = pgTable(
+  'change_set_events',
+  {
+    seq: bigserial('seq', { mode: 'number' }).primaryKey(),
+    workspaceId: uuid('workspace_id').notNull(),
+    artifactId: text('artifact_id').notNull(),
+    fromState: text('from_state'),
+    toState: text('to_state').notNull(),
+    actorType: text('actor_type').$type<ChangeSetActor>().notNull(),
+    actorId: text('actor_id'),
+    reason: text('reason').notNull(),
+    evidence: jsonb('evidence').$type<Record<string, unknown>>().notNull().default({}),
+    at: ts('at').notNull().defaultNow(),
+  },
+  (t) => [index('change_set_events_one').on(t.workspaceId, t.artifactId, t.seq)],
+);
+
+/** One change's verification result in one attempt against the deployed commit. */
+export const changeSetVerifications = pgTable(
+  'change_set_verifications',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    artifactId: text('artifact_id').notNull(),
+    attempt: integer('attempt').notNull(),
+    changeIndex: integer('change_index').notNull(),
+    url: text('url').notNull(),
+    changeType: text('change_type').notNull(),
+    result: text('result').$type<'pass' | 'fail' | 'unknown'>().notNull(),
+    detail: text('detail').notNull(),
+    evidence: jsonb('evidence').$type<Record<string, unknown>>().notNull().default({}),
+    deployedSha: text('deployed_sha').notNull(),
+    fetchedAt: ts('fetched_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.artifactId, t.attempt, t.changeIndex] })],
+);

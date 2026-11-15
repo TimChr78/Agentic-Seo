@@ -600,6 +600,20 @@ export class GitHubClient {
   }
 
   /**
+   * The pull request whose head is this branch, or null. A retried job uses it to adopt the pull
+   * request an earlier attempt created before its response was lost, so a retry never opens a second
+   * one. `state: 'all'` finds a closed or merged one too.
+   */
+  async findPullRequestByHead(head: string, options: { state?: 'open' | 'closed' | 'all' } = {}): Promise<GitHubPullRequest | null> {
+    const query = new URLSearchParams({ head: `${this.owner}:${head}`, per_page: '10' });
+    if (options.state) query.set('state', options.state);
+    const { data } = await this.get<Array<Record<string, unknown>>>(`/repos/${this.slug}/pulls?${query.toString()}`);
+    const first = Array.isArray(data) ? data[0] : undefined;
+    if (!first) return null;
+    return pullRequestFrom(first);
+  }
+
+  /**
    * A page of the PR's commits and its head SHA, so a caller can compare with the SHA a person
    * approved. The head comes from the pull request itself (`head.sha`), which is authoritative: a
    * commit list is paginated, and its last entry on the first page is not the head of a PR with
