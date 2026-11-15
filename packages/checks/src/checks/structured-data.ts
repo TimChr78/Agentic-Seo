@@ -23,15 +23,26 @@ interface JsonLdNode {
   value: Record<string, unknown>;
 }
 
-/** Every object with an `@type` in a block, including nodes inside `@graph` and nested values. */
+/** The most values one block's traversal visits; JSON-LD is page input, so its shape is unbounded. */
+const MAX_JSONLD_VALUES = 20_000;
+
+/**
+ * Every object with an `@type` in a block, including nodes inside `@graph` and nested values. The
+ * walk is iterative (a 12 KB block of nested arrays would overflow a recursive one) and stops after
+ * `MAX_JSONLD_VALUES` values, keeping document order.
+ */
 function nodesOf(block: JsonLdBlock, blockIndex: number): JsonLdNode[] {
   const nodes: JsonLdNode[] = [];
-  const visit = (value: unknown) => {
+  const stack: unknown[] = [block.parsed];
+  let visited = 0;
+  while (stack.length && visited < MAX_JSONLD_VALUES) {
+    const value = stack.pop();
+    visited++;
     if (Array.isArray(value)) {
-      for (const item of value) visit(item);
-      return;
+      for (let i = value.length - 1; i >= 0; i--) if (value[i] !== null && typeof value[i] === 'object') stack.push(value[i]);
+      continue;
     }
-    if (!value || typeof value !== 'object') return;
+    if (!value || typeof value !== 'object') continue;
     const object = value as Record<string, unknown>;
     const rawType = object['@type'];
     if (rawType !== undefined) {
@@ -40,12 +51,9 @@ function nodesOf(block: JsonLdBlock, blockIndex: number): JsonLdNode[] {
         .map((type) => type.replace(/^https?:\/\/schema\.org\//, ''));
       if (types.length) nodes.push({ key: `jsonld-${blockIndex + 1}-node-${nodes.length + 1}`, types, value: object });
     }
-    for (const [key, child] of Object.entries(object)) {
-      if (key === '@type') continue;
-      if (child !== null && typeof child === 'object') visit(child);
-    }
-  };
-  visit(block.parsed);
+    const children = Object.entries(object).filter(([key, child]) => key !== '@type' && child !== null && typeof child === 'object');
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]?.[1]);
+  }
   return nodes;
 }
 

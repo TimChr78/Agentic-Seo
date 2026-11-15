@@ -92,7 +92,9 @@ export const robotsTxtBlocksAll = defineCheck({
   references: [ROBOTS_INTRO, ROBOTS_RFC],
   run: (site) => {
     const { url, disallowAllFor } = site.robotsTxt;
-    const blocking = disallowAllFor.filter((agent) => agent === '*' || agent.toLowerCase().includes('googlebot'));
+    // Exact tokens: Googlebot-News, Googlebot-Image and other specialised crawlers have their own
+    // groups, and blocking them leaves web search crawling untouched.
+    const blocking = disallowAllFor.filter((agent) => agent === '*' || agent.toLowerCase() === 'googlebot');
     if (!blocking.length) return pass();
     return fail(
       blocking.map((agent) => ({
