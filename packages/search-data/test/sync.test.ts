@@ -322,6 +322,36 @@ describe.skipIf(!hasTestDatabase())('the Search Console sync', () => {
     expect(rows.rows[0]?.n).toBe('5');
   });
 
+  it('splits a backfill window that hit the row cap and never advances past rows it did not read (review round 2)', async () => {
+    const site = await newSite('capsplit');
+    // Google answers windows longer than a week with only their first half, flagged as truncated.
+    const fake = fakeGateway((call) => {
+      const { startDate, endDate } = requestOf(call);
+      const days = dayRows(startDate, endDate, () => 1);
+      return days.length > 7 ? { rows: days.slice(0, Math.floor(days.length / 2)), truncated: true, rowLimitReached: 1_000_000 } : days;
+    });
+    const result = await run(fake, 2, 'property_totals', site);
+    const backfillStart = addMonths(TODAY, -16);
+    expect(result.datasets[0]!.backfillThrough).toBe(addDays(backfillStart, 59));
+    const stored = await db.admin.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM gsc_property_totals WHERE workspace_id = $1 AND site_id = $2 AND date BETWEEN $3 AND $4`,
+      [disposable.workspace, site, backfillStart, addDays(backfillStart, 59)],
+    );
+    expect(stored.rows[0]?.n).toBe('60');
+    expect(fake.calls.some((call) => requestOf(call).endDate < requestOf(call).startDate)).toBe(false);
+  });
+
+  it('resumes an old backfill at today’s 16-month floor, not below it (review round 2)', async () => {
+    const site = await newSite('floor');
+    const january = new Date('2026-01-15T12:00:00Z');
+    const answer = (call: ProviderCallInput) => dayRows(requestOf(call).startDate, requestOf(call).endDate, () => 1);
+    await run(fakeGateway(answer), 1, 'property_totals', site, january);
+    const later = fakeGateway(answer);
+    await run(later, 1, 'property_totals', site);
+    const floor = addMonths(TODAY, -16);
+    for (const call of later.calls) expect(requestOf(call).startDate >= floor, requestOf(call).startDate).toBe(true);
+  });
+
   it('refuses a site with no active connection', async () => {
     const other = randomUUID();
     await db.admin.query(

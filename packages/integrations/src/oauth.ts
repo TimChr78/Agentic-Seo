@@ -145,7 +145,20 @@ async function tokenRequest(deps: OAuthDeps, endpoints: OAuthEndpoints, params: 
   };
 }
 
-async function storeTokens(tx: Tx, row: ConnectionRow, kp: KeyProvider, tokens: OAuthTokens, expiresAt: Date | null, now: Date) {
+/**
+ * Seals tokens on the row. `authorization` marks a completed (re)authorization, possibly by another
+ * Google account: it bumps the generation, so a property list or a sync obtained under the previous
+ * grant is refused. A refresh keeps the same grant and leaves the generation alone.
+ */
+async function storeTokens(
+  tx: Tx,
+  row: ConnectionRow,
+  kp: KeyProvider,
+  tokens: OAuthTokens,
+  expiresAt: Date | null,
+  now: Date,
+  authorization = false,
+) {
   const current = await connectionSecrets(tx, row, kp);
   const previous = (current.__oauth ?? {}) as Partial<OAuthTokens>;
   // Providers often send a refresh token only the first time: keep the one we have.
@@ -162,6 +175,7 @@ async function storeTokens(tx: Tx, row: ConnectionRow, kp: KeyProvider, tokens: 
       tokenExpiresAt: expiresAt,
       refreshLeaseUntil: null,
       refreshLeaseToken: null,
+      ...(authorization ? { generation: sql`${schema.connections.generation} + 1` } : {}),
       updatedAt: now,
     })
     .where(and(eq(schema.connections.workspaceId, row.workspaceId), eq(schema.connections.id, row.id)));
@@ -320,7 +334,7 @@ export async function completeAuthorization(deps: OAuthDeps, input: CallbackInpu
     const pending = row.oauthPending as unknown as PendingAuthorization | null;
     if (!pending || pending.stateHash !== hash || !pending.consumedAt)
       return { ok: false, text: 'A newer authorization replaced this one. Start connecting again.' };
-    await storeTokens(tx, row, deps.kp, exchanged.tokens, exchanged.expiresAt, now);
+    await storeTokens(tx, row, deps.kp, exchanged.tokens, exchanged.expiresAt, now, true);
     return { ok: true, text: `${row.label || connectorOf(row.connector).label} is connected. You can close this window.` };
   });
   return { ...result, workspaceId, connectionId };

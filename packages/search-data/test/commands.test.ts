@@ -242,6 +242,29 @@ describe.skipIf(!hasTestDatabase())('the Search Console commands', () => {
     await expect(call(gscSelect, { siteId, property })).resolves.toMatchObject({ id: expect.any(String) });
   });
 
+  it('refuses a selection whose property list went stale while it loaded (review round 2)', async () => {
+    // Selection A pauses in its property lookup while selection B commits another property; A must
+    // not overwrite B. Then a re-authorization lands during A's lookup; A must not use the old list.
+    let interleave: (() => Promise<unknown>) | null = null;
+    await setup(dayRows, {
+      before: async () => {
+        const step = interleave;
+        interleave = null;
+        if (step) await step();
+      },
+    });
+    await connect();
+    const blog = `https://${domain}/blog/`;
+    interleave = () => call(gscSelect, { siteId, property: blog });
+    await expect(call(gscSelect, { siteId, property })).rejects.toThrow(/changed while the property list was loading/);
+    expect((await call(gscStatus, { siteId })).connection).toMatchObject({ settings: { property: blog } });
+
+    interleave = () => connect();
+    await expect(call(gscSelect, { siteId, property })).rejects.toThrow(/changed while the property list was loading/);
+    // With nothing in between, the same selection goes through.
+    await expect(call(gscSelect, { siteId, property })).resolves.toMatchObject({ settings: { property } });
+  });
+
   it('disconnects, then reads the replacement connection after reconnecting', async () => {
     await setup();
     const first = await connect();

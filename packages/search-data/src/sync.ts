@@ -3,7 +3,7 @@ import { type Db, schema, type Tx } from '@agentic-seo/db';
 import { findLiveConnection, GSC_CONNECTOR_ID } from '@agentic-seo/integrations';
 import { GSC_FINALITY_CAP_DAYS, type ProviderGateway } from '@agentic-seo/providers';
 import { and, eq, sql } from 'drizzle-orm';
-import { addDays, addMonths, maxDay, minDay, today as searchConsoleToday } from './dates';
+import { addDays, addMonths, daysBetween, maxDay, minDay, today as searchConsoleToday } from './dates';
 import { normalizePageUrl } from './urls';
 
 // The Search Console sync (data-providers.md §5, domain-model.md §3). Two datasets, each with a
@@ -296,6 +296,10 @@ async function storeWindow(
     backfill: boolean;
   },
 ): Promise<{ rows: number; watermark: Watermark }> {
+  // A one-day window still over the row cap cannot be split further: it is as complete as the API
+  // allows, so it counts as covered and keeps its warning. A longer truncated window never reaches
+  // here (syncSpan splits it), and if one did it would not advance coverage or the backfill.
+  const covered = !input.fetched.truncated || input.start === input.end;
   const finalDay = finalThrough({ end: input.end, today: input.today, metadata: input.fetched.metadata });
   const isFinal = (day: string) => day <= finalDay;
   return deps.db.withWorkspace(input.workspaceId, async (tx) => {
@@ -385,18 +389,20 @@ async function storeWindow(
     // Contiguous coverage: this window ran from `start` to `end`, and the caller only asks for a
     // window that starts at or before coverage+1, so everything through `end` is now fetched. A
     // truncated read is incomplete, so coverage stays where it was and the next run retries the gap.
-    const coverageThrough = input.fetched.truncated ? current.coverageThrough : maxDay(current.coverageThrough, input.end);
-    const backfillThrough = input.backfill ? maxDay(current.backfillThrough, input.end) : current.backfillThrough;
+    const coverageThrough = covered ? maxDay(current.coverageThrough, input.end) : current.coverageThrough;
+    const backfillThrough = input.backfill && covered ? maxDay(current.backfillThrough, input.end) : current.backfillThrough;
     const backfillComplete = input.backfill
       ? (backfillThrough !== null && backfillThrough >= input.today) || current.backfillComplete
       : current.backfillComplete;
     // A non-fatal warning: the read stopped at the row cap, or Google still calls a day incomplete
-    // past the cap. A clean window clears the previous warning.
+    // past the cap. A clean window clears a finality warning, but a row-cap warning stays until the
+    // property changes: the capped day is never re-read complete, so its warning must not vanish.
+    const stickyRowCap = current.lastWarning?.includes('-row cap') ? current.lastWarning : null;
     const warning = input.fetched.truncated
       ? `The ${input.definition.dataset.replace('_', ' ')} read for ${input.start} to ${input.end} stopped at the ${input.fetched.rowLimitReached ?? ROW_LIMIT}-row cap, so this window is incomplete.`
       : firstIncomplete !== null && firstIncomplete <= addDays(input.today, -GSC_FINALITY_CAP_DAYS)
         ? `Google still reported ${firstIncomplete} incomplete more than ${GSC_FINALITY_CAP_DAYS} days later; its numbers are marked final so the sync stops re-fetching them.`
-        : null;
+        : stickyRowCap;
     const [updated] = await tx
       .update(schema.gscSyncState)
       .set({
@@ -496,58 +502,28 @@ export async function runGscSync(deps: GscSyncDeps, input: GscSyncInput): Promis
     let state: Watermark = await deps.db.withWorkspace(input.workspaceId, async (tx) => watermarkOf(await ensureWatermark(tx, key)));
     let totalRows = 0;
     try {
-      // 1. The incremental window: gap fill, provisional days, and the usual four-day overlap.
-      const start = incrementalStart(state, today);
-      const fetched = await fetchWindow(deps, {
-        workspaceId: input.workspaceId,
-        siteId: input.siteId,
-        connectionId: prepared.connectionId,
-        property: prepared.property,
-        definition,
-        searchType,
-        start,
-        end: today,
-        refresh: true,
-      });
-      const stored = await storeWindow(deps, {
-        workspaceId: input.workspaceId,
-        siteId: input.siteId,
-        connectionId: prepared.connectionId,
-        generation: prepared.generation,
-        property: prepared.property,
-        definition,
-        searchType,
-        start,
-        end: today,
-        fetched,
-        today,
-        now,
-        backfill: false,
-      });
-      totalRows += stored.rows;
-      state = stored.watermark;
-
-      // 2. The 16-month backfill, 30 days at a time, resuming after the last committed chunk.
-      let chunkStart = state.backfillComplete
-        ? today
-        : state.backfillThrough
-          ? addDays(state.backfillThrough, 1)
-          : addMonths(today, -BACKFILL_MONTHS);
-      let chunks = 0;
-      while (!state.backfillComplete && chunkStart <= today && chunks < maxChunks) {
-        const chunkEnd = addDays(chunkStart, CHUNK_DAYS - 1) <= today ? addDays(chunkStart, CHUNK_DAYS - 1) : today;
-        const chunk = await fetchWindow(deps, {
+      // Fetches and stores [start, end]; a read that stopped at the row cap is split in half and each
+      // half fetched again, down to single days, so a capped window never advances coverage or the
+      // backfill past rows it did not read.
+      const syncSpan = async (start: string, end: string, backfill: boolean, refresh: boolean): Promise<void> => {
+        const fetched = await fetchWindow(deps, {
           workspaceId: input.workspaceId,
           siteId: input.siteId,
           connectionId: prepared.connectionId,
           property: prepared.property,
           definition,
           searchType,
-          start: chunkStart,
-          end: chunkEnd,
-          refresh: false,
+          start,
+          end,
+          refresh,
         });
-        const committed = await storeWindow(deps, {
+        if (fetched.truncated && start < end) {
+          const mid = addDays(start, Math.floor(daysBetween(start, end) / 2));
+          await syncSpan(start, mid, backfill, refresh);
+          await syncSpan(addDays(mid, 1), end, backfill, refresh);
+          return;
+        }
+        const stored = await storeWindow(deps, {
           workspaceId: input.workspaceId,
           siteId: input.siteId,
           connectionId: prepared.connectionId,
@@ -555,15 +531,29 @@ export async function runGscSync(deps: GscSyncDeps, input: GscSyncInput): Promis
           property: prepared.property,
           definition,
           searchType,
-          start: chunkStart,
-          end: chunkEnd,
-          fetched: chunk,
+          start,
+          end,
+          fetched,
           today,
           now,
-          backfill: true,
+          backfill,
         });
-        totalRows += committed.rows;
-        state = committed.watermark;
+        totalRows += stored.rows;
+        state = stored.watermark;
+      };
+
+      // 1. The incremental window: gap fill, provisional days, and the usual four-day overlap.
+      await syncSpan(incrementalStart(state, today), today, false, true);
+
+      // 2. The 16-month backfill, 30 days at a time, resuming after the last committed chunk. Google
+      // keeps 16 months, and that floor moves: a backfill resumed months later starts at today's floor.
+      const floor = addMonths(today, -BACKFILL_MONTHS);
+      const resumeAt = state.backfillThrough ? addDays(state.backfillThrough, 1) : floor;
+      let chunkStart = state.backfillComplete ? today : resumeAt < floor ? floor : resumeAt;
+      let chunks = 0;
+      while (!state.backfillComplete && chunkStart <= today && chunks < maxChunks) {
+        const chunkEnd = addDays(chunkStart, CHUNK_DAYS - 1) <= today ? addDays(chunkStart, CHUNK_DAYS - 1) : today;
+        await syncSpan(chunkStart, chunkEnd, true, false);
         chunks += 1;
         chunkStart = addDays(chunkEnd, 1);
       }

@@ -250,6 +250,13 @@ export const gscSelect = defineCommand({
         'conflict',
         'The Search Console connection was replaced while the property list was loading. Run search.gsc.select again.',
       );
+    // Same row is not enough: another selection, a re-authorization (which bumps the generation) or
+    // any other property change that committed meanwhile makes the list read above stale.
+    if (row.generation !== seen.generation || row.settings.property !== seen.settings.property)
+      throw new AppError(
+        'conflict',
+        'The Search Console connection changed while the property list was loading (another property was selected, or Google was reconnected). Run search.gsc.properties, then search.gsc.select again.',
+      );
     const previous = typeof row.settings.property === 'string' ? row.settings.property : null;
     const now = new Date();
     const [updated] = await ctx.tx
