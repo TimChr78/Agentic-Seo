@@ -32,6 +32,13 @@ const brandHeader = `<a class="brand" href="/" aria-label="Agentic SEO">${brandW
  */
 export const pageNonce = () => randomBytes(18).toString('base64');
 
+const escapeHtml = (text: string) =>
+  text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
+
+/** The page Google sends the person back to: one short result, never a link into the app. */
+export const oauthCallbackPage = (nonce: string, title: string, text: string) =>
+  layout(title, `<h1>${escapeHtml(title)}</h1><p>${escapeHtml(text)}</p>`, nonce);
+
 export const pagesCsp = (nonce: string) =>
   `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`;
 

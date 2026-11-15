@@ -4,6 +4,7 @@ import { agentCommands, memberCommands, tokenCommands } from '@agentic-seo/auth'
 import { checkCommands } from '@agentic-seo/checks';
 import type { AnyCommand } from '@agentic-seo/commands';
 import { providerCommands } from '@agentic-seo/providers';
+import { searchDataCommands } from '@agentic-seo/search-data';
 import { secretCommands } from '@agentic-seo/secrets';
 import { siteCommands } from '@agentic-seo/sites';
 import { getWorkspace, whoami } from './builtinCommands';
@@ -26,6 +27,7 @@ export const commands = [
   ...checkCommands,
   ...aiCommands,
   ...providerCommands,
+  ...searchDataCommands,
   undoAgent,
   { ...setSecret, actionClass: 'settings' as const },
   listSecrets,

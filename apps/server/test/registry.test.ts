@@ -10,7 +10,7 @@ describe('the command registry', () => {
     const names = commands.map((c) => c.name);
     expect(new Set(names).size).toBe(names.length);
     for (const command of commands) {
-      expect(command.name).toMatch(/^[a-z][A-Za-z]*(\.[a-zA-Z][A-Za-z]*)?$/);
+      expect(command.name).toMatch(/^[a-z][A-Za-z]*(\.[a-zA-Z][A-Za-z]*)*$/);
       expect(command.title.length).toBeGreaterThan(0);
       expect(command.description.length).toBeGreaterThan(20);
     }

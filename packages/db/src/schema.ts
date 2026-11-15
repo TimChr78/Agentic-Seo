@@ -4,6 +4,7 @@ import {
   bigserial,
   boolean,
   customType,
+  date,
   doublePrecision,
   index,
   integer,
@@ -625,6 +626,123 @@ export const aiTokenReservations = pgTable(
 );
 
 /** Every model call, with what it was asked, what it answered, its tokens and latency. */
+// Connections and Search Console facts (Phase 1 task B). See 0008_connections_gsc.sql.
+
+export type ConnectionState = 'pending' | 'active' | 'error' | 'revoked';
+
+/**
+ * A connector installed for one site: settings, sealed OAuth tokens and the authorization in
+ * progress. `oauthPending` is read and written by the OAuth flow only; no command returns it.
+ */
+export const connections = pgTable(
+  'connections',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    connector: text('connector').notNull(),
+    label: text('label').notNull().default(''),
+    settings: jsonb('settings').$type<Record<string, unknown>>().notNull().default({}),
+    /** Sealed JSON (iv + auth tag + ciphertext); opened only by the credential seam and the worker. */
+    secrets: bytea('secrets'),
+    secretsKeyId: text('secrets_key_id'),
+    state: text('state').$type<ConnectionState>().notNull().default('pending'),
+    /** Bumped when the property changes or the connection is revoked; fences an in-flight sync. */
+    generation: integer('generation').notNull().default(0),
+    lastError: text('last_error'),
+    oauthPending: jsonb('oauth_pending').$type<Record<string, unknown>>(),
+    tokenExpiresAt: ts('token_expires_at'),
+    refreshLeaseUntil: ts('refresh_lease_until'),
+    refreshLeaseToken: text('refresh_lease_token'),
+    lastSyncRequestedAt: ts('last_sync_requested_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    uniqueIndex('connections_site_connector_live').on(t.workspaceId, t.siteId, t.connector).where(sql`state <> 'revoked'`),
+    index('connections_site').on(t.workspaceId, t.siteId, t.connector),
+    index('connections_refresh_due').on(t.tokenExpiresAt).where(sql`state = 'active'`),
+  ],
+);
+
+/** One day of a property's totals per search type (aggregationType `byProperty`). */
+export const gscPropertyTotals = pgTable(
+  'gsc_property_totals',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    property: text('property').notNull(),
+    date: date('date', { mode: 'string' }).notNull(),
+    searchType: text('search_type').notNull().default('web'),
+    clicks: doublePrecision('clicks').notNull(),
+    impressions: doublePrecision('impressions').notNull(),
+    ctr: doublePrecision('ctr').notNull(),
+    position: doublePrecision('position').notNull(),
+    isFinal: boolean('is_final').notNull().default(false),
+    fetchedAt: ts('fetched_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.siteId, t.property, t.date, t.searchType] }),
+    index('gsc_property_totals_range').on(t.workspaceId, t.siteId, t.date),
+  ],
+);
+
+/** One day of page-level search data per page, country and device (aggregationType `byPage`). */
+export const gscPageAggregates = pgTable(
+  'gsc_page_aggregates',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    property: text('property').notNull(),
+    date: date('date', { mode: 'string' }).notNull(),
+    /** The search surface ("web" in Phase 1); in the key so Phase 2 adds types without a rewrite. */
+    searchType: text('search_type').notNull().default('web'),
+    page: text('page').notNull(),
+    /** `page` through `normalizePageUrl`: reach and search.pages match on it, never on `page`. */
+    pageKey: text('page_key').notNull(),
+    /** ISO 3166-1 alpha-3, or empty when Google returned no country for the row. */
+    country: text('country').notNull().default(''),
+    device: text('device').notNull().default(''),
+    clicks: doublePrecision('clicks').notNull(),
+    impressions: doublePrecision('impressions').notNull(),
+    ctr: doublePrecision('ctr').notNull(),
+    position: doublePrecision('position').notNull(),
+    isFinal: boolean('is_final').notNull().default(false),
+    fetchedAt: ts('fetched_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.siteId, t.property, t.date, t.searchType, t.page, t.country, t.device] }),
+    index('gsc_page_aggregates_range').on(t.workspaceId, t.siteId, t.date),
+    index('gsc_page_aggregates_page').on(t.workspaceId, t.siteId, t.property, t.pageKey, t.date),
+  ],
+);
+
+export type GscDataset = 'property_totals' | 'page_aggregates';
+
+/** The sync watermark per site, dataset, search type and property. */
+export const gscSyncState = pgTable(
+  'gsc_sync_state',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    dataset: text('dataset').$type<GscDataset>().notNull(),
+    searchType: text('search_type').notNull().default('web'),
+    property: text('property').notNull(),
+    lastFinalDate: date('last_final_date', { mode: 'string' }),
+    lastFetchedAt: ts('last_fetched_at'),
+    backfillComplete: boolean('backfill_complete').notNull().default(false),
+    backfillThrough: date('backfill_through', { mode: 'string' }),
+    /** The newest day every day before which has been fetched; the next incremental run resumes here. */
+    coverageThrough: date('coverage_through', { mode: 'string' }),
+    lastError: text('last_error'),
+    /** A non-fatal warning: a truncated window, or data still incomplete past the finality cap. */
+    lastWarning: text('last_warning'),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.siteId, t.dataset, t.searchType, t.property] })],
+);
+
 export const aiCalls = pgTable(
   'ai_calls',
   {

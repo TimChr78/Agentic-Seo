@@ -166,6 +166,28 @@ const SEED: Record<string, { insert: string; appendOnly: boolean }> = {
             VALUES ($1, gen_random_uuid(), '00000000-0000-4000-8000-000000000001', 'rival.example')`,
     appendOnly: false,
   },
+  connections: {
+    insert: `INSERT INTO connections (workspace_id, id, site_id, connector, label, settings, state)
+            VALUES ($1, 'con_00000000000000000000000000000001', '00000000-0000-4000-8000-000000000001',
+              'google-search-console', 'Search Console', '{"property":"sc-domain:seed-site.example"}'::jsonb, 'active')`,
+    appendOnly: false,
+  },
+  gsc_property_totals: {
+    insert: `INSERT INTO gsc_property_totals (workspace_id, site_id, property, date, clicks, impressions, ctr, position)
+            VALUES ($1, '00000000-0000-4000-8000-000000000001', 'sc-domain:seed-site.example', '2026-11-01', 10, 100, 0.1, 3)`,
+    appendOnly: false,
+  },
+  gsc_page_aggregates: {
+    insert: `INSERT INTO gsc_page_aggregates (workspace_id, site_id, property, date, page, page_key, clicks, impressions, ctr, position)
+            VALUES ($1, '00000000-0000-4000-8000-000000000001', 'sc-domain:seed-site.example', '2026-11-01',
+              'https://seed-site.example/', 'https://seed-site.example/', 10, 100, 0.1, 3)`,
+    appendOnly: false,
+  },
+  gsc_sync_state: {
+    insert: `INSERT INTO gsc_sync_state (workspace_id, site_id, dataset, search_type, property, last_final_date, backfill_through)
+            VALUES ($1, '00000000-0000-4000-8000-000000000001', 'property_totals', 'web', 'sc-domain:seed-site.example', '2026-11-01', '2026-11-01')`,
+    appendOnly: false,
+  },
   workspace_members: {
     insert: `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, 'seed-user', 'viewer')`,
     appendOnly: false,
