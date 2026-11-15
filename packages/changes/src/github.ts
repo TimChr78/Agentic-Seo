@@ -108,6 +108,19 @@ export interface GitHubCommitSummary {
   date: string | null;
 }
 
+/** A commit's identity: its tree and parents, for verifying a commit a retried job adopts. */
+export interface GitHubCommit {
+  sha: string;
+  treeSha: string;
+  parents: string[];
+}
+
+/** One blob entry of a tree, with the git object SHA. */
+export interface GitHubTreeEntry {
+  path: string;
+  sha: string;
+}
+
 export type CompareStatus = 'ahead' | 'behind' | 'diverged' | 'identical';
 
 export interface GitHubComparison {
@@ -511,6 +524,33 @@ export class GitHubClient {
       .map((entry) => entry.path!)
       .filter((path) => path.startsWith(prefix));
     return { paths, truncated: data.truncated === true };
+  }
+
+  /**
+   * Every blob under a prefix at a ref, with its git object SHA. A retried apply job compares this
+   * map with the one it would write, so a branch holding anything else is never adopted.
+   */
+  async listTreeEntries(ref: string, prefix = ''): Promise<{ entries: GitHubTreeEntry[]; truncated: boolean }> {
+    const { data } = await this.get<{ tree?: { path?: string; type?: string; sha?: string }[]; truncated?: boolean }>(
+      `/repos/${this.slug}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
+      { notFound: `the tree at ${ref}` },
+    );
+    const entries = (data.tree ?? [])
+      .filter((entry) => entry.type === 'blob' && typeof entry.path === 'string' && typeof entry.sha === 'string')
+      .map((entry) => ({ path: entry.path!, sha: entry.sha! }))
+      .filter((entry) => entry.path.startsWith(prefix));
+    return { entries, truncated: data.truncated === true };
+  }
+
+  /** One commit's tree and parents, or a typed not-found. */
+  async getCommit(sha: string): Promise<GitHubCommit> {
+    const { data } = await this.get<{ sha?: string; tree?: { sha?: string }; parents?: { sha?: string }[] }>(
+      `/repos/${this.slug}/git/commits/${encodeURIComponent(sha)}`,
+      { notFound: `the commit ${sha}` },
+    );
+    const treeSha = data.tree?.sha;
+    if (!treeSha) throw new GitHubError('invalid', `GitHub returned no tree for commit ${sha}.`);
+    return { sha: data.sha ?? sha, treeSha, parents: (data.parents ?? []).map((parent) => String(parent.sha ?? '')).filter(Boolean) };
   }
 
   /** Create a branch at a commit. A branch that already exists is a typed conflict. */

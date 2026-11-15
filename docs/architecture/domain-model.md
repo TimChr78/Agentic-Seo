@@ -101,8 +101,11 @@ SHAs, `change_set_events` is the append-only transition log with the evidence fo
 `change_set_verifications` records one row per change per verification attempt. The run states are
 the pipeline above plus `approved` (published, not yet applied), `stale` (a source changed after
 drafting), `closed` (the pull request was closed unmerged), `deploy_not_detected` (the merge never
-reached the site inside the deploy window) and `failed`; `superseded` is reserved for a change set a
-later version replaced before it was applied.
+reached the site inside the deploy window) and `failed` (the pipeline refused to continue — for
+example a pull request merged with commits that were not approved); `superseded` is reserved for a
+change set a later version replaced before it was applied. A rollback is a change set of its own: the
+original stays in its live state, linked through `rollback_change_set_id`, and becomes `rolled_back`
+only when the rollback is verified.
 
 ## 5. Artifacts (versioned, reviewable)
 

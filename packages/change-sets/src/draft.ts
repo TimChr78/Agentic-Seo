@@ -88,13 +88,23 @@ interface ResolvedSource {
   dialect?: FrontmatterDialect;
 }
 
+export type { ResolvedSource };
+
 /**
  * Resolve one change to its source file. A redirect edits the mapping's redirects file; everything
  * else resolves through the route rules. A route that only a shared layout renders is refused: a
  * layout edit reaches every page it renders, so it is a person's deliberate change, not something a
  * single-URL change may do by accident.
+ *
+ * Exported because approval and the apply worker re-resolve every stored change: the path, editor
+ * and affected routes are server-derived, and a stored set that no longer resolves this way is not
+ * the one a person reviewed.
  */
-async function resolveFor(change: Change, deps: DraftDeps, fileCache: Map<string, Promise<string>>): Promise<ResolvedSource | Refusal> {
+export async function resolveChangeSource(
+  change: Change,
+  deps: DraftDeps,
+  fileCache: Map<string, Promise<string>>,
+): Promise<ResolvedSource | Refusal> {
   if (change.type === 'redirect') {
     const redirects = resolveRedirects(deps.mapping);
     if (!redirects.ok) return redirects;
@@ -148,7 +158,7 @@ export async function draftChanges(changes: readonly Change[], deps: DraftDeps):
     const url = urlOf(change);
     let resolved: ResolvedSource | Refusal;
     try {
-      resolved = await resolveFor(change, deps, cache);
+      resolved = await resolveChangeSource(change, deps, cache);
     } catch (error) {
       // Reading a repository file failed (a network error, a missing file): a refusal per change,
       // so the caller sees which change could not be resolved rather than a stack trace.

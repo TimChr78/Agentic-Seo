@@ -239,3 +239,70 @@ export async function openRunsForSite(tx: Tx, workspaceId: string, siteId: strin
     )
     .orderBy(schema.changeSetRuns.createdAt);
 }
+
+/**
+ * Withdraws an approval: the change set returns to review, and the version it approved is a draft
+ * again so `changes.updateDraft` can pick it up rather than stacking a second version.
+ *
+ * Two callers need exactly this: a push to the pull request after approval, and adoption refusing a
+ * branch or pull request whose commits are not the ones approval covered. The caller has already
+ * decided the transition is legitimate and supplies the reason and evidence a reviewer reads.
+ */
+export async function invalidateApproval(
+  tx: Tx,
+  run: ChangeSetRun,
+  options: { reason: string; evidence: Record<string, unknown>; at?: Date },
+): Promise<ChangeSetRun | null> {
+  const at = options.at ?? new Date();
+  const moved = await transition(tx, run, 'in_review', {
+    reason: options.reason,
+    actor: { type: 'system' },
+    evidence: options.evidence,
+    at,
+    set: {
+      approvedVersion: null,
+      approvedHeadSha: null,
+      lastError: options.reason,
+    },
+  });
+  if (!moved) return null;
+  if (run.approvedVersion !== null) {
+    await tx
+      .update(schema.artifactVersions)
+      .set({ state: 'draft', updatedAt: at })
+      .where(
+        and(
+          eq(schema.artifactVersions.workspaceId, run.workspaceId),
+          eq(schema.artifactVersions.artifactId, run.artifactId),
+          eq(schema.artifactVersions.number, run.approvedVersion),
+        ),
+      );
+    await tx
+      .update(schema.artifacts)
+      .set({ publishedVersion: null, updatedAt: at })
+      .where(and(eq(schema.artifacts.workspaceId, run.workspaceId), eq(schema.artifacts.id, run.artifactId)));
+  }
+  return moved;
+}
+
+/**
+ * The original change set becomes `rolled_back` only when the rollback change set is verified
+ * (ADR-0007, safe rollback): proposing a rollback, or opening its pull request, changes nothing
+ * about what is live, so the original's state stays truthful until the revert is really live.
+ *
+ * Verification is applicable to every change a rollback can hold (each type has a check), so a
+ * verified rollback is the normal completion. A caller that finds no verification applicable can
+ * call this after `deployed`; it refuses any original that has not reached a live state.
+ */
+export async function settleRollbackOf(tx: Tx, rollbackRun: ChangeSetRun): Promise<void> {
+  if (!rollbackRun.rollbackOf) return;
+  const original = await findRun(tx, rollbackRun.workspaceId, rollbackRun.rollbackOf);
+  if (!original || original.state === 'rolled_back') return;
+  const live = ['deployed', 'verified', 'rolled_back', ...TERMINAL_STATES];
+  if (!(live as readonly string[]).includes(original.state)) return;
+  await transition(tx, original, 'rolled_back', {
+    reason: `Rolled back by change set ${rollbackRun.artifactId}, which was verified on ${rollbackRun.deployedSha ?? 'the deployed commit'}.`,
+    actor: { type: 'system' },
+    evidence: { rollbackArtifactId: rollbackRun.artifactId, deployedSha: rollbackRun.deployedSha },
+  });
+}

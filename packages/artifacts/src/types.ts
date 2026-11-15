@@ -403,6 +403,10 @@ export const artifactTypes = {
     label: 'Change set',
     description: 'An ordered set of changes to one site through one connector, with a diff and a rollback plan.',
     content: changeSet,
+    // The source path, base commit, source hash and diff are derived from the repository while
+    // drafting, and the apply worker re-derives them. The generic artifact commands would let a
+    // caller write any of them by hand; only changes.create and changes.updateDraft may.
+    serverOwned: true,
   },
   content_brief: {
     prefix: 'brf',

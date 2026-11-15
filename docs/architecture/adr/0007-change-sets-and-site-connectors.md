@@ -135,17 +135,22 @@ The change-set half of this ADR, implemented as `packages/change-sets` on top of
 - **Drafting refuses as a whole by default.** `changes.create` returns one refusal per change and
   creates nothing when any change is refused; `allowPartial: true` keeps the rest. A change the
   source already carries is refused rather than recorded as a no-op.
-- **A retried apply job adopts what it finds.** The branch name is `aseo/<change-set id>-v<version>`.
-  Before creating anything the job looks for the branch and for a pull request with that head, and
-  adopts them when the files are exactly what it would write; a response lost after GitHub created
-  the PR therefore cannot produce a second one. The test for it makes the fake GitHub record the PR
-  and then drop the connection.
-- **Verification fetches the URL each change is about.** A layout's rendered routes are counted in
-  the reach estimate (they are what a template edit puts at risk) but are not re-fetched: a change's
-  expectation is about its own URL, and a route the change does not name has no expected value to
-  compare. A fetch that fails is retried three times with backoff before it becomes
-  `verification_failed` with "could not fetch" evidence, so a flaky site does not fail a good change
-  on the first attempt.
+- **A retried apply job adopts only the commit it would write.** The branch name is
+  `aseo/<change-set id>-v<version>`. Before creating anything the job looks for the branch and for a
+  pull request with that head; it adopts one only when that commit's single parent is the expected
+  base and its tree is the base tree with our file blobs at our paths and no other path changed.
+  Anything else (a push after the attempt, an extra file, a different edit) is not adopted: the
+  approval is withdrawn and the change set returns to review. A branch created before the commit
+  (base head, no commit) resumes the multi-file commit from the base. A response lost after GitHub
+  created the PR therefore still cannot produce a second one.
+- **Verification fetches the URL each change is about.** A redirect change stores `from` as a path
+  (that is what the redirects file holds), so verification resolves it against the site's own origin
+  (primary domain, https) before fetching and checks both the status and the resolved `Location`. A
+  layout's rendered routes are counted in the reach estimate (they are what a template edit puts at
+  risk) but are not re-fetched: a change's expectation is about its own URL, and a route the change
+  does not name has no expected value to compare. A fetch that fails is retried three times with
+  backoff before it becomes `verification_failed` with "could not fetch" evidence, so a flaky site
+  does not fail a good change on the first attempt.
 - **A conflict hold is an approval, not a refusal.** Two open change sets on one site that touch the
   same URL or the same source file: the second is always sent to a person, with the first change set
   named in the hold reason and in the approval note, whatever the agent's mandate allows and even
@@ -158,4 +163,48 @@ The change-set half of this ADR, implemented as `packages/change-sets` on top of
   the merge commit to revert by hand instead of proposing a partial revert.
 - **`deploy_not_detected` is terminal and visible.** It is a distinct state, not `failed`: the merge
   happened and the site did not serve it, which is a pipeline problem a person fixes by looking at
-  the deploy, then rolling back or re-running.
+  the deploy, then rolling back or re-running. An `unknown` detector answer (no version file, a
+  comparison that cannot be read) counts toward the same window: a detector that never answers must
+  become visible, not extend the wait forever, and the last detector reason is kept as evidence.
+
+### Approval invariant (review round 1)
+
+The guarantee is one sentence: **nothing reaches the repository except the exact content a person
+approved, and only after that exact version was approved.** Every step derives its own answer from
+the repository and refuses when it differs; no later step trusts a caller-supplied field from an
+earlier one.
+
+- **Draft (`changes.create` / `changes.updateDraft`).** Each change is resolved through the
+  person-written mapping and applied in memory. The resulting source path, editor, affected routes,
+  base commit, file sha256, rendered diff and verify target are written by these commands only:
+  `artifactTypes.change_set.serverOwned` makes `artifacts.create` and `artifacts.updateDraft` refuse
+  the type, so the generic artifact door cannot write or edit them.
+- **Approval (`changes.requestApply`, or `artifacts.requestPublish`).** The impact estimator locks
+  the artifact row and judges the **latest** version — the one the handler publishes — not the last
+  published one, so a stale change redrafted as a structural redirect is held as `site.structural`.
+  The handler re-derives every server-owned field from the file at its own `baseSha`: the mapping
+  must resolve the URL to the same path and editor, the file must hash to `sourceHash`, applying the
+  edit must reproduce the stored diff byte for byte, and the stored change must equal the editor's
+  verify target. A mismatch refuses the submission and names the field.
+- **Apply (`changes_apply`).** After re-reading the base head for the stale check, the worker runs
+  the same re-derivation before writing anything. It then commits only those re-applied texts. If it
+  finds a branch or pull request from an earlier attempt, it adopts it only when the head commit has
+  exactly one parent (the base) and a tree that is the base tree with our blobs at our paths and no
+  other path changed; anything else returns the change set to `in_review`, withdraws the approval and
+  closes the pull request Agentic SEO opened. A branch that still points at the base resumes the
+  commit (fast-forward from base only).
+- **Pull request and merge (`changes_poll`).** The poller compares the pull request head with
+  `approved_head_sha` before any progression. An open PR that moved on returns to `in_review`, and a
+  PR that was **merged** with a different head goes to `failed` with "merged with commits that were
+  not approved": nothing is deployed or verified, and a person decides what to do with the merged
+  content.
+- **Deploy and verification.** Deploy detection and verification re-fetch, both queued in the same
+  transaction as the state that makes them due (`change_set_enqueue`, a narrow security-definer door
+  like `crawl_enqueue`), with the poller reconciling an `approved` or `deployed` row whose job was
+  lost. Redirect sources are resolved against the site's own origin before fetching and checked
+  end to end (status and `Location`).
+- **Rollback.** `changes.rollback` writes no GitHub state. It creates a draft rollback change set
+  linked as `rollback_of`, with the original's action class and reach. Its pull request opens only
+  through the approved apply worker, and the original becomes `rolled_back` only when that change set
+  is verified; a rejected or abandoned proposal leaves the original exactly as it was.
+

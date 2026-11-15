@@ -106,15 +106,24 @@ export function conflictReason(conflict: ChangeSetConflict): string {
   return `Change set ${conflict.artifactId} (“${conflict.title}”) is open on this site and already changes ${what}. Two change sets that touch the same source need a person, not two agents.`;
 }
 
-/** The content of a run's approved version, or its latest version when nothing is published. */
-export async function contentOfRun(tx: Tx, run: ChangeSetRun): Promise<ChangeSetContent | null> {
+/**
+ * The content of one version of a run: the one named, or the approved version, or the latest draft.
+ *
+ * The version is explicit because the policy engine and the handler must judge the same content
+ * (#854): a change set that was published, went stale and was redrafted has `published_version`
+ * pointing at the old version while `latest_version` is the draft a person is about to approve.
+ * Reading `publishedVersion` first would estimate the old change (a title edit) while the handler
+ * publishes the new one (a structural redirect). A caller that knows which version it publishes
+ * passes it; otherwise the approved version, then the latest, is the one that would be applied.
+ */
+export async function contentOfRun(tx: Tx, run: ChangeSetRun, version?: number): Promise<ChangeSetContent | null> {
   const [artifact] = await tx
-    .select({ latestVersion: schema.artifacts.latestVersion, publishedVersion: schema.artifacts.publishedVersion })
+    .select({ latestVersion: schema.artifacts.latestVersion })
     .from(schema.artifacts)
     .where(and(eq(schema.artifacts.workspaceId, run.workspaceId), eq(schema.artifacts.id, run.artifactId)));
   if (!artifact) return null;
-  const number = run.approvedVersion ?? artifact.publishedVersion ?? artifact.latestVersion;
-  const [version] = await tx
+  const number = version ?? run.approvedVersion ?? artifact.latestVersion;
+  const [row] = await tx
     .select({ content: schema.artifactVersions.content })
     .from(schema.artifactVersions)
     .where(
@@ -124,7 +133,7 @@ export async function contentOfRun(tx: Tx, run: ChangeSetRun): Promise<ChangeSet
         eq(schema.artifactVersions.number, number),
       ),
     );
-  const parsed = changeSetContentSchema.safeParse(version?.content);
+  const parsed = changeSetContentSchema.safeParse(row?.content);
   return parsed.success ? parsed.data : null;
 }
 

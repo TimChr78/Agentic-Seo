@@ -4,7 +4,7 @@ import { schema } from '@agentic-seo/db';
 import { logger } from '@agentic-seo/telemetry';
 import { and, eq } from 'drizzle-orm';
 import { contentOfRun } from './impact';
-import { loadRun, recordEvent, transition } from './state';
+import { loadRun, recordEvent, settleRollbackOf, transition } from './state';
 import { fetchPageFacts } from './verify-fetch';
 
 // After a deploy is detected, verification re-fetches every affected URL and compares the page the
@@ -21,9 +21,28 @@ export const MAX_VERIFY_ATTEMPTS = 3;
 /** The backoff between verification attempts: a minute, then five. */
 export const VERIFY_RETRY_MS = [60_000, 300_000] as const;
 
+/**
+ * The URL a change is verified against. A redirect change names `from` as a path (that is what the
+ * redirects file holds), so it is resolved against the site's own origin before fetching: asking
+ * the crawler for "/old-page/" would try to fetch a bare path, and the redirect would never be seen.
+ */
+export function verifyUrlOf(change: Change, siteUrl: string): string {
+  if (change.type !== 'redirect') return urlOf(change);
+  try {
+    return new URL(change.from, `${siteUrl.replace(/\/+$/, '')}/`).toString();
+  } catch {
+    return change.from;
+  }
+}
+
 export interface VerifyDeps {
   userAgent?: string;
   now?: () => Date;
+  /**
+   * The URL a redirect source is resolved against, from the site's primary domain. Production uses
+   * `https://<domain>`; a test points it at its fixture site, whose port a domain cannot carry.
+   */
+  siteUrlFor?: (domain: string) => string;
 }
 
 export type VerifyResult =
@@ -70,14 +89,18 @@ export async function runChangesVerify(
       run,
       content,
       hosts: site ? [site.domain, ...site.hosts] : [],
+      domain: site?.domain ?? null,
       attempt: run.verificationAttempts + 1,
     };
   });
   if (!prepared.ok) return { status: 'skipped', reason: prepared.reason };
-  const { content, hosts, attempt } = prepared;
+  const { content, hosts, attempt, domain } = prepared;
+  // Redirect sources are paths in the redirects file; verification needs the site's origin to fetch
+  // them (primary domain, https), while every other change already names an absolute URL.
+  const siteUrl = domain ? (deps.siteUrlFor?.(domain) ?? `https://${domain}`) : null;
 
   // Fetch each distinct URL once; several changes may name one page.
-  const urls = [...new Set(content.changes.map((drafted) => urlOf(drafted.change)))];
+  const urls = [...new Set(content.changes.map((drafted) => (siteUrl ? verifyUrlOf(drafted.change, siteUrl) : urlOf(drafted.change))))];
   const pages = new Map<string, Awaited<ReturnType<typeof fetchPageFacts>>>();
   const failures: FetchOutcome[] = [];
   for (const url of urls) {
@@ -87,11 +110,12 @@ export async function runChangesVerify(
   }
 
   const checks = content.changes.map((drafted: { change: Change; source: { path: string } }, index: number) => {
-    const facts = pages.get(urlOf(drafted.change))!;
+    const url = siteUrl ? verifyUrlOf(drafted.change, siteUrl) : urlOf(drafted.change);
+    const facts = pages.get(url)!;
     const check = checkPageAgainst(drafted.change, facts);
     return {
       index,
-      url: urlOf(drafted.change),
+      url,
       type: drafted.change.type,
       ok: check.ok,
       detail: check.detail,
@@ -101,6 +125,7 @@ export async function runChangesVerify(
         status: facts.status,
         fetchError: facts.fetchError,
         finalUrl: facts.finalUrl,
+        redirects: facts.redirects,
         path: drafted.source.path,
       },
     };
@@ -190,6 +215,9 @@ export async function runChangesVerify(
       set: { verificationAttempts: attempt, lastError: null },
     });
     if (!moved) return { status: 'skipped' as const, reason: 'the change set moved while verifying' };
+    // A rollback change set completes its original only now: proposing it or opening its pull
+    // request changed nothing live, so `rolled_back` means the revert is verified on the site.
+    await settleRollbackOf(tx, moved);
     return { status: 'verified' as const };
   });
 }

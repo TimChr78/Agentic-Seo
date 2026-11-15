@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { ChangeSetContent } from '@agentic-seo/artifacts';
 import { applyChange, type Change, type GitHubClient, GitHubError, sourceHashOf } from '@agentic-seo/changes';
 import type { Db } from '@agentic-seo/db';
@@ -7,7 +8,8 @@ import { logger } from '@agentic-seo/telemetry';
 import { and, eq } from 'drizzle-orm';
 import { activeConnection, clientFor, type GitHubSeam, slugOf } from './connector';
 import { contentOfRun } from './impact';
-import { loadRun, recordEvent, transition } from './state';
+import { describeRevalidation, revalidateChangeSet } from './revalidate';
+import { invalidateApproval, loadRun, recordEvent, transition } from './state';
 
 // Applying an approved change set (ADR-0007): re-read every source at the base branch's current
 // head, refuse when a file moved on since drafting, then write one commit on a branch and open the
@@ -108,18 +110,67 @@ async function branchHeadOrNull(client: GitHubClient, branch: string): Promise<s
   }
 }
 
-/** Whether every file at `ref` already carries the text this change set would write. */
-async function filesMatch(client: GitHubClient, ref: string, texts: Map<string, string>): Promise<boolean> {
-  for (const [path, text] of texts) {
-    try {
-      const file = await client.getFile(path, ref);
-      if (file.content !== text) return false;
-    } catch (error) {
-      if (error instanceof GitHubError && error.code === 'not_found') return false;
-      throw error;
+/** The git object SHA of a text as GitHub stores it, so a tree entry can be compared without a read. */
+export function gitBlobSha(text: string): string {
+  return createHash('sha1')
+    .update(`blob ${Buffer.byteLength(text, 'utf8')}\0`)
+    .update(text, 'utf8')
+    .digest('hex');
+}
+
+export type HeadCheck = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Whether a commit is exactly the commit this apply would create: one parent, the expected base,
+ * and a tree that is the base tree with our file contents at our paths and nothing else changed.
+ *
+ * A retried job must never adopt a branch or pull request that carries anything else — that would
+ * turn "the response was lost" into "someone else's push was approved". A commit that differs in
+ * any path, or whose parent is not the base, is refused; the caller invalidates the approval.
+ */
+export async function headMatchesPlan(
+  client: GitHubClient,
+  headSha: string,
+  baseSha: string,
+  texts: ReadonlyMap<string, string>,
+): Promise<HeadCheck> {
+  const commit = await client.getCommit(headSha);
+  if (commit.parents.length !== 1 || commit.parents[0] !== baseSha) {
+    const parents = commit.parents.length ? commit.parents.join(', ') : 'none';
+    return {
+      ok: false,
+      reason: `its commit ${headSha} has ${commit.parents.length === 1 ? 'the parent' : 'the parents'} ${parents}, and the expected base is ${baseSha}`,
+    };
+  }
+  const [baseTree, headTree] = await Promise.all([client.listTreeEntries(baseSha), client.listTreeEntries(headSha)]);
+  if (baseTree.truncated || headTree.truncated) {
+    return { ok: false, reason: 'GitHub truncated the file list, so the commit’s contents cannot be verified' };
+  }
+  const base = new Map(baseTree.entries.map((entry) => [entry.path, entry.sha]));
+  const head = new Map(headTree.entries.map((entry) => [entry.path, entry.sha]));
+  for (const path of head.keys()) {
+    if (!base.has(path) && !texts.has(path)) {
+      return { ok: false, reason: `it adds ${path}, which this change set does not write` };
     }
   }
-  return true;
+  for (const path of base.keys()) {
+    if (!head.has(path)) {
+      return { ok: false, reason: `it deletes ${path}, which this change set does not touch` };
+    }
+  }
+  for (const [path, text] of texts) {
+    const entry = head.get(path);
+    if (!entry) return { ok: false, reason: `it does not contain ${path}` };
+    if (entry !== gitBlobSha(text)) {
+      return { ok: false, reason: `the contents of ${path} are not the reviewed edit` };
+    }
+  }
+  for (const [path, sha] of base) {
+    if (!texts.has(path) && head.get(path) !== sha) {
+      return { ok: false, reason: `it changes ${path}, which this change set does not touch` };
+    }
+  }
+  return { ok: true };
 }
 
 /**
@@ -232,8 +283,35 @@ export async function runChangesApply(db: Db, payload: { workspaceId: string; ar
     return code === 'stale' ? { status: 'stale', reason, paths: (evidence.paths as string[]) ?? [] } : { status: 'failed', reason };
   };
 
+  /**
+   * Withdraws the approval when GitHub holds something that is not the reviewed change. The version
+   * goes back to a draft, so the remedy is a redraft and a fresh approval, not a retry.
+   */
+  const invalidate = async (reason: string, evidence: Record<string, unknown>): Promise<ApplyResult> => {
+    await db.withWorkspace(payload.workspaceId, async (tx) => {
+      const current = await loadRun(tx, payload.workspaceId, payload.artifactId);
+      if (current.state !== 'applying') return;
+      await invalidateApproval(tx, current, { reason, evidence, at: now() });
+    });
+    return { status: 'skipped', reason };
+  };
+
   try {
     const base = await client.getBranchHead(settings.baseBranch);
+
+    // 0. The stored source details are server-owned. Re-derive them from the base commit before
+    // anything is written: a path, hash or diff the caller forged is not the change a person saw.
+    const problems = await revalidateChangeSet(content, {
+      mapping: settings.mapping,
+      listFiles: async (prefix, ref) => (await client.listTree(ref, prefix)).paths,
+      readFile: async (path, ref) => (await client.getFile(path, ref)).content,
+    });
+    if (problems.length) {
+      return await invalidate(
+        `The stored change set details do not match the repository at the commit it was drafted from: ${describeRevalidation(problems)} Redraft this change set so its paths, hashes and diff are re-derived.`,
+        { problems, baseSha: content.changes[0]?.baseSha ?? null },
+      );
+    }
 
     // 1. Nothing may have moved since drafting: the hash is the proof, not the `before` value.
     const expected = new Map<string, string>();
@@ -296,17 +374,40 @@ export async function runChangesApply(db: Db, payload: { workspaceId: string; ar
     let pr = await client.findPullRequestByHead(branch, { state: 'all' });
 
     if (pr) {
-      // A previous attempt created it and lost the response: adopt, never duplicate.
+      // A previous attempt created it and lost the response. Adopt only when its head is exactly the
+      // commit this run would write; anything else is not what approval covered.
+      const prNumber = pr.number;
+      const check = await headMatchesPlan(client, pr.headSha, base.sha, texts);
+      if (!check.ok) {
+        // The branch name is ours, so the pull request on it is the one this job opened.
+        await client.closePullRequest(prNumber).catch((error: unknown) => {
+          logger.warn({ artifactId: payload.artifactId, prNumber, err: error }, 'could not close the unapproved pull request');
+        });
+        return await invalidate(
+          `The pull request #${prNumber} an earlier attempt opened is not the reviewed change: ${check.reason}. The approval was withdrawn; redraft and approve again.`,
+          { branch, headSha: pr.headSha, approvedHeadSha: applying.approvedHeadSha, baseSha: base.sha, reason: check.reason },
+        );
+      }
       headSha = pr.headSha;
       adopted = true;
     } else {
       const existing = await branchHeadOrNull(client, branch);
-      if (existing) {
-        if (!(await filesMatch(client, existing, texts))) {
-          return await fail(
-            `The branch ${branch} already exists with different contents, so this change set cannot reuse it. Delete the branch or use a new change set.`,
-            'failed',
-            { branch, headSha: existing },
+      if (existing === base.sha) {
+        // The branch was created and the job died before the commit: resume the multi-file commit
+        // from the base (a fast-forward from the base head, never a force-move over other work).
+        const committed = await client.commitFiles({
+          branch,
+          baseSha: base.sha,
+          message: commitMessage,
+          files: [...texts].map(([path, text]) => ({ path, content: text })),
+        });
+        headSha = committed.commitSha;
+      } else if (existing) {
+        const check = await headMatchesPlan(client, existing, base.sha, texts);
+        if (!check.ok) {
+          return await invalidate(
+            `The branch ${branch} an earlier attempt created is not the reviewed change: ${check.reason}. The approval was withdrawn; delete the branch or redraft and approve again.`,
+            { branch, headSha: existing, baseSha: base.sha, reason: check.reason },
           );
         }
         headSha = existing;

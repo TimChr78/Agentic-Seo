@@ -428,6 +428,21 @@ function refuseAgentsFor(ctx: CommandContext, type: string) {
     );
 }
 
+/**
+ * Types whose content carries server-derived fields (a change set's source path, base commit, source
+ * hash and diff). The generic commands would accept a caller's version of those fields, and the
+ * apply worker would then commit content nobody resolved; only the type's own commands, which read
+ * the repository and derive them, may write it.
+ */
+function refuseServerOwned(type: string) {
+  const def = artifactTypes[type as ArtifactType] as { serverOwned?: boolean; label: string } | undefined;
+  if (!def?.serverOwned) return;
+  throw new AppError(
+    'invalid_input',
+    `${def.label} content is built from the repository, so the generic artifact commands cannot write it. Use changes.create to draft one or changes.updateDraft to redraft it.`,
+  );
+}
+
 export const createArtifact = defineCommand({
   name: 'artifacts.create',
   retryOnDeadlock: true,
@@ -452,6 +467,7 @@ export const createArtifact = defineCommand({
   actionClass: 'draft',
   handler: async (input, ctx) => {
     refuseAgentsFor(ctx, input.type);
+    refuseServerOwned(input.type);
     const content = await validateContent(input.type, input.content, 'draft');
     const warnings = contentWarnings(input.type, content);
     const id = newId(artifactTypes[input.type].prefix);
@@ -578,6 +594,7 @@ export const updateDraft = defineCommand({
       .for('update');
     if (!a) throw new AppError('not_found', `Artifact ${input.artifactId} does not exist in this workspace.`);
     refuseAgentsFor(ctx, a.type);
+    refuseServerOwned(a.type);
     const content = await validateContent(a.type as ArtifactType, input.content, 'draft');
     const warnings = contentWarnings(a.type as ArtifactType, content);
     const latest = await loadVersion(ctx, a.id, a.latestVersion);

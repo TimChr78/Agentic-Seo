@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { approve as approvalsApprove, requestPublish } from '@agentic-seo/artifacts';
+import { approve as approvalsApprove, updateDraft as artifactsUpdateDraft, createArtifact, requestPublish } from '@agentic-seo/artifacts';
 import {
   type AgentActionEntry,
   type AnyCommand,
@@ -28,6 +28,7 @@ import {
   githubDisconnect,
   githubStatus,
   runChangesApplyTask,
+  runChangesPoll,
   runChangesPollTask,
   runChangesVerifyTask,
 } from '../src';
@@ -647,7 +648,302 @@ describe.skipIf(!hasTestDatabase())('change sets and the GitHub connector', () =
     expect(own.changes.map((run: { artifactId: string }) => run.artifactId)).toEqual([created.changeSetId]);
   });
 
-  it('rolls back with an exact revert pull request while the files still match the merge', async () => {
+  it('redrafts from the stored wrappers when no changes are supplied', async () => {
+    const created = await call(changesCreate, createBody([titleChange('/about/', 'Old about', 'New about')]));
+
+    // A summary-only update must read each stored wrapper's `.change`, not hand `{ change, … }` to
+    // the editors.
+    const summaryOnly = await call(changesUpdateDraft, {
+      changeSetId: created.changeSetId,
+      summary: 'A clearer summary of the same edit.',
+    });
+    expect(summaryOnly.created).toBe(true);
+    expect(summaryOnly.changes.map((change: { type: string }) => change.type)).toEqual(['meta.title']);
+
+    // The default redraft (no fields at all) uses the latest draft's changes.
+    const defaultRedraft = await call(changesUpdateDraft, { changeSetId: created.changeSetId });
+    expect(defaultRedraft).toMatchObject({ created: true, version: 1 });
+    expect(defaultRedraft.changes).toHaveLength(1);
+    const stored = await call(changesGet, { changeSetId: created.changeSetId });
+    expect((stored.content as { summary: string }).summary).toBe('A clearer summary of the same edit.');
+  });
+
+  it('refuses change-set content through the generic artifact commands and re-derives it at approval', async () => {
+    const forged = {
+      connector: 'github',
+      title: 'Forged',
+      summary: 'Written around the drafting commands.',
+      changes: [
+        {
+          change: { type: 'meta.title', url: 'https://example.com/about/', before: 'Old about', after: 'Forged about' },
+          source: { path: 'contact/index.html', editor: 'html', confidence: 'exact', affectedRoutes: ['/about/'] },
+          baseSha: 'a'.repeat(40),
+          sourceHash: 'b'.repeat(64),
+          diff: { path: 'contact/index.html', status: 'modified', unified: '--- a\n+++ b\n', additions: 1, deletions: 1 },
+        },
+      ],
+      verificationPlan: 'None.',
+      rollbackPlan: 'None.',
+    };
+    await expect(call(createArtifact, { type: 'change_set', name: 'Forged', siteId, content: forged })).rejects.toThrow(/changes\.create/);
+
+    const created = await call(changesCreate, createBody([titleChange('/about/', 'Old about', 'New about')]));
+    await expect(call(artifactsUpdateDraft, { artifactId: created.changeSetId, content: forged })).rejects.toThrow(/changes\.updateDraft/);
+
+    // Even a direct database write is caught: approval re-derives the path from the mapping.
+    const stored = (await call(changesGet, { changeSetId: created.changeSetId })).content;
+    const tampered = JSON.parse(JSON.stringify(stored)) as { changes: { source: { path: string } }[] };
+    tampered.changes[0]!.source.path = 'contact/index.html';
+    await db.admin.query('UPDATE artifact_versions SET content = $3::jsonb WHERE workspace_id = $1 AND artifact_id = $2 AND number = 1', [
+      workspace,
+      created.changeSetId,
+      JSON.stringify(tampered),
+    ]);
+    await expect(call(changesRequestApply, { changeSetId: created.changeSetId, note: 'Forged.' })).rejects.toThrow(
+      /do not match the repository/,
+    );
+    expect(github.pullRequests).toHaveLength(0);
+  });
+
+  it('re-derives the stored diff again in the apply worker', async () => {
+    const created = await call(changesCreate, createBody([titleChange('/about/', 'Old about', 'New about')]));
+    const submitted = await call(changesRequestApply, { changeSetId: created.changeSetId, note: 'Apply.' });
+    await call(approvalsApprove, { approvalId: submitted.approvalId }, personB);
+
+    const stored = (await call(changesGet, { changeSetId: created.changeSetId })).content;
+    const tampered = JSON.parse(JSON.stringify(stored)) as { changes: { diff: { unified: string } }[] };
+    tampered.changes[0]!.diff.unified = '--- a/about/index.html\n+++ b/about/index.html\n@@ forged @@\n';
+    await db.admin.query('UPDATE artifact_versions SET content = $3::jsonb WHERE workspace_id = $1 AND artifact_id = $2 AND number = 1', [
+      workspace,
+      created.changeSetId,
+      JSON.stringify(tampered),
+    ]);
+
+    await drain();
+    const status = await call(changesStatus, { changeSetId: created.changeSetId });
+    expect(status.run.state).toBe('in_review');
+    expect(status.run.approvedVersion).toBeNull();
+    expect(status.run.lastError).toMatch(/do not match the repository/);
+    expect(github.pullRequests).toHaveLength(0);
+  });
+
+  it('adopts a pull request only when its commit is exactly the reviewed change', async () => {
+    const created = await call(changesCreate, createBody([titleChange('/about/', 'Old about', 'New about')]));
+    const submitted = await call(changesRequestApply, { changeSetId: created.changeSetId, note: 'Apply.' });
+    await call(approvalsApprove, { approvalId: submitted.approvalId }, personB);
+
+    github.timeoutNextPullRequest = true;
+    const pending = jobs.splice(0);
+    expect(pending.map((job) => job.identifier)).toEqual([CHANGES_APPLY_TASK]);
+    await expect(runChangesApplyTask(db, pending[0]!.payload, deps())).rejects.toThrow(/did not answer|could not be reached|GitHub/i);
+    expect(github.pullRequests).toHaveLength(1);
+
+    // A push before the retry: different parent, a different edit and an extra file. The retry must
+    // not adopt this as the reviewed change.
+    const branch = `aseo/${created.changeSetId}-v1`;
+    github.pushToBranch(branch, { 'about/index.html': pageHtml('Sneaky about'), 'sneaky.txt': 'not reviewed' });
+    await runChangesApplyTask(db, pending[0]!.payload, deps());
+
+    const status = await call(changesStatus, { changeSetId: created.changeSetId });
+    expect(status.run.state).toBe('in_review');
+    expect(status.run.approvedVersion).toBeNull();
+    expect(status.run.approvedHeadSha).toBeNull();
+    expect(status.run.lastError).toMatch(/not the reviewed change/);
+    expect(status.events.at(-1)?.reason).toMatch(/not the reviewed change/);
+    expect(status.events.at(-1)?.evidence).toMatchObject({ branch, baseSha: github.headOf(DEFAULT_BRANCH) ?? expect.any(String) });
+    // The pull request Agentic SEO opened on its own branch is closed; no second one exists.
+    expect(github.pullRequests).toHaveLength(1);
+    expect(github.pullRequests[0]!.state).toBe('closed');
+  });
+
+  it('resumes an interrupted commit sequence after the branch and a blob were created', async () => {
+    const created = await call(changesCreate, createBody([titleChange('/about/', 'Old about', 'New about')]));
+    const submitted = await call(changesRequestApply, { changeSetId: created.changeSetId, note: 'Apply.' });
+    await call(approvalsApprove, { approvalId: submitted.approvalId }, personB);
+    const pending = jobs.splice(0);
+    expect(pending.map((job) => job.identifier)).toEqual([CHANGES_APPLY_TASK]);
+
+    const branch = `aseo/${created.changeSetId}-v1`;
+    const baseSha = github.headOf(DEFAULT_BRANCH)!;
+    // The first attempt created the branch, then died before its commit.
+    github.branches.set(branch, baseSha);
+    // A blob for the new file exists from an interrupted blob upload; the retry recreates or reuses it.
+    github.putBlob(pageHtml('New about', 'Old description'));
+
+    await runChangesApplyTask(db, pending[0]!.payload, deps());
+    const status = await call(changesStatus, { changeSetId: created.changeSetId });
+    expect(status.run.state).toBe('pr_open');
+    expect(github.pullRequests).toHaveLength(1);
+    expect(github.pullRequests[0]!.head).toBe(branch);
+    expect(github.filesAt(branch)?.get('about/index.html')).toContain('<title>New about</title>');
+  });
+
+  it('fails a pull request merged with commits that were not approved, before any deploy', async () => {
+    const { changeSetId, prNumber, branch } = await openPullRequest();
+    github.pushToBranch(branch, { 'about/index.html': pageHtml('Pushed then merged') });
+    const mergeSha = github.merge(prNumber);
+    site.setPage('/about/', pageHtml('Pushed then merged', 'Old description'));
+    site.setVersion(mergeSha);
+
+    await poll();
+    const status = await call(changesStatus, { changeSetId });
+    expect(status.run.state).toBe('failed');
+    expect(status.run.deployedSha).toBeNull();
+    expect(status.run.lastError).toMatch(/merged with commits that were not approved/);
+    expect(status.events.at(-1)).toMatchObject({ fromState: 'pr_open', toState: 'failed' });
+    expect(status.events.at(-1)?.evidence).toMatchObject({ approvedHeadSha: expect.any(String), mergedHeadSha: github.headOf(branch) });
+    // A merged change nobody approved is not verified.
+    expect(jobs.filter((job) => job.identifier === CHANGES_VERIFY_TASK)).toHaveLength(0);
+  });
+
+  it('counts an unknown deploy detector result toward the deploy timeout', async () => {
+    const { changeSetId, prNumber } = await openPullRequest();
+    github.merge(prNumber);
+    // No version file: the detector cannot tell, which must not extend the window forever.
+    site.setVersion(null);
+
+    await poll();
+    expect((await call(changesStatus, { changeSetId })).run.state).toBe('deploying');
+
+    await poll({ now: () => new Date(Date.now() + 49 * 3_600_000) });
+    const failed = await call(changesStatus, { changeSetId });
+    expect(failed.run.state).toBe('deploy_not_detected');
+    expect(failed.run.lastError).toMatch(/still does not show it after 48 hours/);
+    expect(failed.run.lastError).toMatch(/answered 404/);
+    expect(failed.events.at(-1)?.evidence).toMatchObject({ detectorState: 'unknown', deployTimeoutHours: 48 });
+  });
+
+  it('judges the redrafted version, not the previously published one, when the policy runs', async () => {
+    const agentId = 'agt_redraft_policy';
+    await db.admin.query(`INSERT INTO agents (workspace_id, id, name, sponsor_user_id) VALUES ($1, $2, 'Redrafter', 'sponsor')`, [
+      workspace,
+      agentId,
+    ]);
+    const agent = agentPrincipal(
+      { id: agentId, name: 'Redrafter', status: 'active', statusReason: null },
+      personA.userId,
+      'client_redraft',
+      workspace,
+      'editor',
+      ['artifacts:write', 'sites:read', 'changes:apply'],
+    );
+
+    // Version 1 was a content change, published, and then went stale.
+    const created = await call(changesCreate, createBody([titleChange('/about/', 'Old about', 'New about')]));
+    const submitted = await call(changesRequestApply, { changeSetId: created.changeSetId, note: 'First version.' });
+    await call(approvalsApprove, { approvalId: submitted.approvalId }, personB);
+    github.pushToBranch(DEFAULT_BRANCH, { 'about/index.html': pageHtml('Moved on') });
+    await drain();
+    expect((await call(changesStatus, { changeSetId: created.changeSetId })).run.state).toBe('stale');
+
+    // Level 3 for content, nothing for structural: the redrafted redirect must be judged structural.
+    mandate = { levels: { draft: 3, 'site.content': 3 } };
+    executor = createExecutor(db, services());
+    const redrafted = await call(
+      changesUpdateDraft,
+      {
+        changeSetId: created.changeSetId,
+        changes: [{ type: 'redirect', from: '/retired/', to: '/about/', status: 301, operation: 'add' }],
+      },
+      agent,
+    );
+    expect(redrafted).toMatchObject({ created: true, version: 2 });
+
+    const resubmitted = await call(changesRequestApply, { changeSetId: created.changeSetId, note: 'Structural now.' }, agent);
+    expect(resubmitted.actionClass).toBe('site.structural');
+    expect(resubmitted.status).toBe('in_review');
+    expect(ledger.at(-1)).toMatchObject({ command: 'changes.requestApply', actionClass: 'site.structural' });
+  });
+
+  it('verifies a redirect by fetching its path on the site origin and checking the Location', async () => {
+    const created = await call(
+      changesCreate,
+      createBody([{ type: 'redirect', from: '/retired/', to: '/about/', status: 301, operation: 'add' }], {
+        title: 'Retire a page',
+      }),
+    );
+    expect(created.created).toBe(true);
+    const submitted = await call(changesRequestApply, { changeSetId: created.changeSetId, note: 'Retire it.' });
+    await call(approvalsApprove, { approvalId: submitted.approvalId }, personB);
+    await drain();
+    const open = await call(changesStatus, { changeSetId: created.changeSetId });
+    expect(open.run.state).toBe('pr_open');
+
+    const pr = github.pullRequests[0]!;
+    expect(github.filesAt(pr.head)?.get('_redirects')).toContain('/retired/');
+    const mergeSha = github.merge(pr.number);
+    site.setRedirect('/retired/', '/about/', 301);
+    site.setVersion(mergeSha);
+
+    await poll();
+    await drain();
+    const verified = await call(changesStatus, { changeSetId: created.changeSetId });
+    expect(verified.run.state).toBe('verified');
+    expect(verified.verification.results[0]).toMatchObject({ url: `${site.origin}/retired/`, result: 'pass' });
+    expect(verified.verification.results[0]?.detail).toContain('301');
+  });
+
+  it('queues the apply and verification jobs inside the transaction that makes them due', async () => {
+    await installGraphileStub();
+    try {
+      const created = await call(changesCreate, createBody([titleChange('/about/', 'Old about', 'New about')]));
+      const submitted = await call(changesRequestApply, { changeSetId: created.changeSetId, note: 'Apply.' });
+      await call(approvalsApprove, { approvalId: submitted.approvalId }, personB);
+
+      // The publish hook queued durably: no helper job was used.
+      expect(jobs).toHaveLength(0);
+      const { rows: applyRows } = await db.admin.query<{ payload: { artifactId: string } }>(
+        'SELECT payload FROM graphile_worker.jobs WHERE identifier = $1',
+        [CHANGES_APPLY_TASK],
+      );
+      expect(applyRows).toHaveLength(1);
+      expect(applyRows[0]!.payload.artifactId).toBe(created.changeSetId);
+
+      await runChangesApplyTask(db, applyRows[0]!.payload, deps());
+      const pr = github.pullRequests[0]!;
+      const mergeSha = github.merge(pr.number);
+      site.setPage('/about/', pageHtml('New about', 'Old description'));
+      site.setVersion(mergeSha);
+
+      await poll();
+      const { rows: verifyRows } = await db.admin.query<{ payload: { artifactId: string } }>(
+        'SELECT payload FROM graphile_worker.jobs WHERE identifier = $1',
+        [CHANGES_VERIFY_TASK],
+      );
+      expect(verifyRows).toHaveLength(1);
+      expect(verifyRows[0]!.payload.artifactId).toBe(created.changeSetId);
+
+      await runChangesVerifyTask(db, verifyRows[0]!.payload, deps());
+      expect((await call(changesStatus, { changeSetId: created.changeSetId })).run.state).toBe('verified');
+    } finally {
+      await dropGraphileStub();
+    }
+  });
+
+  it('queues a deployed change set’s verification again when it was lost', async () => {
+    const { changeSetId, prNumber } = await openPullRequest();
+    const mergeSha = github.merge(prNumber);
+    site.setPage('/about/', pageHtml('New about', 'Old description'));
+    site.setVersion(mergeSha);
+
+    // The deploy is detected, but there is no queue: the verification job is lost.
+    await runChangesPollTask(db, { kp, github: github.seam, siteUrlFor: () => site.origin });
+    expect((await call(changesStatus, { changeSetId })).run.state).toBe('deployed');
+    expect(jobs).toHaveLength(0);
+
+    await db.admin.query(
+      `UPDATE change_set_runs SET deployed_at = now() - interval '20 minutes' WHERE workspace_id = $1 AND artifact_id = $2`,
+      [workspace, changeSetId],
+    );
+    const summary = await runChangesPoll(db, deps());
+    expect(summary.requeued).toBe(1);
+    expect(jobs.map((job) => job.identifier)).toContain(CHANGES_VERIFY_TASK);
+
+    await drain();
+    expect((await call(changesStatus, { changeSetId })).run.state).toBe('verified');
+  });
+
+  it('rolls back by proposing a draft change set only, and completes the original when it is verified', async () => {
     const { changeSetId, prNumber } = await openPullRequest();
     const mergeSha = github.merge(prNumber);
     site.setPage('/about/', pageHtml('New about', 'Old description'));
@@ -656,27 +952,47 @@ describe.skipIf(!hasTestDatabase())('change sets and the GitHub connector', () =
     await drain();
     expect((await call(changesStatus, { changeSetId })).run.state).toBe('verified');
 
+    const pullRequestsBefore = github.pullRequests.length;
     const rollback = await call(changesRollback, { changeSetId, note: 'The title tested badly.' });
-    expect(rollback.mode).toBe('revert_pr');
-    expect(rollback.prNumber).not.toBeNull();
-    expect(github.pullRequests).toHaveLength(2);
-    const revert = github.pullRequests[1]!;
-    expect(revert.title).toMatch(/^Revert: /);
-    // The revert restores the file exactly as it was before the merge.
-    expect(github.filesAt(revert.head)?.get('about/index.html')).toContain('<title>Old about</title>');
-    expect((await call(changesStatus, { changeSetId })).run.state).toBe('rolled_back');
+    expect(rollback).toMatchObject({ mode: 'exact', filesUnchanged: true, actionClass: 'site.content' });
+    // The command itself makes no GitHub write: only the approved apply worker opens the PR.
+    expect(github.pullRequests).toHaveLength(pullRequestsBefore);
+    const originalAfterProposal = await call(changesStatus, { changeSetId });
+    expect(originalAfterProposal.run.state).toBe('verified');
+    expect(originalAfterProposal.run.rollbackChangeSetId).toBe(rollback.changeSetId);
+    const proposal = await call(changesStatus, { changeSetId: rollback.changeSetId });
+    expect(proposal.run).toMatchObject({ state: 'draft', rollbackOf: changeSetId });
 
-    // Approving the rollback adopts the revert pull request rather than opening a second one.
-    const rollbackStatus = await call(changesStatus, { changeSetId: rollback.changeSetId });
-    expect(rollbackStatus.run.state).toBe('in_review');
-    await call(approvalsApprove, { approvalId: rollback.approvalId }, personB);
+    // A second proposal while one is open is refused; abandoning the first allows another.
+    await expect(call(changesRollback, { changeSetId, note: 'Again.' })).rejects.toThrow(/already a rollback/);
+    await db.admin.query(`UPDATE change_set_runs SET state = 'closed' WHERE workspace_id = $1 AND artifact_id = $2`, [
+      workspace,
+      rollback.changeSetId,
+    ]);
+    const second = await call(changesRollback, { changeSetId, note: 'Second proposal.' });
+    expect(second.changeSetId).not.toBe(rollback.changeSetId);
+    expect((await call(changesStatus, { changeSetId })).run.state).toBe('verified');
+
+    // Completing the rollback through approval, merge, deploy and verification rolls the original back.
+    const submitted = await call(changesRequestApply, { changeSetId: second.changeSetId, note: 'Roll it back.' });
+    expect(submitted.status).toBe('in_review');
+    await call(approvalsApprove, { approvalId: submitted.approvalId }, personB);
     await drain();
-    expect(github.pullRequests).toHaveLength(2);
-    const adopted = await call(changesStatus, { changeSetId: rollback.changeSetId });
-    expect(adopted.run).toMatchObject({ state: 'pr_open', prNumber: revert.number, rollbackOf: changeSetId });
+    const opened = await call(changesStatus, { changeSetId: second.changeSetId });
+    expect(opened.run.state).toBe('pr_open');
+    const rollbackPr = github.pullRequests.find((candidate) => candidate.head === opened.run.branch)!;
+    expect(github.filesAt(rollbackPr.head)?.get('about/index.html')).toContain('<title>Old about</title>');
+    const rollbackMerge = github.merge(rollbackPr.number);
+    site.setPage('/about/', pageHtml('Old about', 'Old description'));
+    site.setVersion(rollbackMerge);
+    await poll();
+    await drain();
+
+    expect((await call(changesStatus, { changeSetId: second.changeSetId })).run.state).toBe('verified');
+    expect((await call(changesStatus, { changeSetId })).run.state).toBe('rolled_back');
   });
 
-  it('proposes a draft rollback instead of a revert when a file changed after the merge', async () => {
+  it('proposes a draft rollback when a file changed after the merge', async () => {
     const { changeSetId, prNumber } = await openPullRequest();
     const mergeSha = github.merge(prNumber);
     site.setPage('/about/', pageHtml('New about', 'Old description'));
@@ -688,14 +1004,45 @@ describe.skipIf(!hasTestDatabase())('change sets and the GitHub connector', () =
     github.pushToBranch(DEFAULT_BRANCH, { 'about/index.html': pageHtml('Even newer about') });
 
     const rollback = await call(changesRollback, { changeSetId, note: 'Roll it back.' });
-    expect(rollback.mode).toBe('proposed');
-    expect(rollback.prNumber).toBeNull();
+    expect(rollback).toMatchObject({ mode: 'proposed', filesUnchanged: false });
     expect(rollback.reason).toContain('about/index.html');
     expect(github.pullRequests).toHaveLength(1);
+    expect((await call(changesStatus, { changeSetId })).run.state).toBe('verified');
 
     const proposed = await call(changesStatus, { changeSetId: rollback.changeSetId });
     expect(proposed.run).toMatchObject({ state: 'draft', rollbackOf: changeSetId });
     const content = await call(changesGet, { changeSetId: rollback.changeSetId });
-    expect(JSON.stringify(content.changes)).toContain('Even newer about');
+    expect(JSON.stringify(content.content)).toContain('Even newer about');
   });
+
+  /** A throwaway Graphile schema, so a test can see a transactionally queued job without the worker. */
+  async function installGraphileStub(): Promise<void> {
+    await db.admin.query('CREATE SCHEMA IF NOT EXISTS graphile_worker');
+    await db.admin.query(
+      `CREATE TABLE IF NOT EXISTS graphile_worker.jobs (
+         id bigserial PRIMARY KEY,
+         identifier text NOT NULL,
+         payload jsonb NOT NULL,
+         run_at timestamptz NOT NULL DEFAULT now(),
+         job_key text,
+         created_at timestamptz NOT NULL DEFAULT now()
+       )`,
+    );
+    await db.admin.query(
+      `CREATE OR REPLACE FUNCTION graphile_worker.add_job(
+         identifier text,
+         payload jsonb,
+         run_at timestamptz DEFAULT now(),
+         job_key text DEFAULT NULL,
+         job_key_mode text DEFAULT 'replace'
+       ) RETURNS void LANGUAGE sql AS $$
+         INSERT INTO graphile_worker.jobs (identifier, payload, run_at, job_key)
+         VALUES (identifier, payload, run_at, job_key)
+       $$`,
+    );
+  }
+
+  async function dropGraphileStub(): Promise<void> {
+    await db.admin.query('DROP SCHEMA IF EXISTS graphile_worker CASCADE');
+  }
 });

@@ -50,7 +50,12 @@ export interface FakePullRequest {
   baseSha: string;
 }
 
-const blobSha = (content: string) => createHash('sha1').update(content).digest('hex');
+/** The git object SHA GitHub reports for a blob: sha1("blob <bytes>\0" + content). */
+const blobSha = (content: string) =>
+  createHash('sha1')
+    .update(`blob ${Buffer.byteLength(content, 'utf8')}\0`)
+    .update(content, 'utf8')
+    .digest('hex');
 
 /** A local GitHub REST server with an in-memory repository. */
 export class FakeGitHub {
@@ -159,6 +164,13 @@ export class FakeGitHub {
     this.commits.set(sha, { tree, files: copy, parents: [parent], message: 'push' });
     this.branches.set(branch, sha);
     for (const pr of this.pullRequests) if (pr.head === branch) pr.headSha = sha;
+    return sha;
+  }
+
+  /** Stores a blob as an interrupted commit sequence would have left it, and returns its SHA. */
+  putBlob(content: string): string {
+    const sha = blobSha(content);
+    this.blobs.set(sha, content);
     return sha;
   }
 
@@ -337,7 +349,10 @@ export class FakeGitHub {
         this.json(response, 404, { message: 'Not Found' });
         return DONE;
       }
-      this.json(response, 200, { truncated: false, tree: [...files.keys()].map((path) => ({ path, type: 'blob' })) });
+      this.json(response, 200, {
+        truncated: false,
+        tree: [...files].map(([path, content]) => ({ path, type: 'blob', sha: blobSha(content) })),
+      });
       return DONE;
     }
     if (rest[0] === 'pulls' && method === 'POST') {
@@ -457,6 +472,8 @@ export interface SiteFixture {
   readonly allow: { privateHosts: string[]; ports: number[] };
   readonly resolver: (hostname: string) => Promise<ReadonlyArray<ResolvedAddress>>;
   setPage(path: string, html: string, status?: number): void;
+  /** A redirecting route, as the deployed site serves it: status and Location. */
+  setRedirect(from: string, to: string, status?: 301 | 302 | 307 | 308): void;
   /** What the build writes: the deployed commit's SHA on the first line. */
   setVersion(sha: string | null): void;
   close(): Promise<void>;
@@ -502,6 +519,7 @@ export async function startSiteFixture(): Promise<SiteFixture> {
       throw error;
     },
     setPage: (path, html, status = 200) => pages.set(path, { body: html, status, headers: {} }),
+    setRedirect: (from, to, status = 301) => pages.set(from, { body: '', status, headers: { location: to } }),
     setVersion: (sha) => {
       version = sha;
     },

@@ -84,6 +84,7 @@ export async function runChangesVerifyTask(db: Db, raw: unknown, deps: ChangeSet
   const result = await runChangesVerify(db, payload, {
     ...(deps.userAgent ? { userAgent: deps.userAgent } : {}),
     ...(deps.now ? { now: deps.now } : {}),
+    ...(deps.siteUrlFor ? { siteUrlFor: deps.siteUrlFor } : {}),
   });
   if (result.status === 'retry') {
     if (deps.enqueue) {

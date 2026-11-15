@@ -1,5 +1,6 @@
 import { publishHooks } from '@agentic-seo/artifacts';
 import { logger } from '@agentic-seo/telemetry';
+import { type ChangeSetJobPayload, enqueueChangeSetJob } from './enqueue';
 import { actorOf, findRun, transition } from './state';
 import { CHANGES_APPLY_TASK } from './tasks';
 
@@ -36,12 +37,18 @@ export function registerChangeSetPublishHook(): void {
       logger.warn({ artifactId: artifact.id, version }, 'a change set was published but its run row moved at the same time');
       return;
     }
+    const payload: ChangeSetJobPayload = { workspaceId: artifact.workspaceId, artifactId: artifact.id, siteId: moved.siteId };
+    // Durable first: the job is inserted in this transaction, so the commit and the job cannot
+    // disagree. When Graphile's schema is absent the wrapper returns false and the helper (called
+    // after commit) is the fallback; the poller reconciles an `approved` row either way.
+    const durable = await enqueueChangeSetJob(ctx.tx, CHANGES_APPLY_TASK, payload);
+    if (durable) return;
     const enqueue = ctx.services.enqueueTask;
-    const payload = { workspaceId: artifact.workspaceId, artifactId: artifact.id };
     if (!enqueue) {
-      // Without a queue the change set waits in `approved`, which `changes.status` reports. Every
-      // server wires jobs, so this is a misconfigured install rather than a normal path.
-      logger.warn({ artifactId: artifact.id }, 'no background queue is configured; the approved change set will not be applied');
+      // Without a queue the change set waits in `approved`, which `changes.status` reports and the
+      // poller's reconciliation queues once a queue exists. Every server wires jobs, so this is a
+      // misconfigured install rather than a normal path.
+      logger.warn({ artifactId: artifact.id }, 'no background queue is configured; the approved change set will wait for reconciliation');
       return;
     }
     const job = () => enqueue(CHANGES_APPLY_TASK, payload);

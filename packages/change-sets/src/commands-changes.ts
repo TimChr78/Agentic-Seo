@@ -3,12 +3,13 @@ import { type Change, ChangeSchema, renderDiff, urlOf } from '@agentic-seo/chang
 import { type CommandContext, defineCommand } from '@agentic-seo/commands';
 import { AppError, hashValue, newId } from '@agentic-seo/core';
 import { schema, type Tx } from '@agentic-seo/db';
-import { and, count, eq, sql } from 'drizzle-orm';
+import { and, count, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { activeConnection, commandClient, type GitHubConnection, githubAppError, slugOf } from './connector';
 import { draftChanges, inverseOf } from './draft';
 import { changeSetImpact, contentOfRun, sourcePathsOf } from './impact';
-import { actorOf, type ChangeSetRun, eventsOf, findRun, latestVerifications, loadRun, recordEvent, transition } from './state';
+import { describeRevalidation, revalidateChangeSet } from './revalidate';
+import { actorOf, type ChangeSetRun, eventsOf, findRun, latestVerifications, loadRun, OPEN_STATES, recordEvent, transition } from './state';
 
 const ChangeSetId = z.string().regex(/^chg_[0-9a-f]{32}$/, 'A change set id: chg_ followed by 32 hex characters');
 const SiteId = z.string().uuid().describe('Site id');
@@ -75,6 +76,7 @@ const RunView = z.object({
   mergeCommitSha: z.string().nullable(),
   deployedSha: z.string().nullable(),
   rollbackOf: z.string().nullable(),
+  rollbackChangeSetId: z.string().nullable(),
   verificationAttempts: z.number().int(),
   lastError: z.string().nullable(),
   stateChangedAt: z.string(),
@@ -141,6 +143,7 @@ function runView(run: ChangeSetRun): z.output<typeof RunView> {
     mergeCommitSha: run.mergeCommitSha,
     deployedSha: run.deployedSha,
     rollbackOf: run.rollbackOf,
+    rollbackChangeSetId: run.rollbackChangeSetId,
     verificationAttempts: run.verificationAttempts,
     lastError: run.lastError,
     stateChangedAt: run.stateChangedAt.toISOString(),
@@ -211,6 +214,40 @@ interface DraftInput {
   rollbackOf?: string;
 }
 
+/**
+ * Re-derives every server-owned field of a stored change set from the repository at the commit it
+ * was drafted from. Approval and the apply worker both run this: the generic artifact commands
+ * cannot write these fields, but a database write or an older client must still not be able to
+ * smuggle a path, hash or diff past the reviewer.
+ */
+async function revalidationProblems(
+  ctx: CommandContext,
+  input: { siteId: string; siteName: string; content: Parameters<typeof revalidateChangeSet>[0] },
+) {
+  const connection = await activeConnection(ctx.tx, {
+    workspaceId: ctx.principal.workspaceId,
+    siteId: input.siteId,
+    kp: ctx.services.keyProvider,
+    siteName: `“${input.siteName}”`,
+  });
+  const client = await commandClient(ctx, connection);
+  return revalidateChangeSet(input.content, {
+    mapping: connection.settings.mapping,
+    listFiles: async (prefix, ref) =>
+      (
+        await client.listTree(ref, prefix).catch((error: unknown) => {
+          throw githubAppError(error);
+        })
+      ).paths,
+    readFile: async (path, ref) =>
+      (
+        await client.getFile(path, ref).catch((error: unknown) => {
+          throw githubAppError(error);
+        })
+      ).content,
+  });
+}
+
 /** Resolves and applies every change; the content is only built when something can be written. */
 async function draftFor(ctx: CommandContext, input: DraftInput) {
   const drafting = await draftingContext(ctx, input.siteId, input.siteName);
@@ -269,6 +306,24 @@ const nextFor = (created: boolean, refusals: number): string =>
     : refusals > 0
       ? 'Every refusal above is per change: fix it and draft again, or pass allowPartial to keep the changes that can be applied.'
       : 'Nothing could be drafted; check the source mapping with connectors.github.status.';
+
+/**
+ * The changes stored in a version. Drafted versions store each change as a wrapper with its source,
+ * base commit, hash and diff ({ change, source, … }); a redraft without new changes must read the
+ * `.change` out of those wrappers, not hand the wrapper to the editor. Plain changes are accepted
+ * too, so a version written by a test or an import still redrafts.
+ */
+function storedChanges(content: Record<string, unknown>): Change[] | undefined {
+  const raw = content.changes;
+  if (!Array.isArray(raw)) return undefined;
+  const changes: Change[] = [];
+  for (const entry of raw) {
+    const candidate = typeof entry === 'object' && entry !== null && 'change' in entry ? (entry as { change: unknown }).change : entry;
+    const parsed = ChangeSchema.safeParse(candidate);
+    if (parsed.success) changes.push(parsed.data);
+  }
+  return changes.length ? changes : undefined;
+}
 
 export const changesCreate = defineCommand({
   name: 'changes.create',
@@ -442,7 +497,7 @@ export const changesUpdateDraft = defineCommand({
     const parsed = previous ? z.record(z.string(), z.unknown()).safeParse(previous.content) : null;
     const old = parsed?.success ? parsed.data : {};
     const site = await loadSite(ctx.tx, ws, artifact.siteId);
-    const changes = input.changes ?? (old.changes as Change[] | undefined);
+    const changes = input.changes ?? storedChanges(old);
     if (!changes?.length) throw new AppError('invalid_input', 'This change set has no changes to redraft; pass them explicitly.');
     const recommendationId = input.recommendationId ?? (old.recommendationId as string | undefined);
     const { draft, content } = await draftFor(ctx, {
@@ -800,8 +855,16 @@ export const changesRequestApply = defineCommand({
   approvable: true,
   target: (input) => input.changeSetId,
   impact: async (input, ctx) => {
+    // Lock the artifact row before policy: a concurrent redraft must not change the version the
+    // policy judges while the handler reads it. The version is passed explicitly below, because the
+    // run's approved version is the previous one after a redraft, and the handler publishes latest.
+    await lockArtifacts(ctx, [input.changeSetId]);
     const run = await getRun(ctx, input.changeSetId);
-    const content = await contentOfRun(ctx.tx, run);
+    const [artifact] = await ctx.tx
+      .select({ latestVersion: schema.artifacts.latestVersion })
+      .from(schema.artifacts)
+      .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), eq(schema.artifacts.id, input.changeSetId)));
+    const content = artifact ? await contentOfRun(ctx.tx, run, artifact.latestVersion) : null;
     if (!content) return { actionClass: 'draft', reach: { kind: 'unknown', reason: 'The change set content is not readable.' } };
     const impact = await changeSetImpact(ctx.tx, {
       workspaceId: ctx.principal.workspaceId,
@@ -858,8 +921,18 @@ export const changesRequestApply = defineCommand({
         `Version ${version.number} is ${version.state.replace('_', ' ')}, not a draft. Redraft it with changes.updateDraft first.`,
       );
     }
-    const content = await contentOfRun(ctx.tx, { ...run, approvedVersion: version.number });
+    const content = await contentOfRun(ctx.tx, run, version.number);
     if (!content) throw new AppError('invalid_input', 'The change set content is not readable; redraft it with changes.updateDraft.');
+    // The source details are server-owned: re-derive them from the repository at the commit this
+    // version was drafted from. A forged path, hash or diff never reaches a policy decision or an
+    // approval request.
+    const problems = await revalidationProblems(ctx, { siteId: run.siteId, siteName: site.name, content });
+    if (problems.length) {
+      throw new AppError(
+        'precondition_failed',
+        `This change set’s stored source details do not match the repository at its base commit: ${describeRevalidation(problems)} Redraft it with changes.updateDraft so the paths, hashes and diff are derived again.`,
+      );
+    }
     const impact = await changeSetImpact(ctx.tx, {
       workspaceId: ws,
       siteId: run.siteId,
@@ -956,19 +1029,19 @@ export const changesRequestApply = defineCommand({
 
 export const changesRollback = defineCommand({
   name: 'changes.rollback',
-  title: 'Roll back a change set',
+  title: 'Propose a rollback',
   description:
-    'Reverses an applied change set. When every file it touched still matches the merge commit, it opens a revert pull request from the merge commit’s parent and records the rollback as a new change set that goes through approval; when a file changed since, the revert becomes a proposed draft with the inverse edits instead, and says which files moved. Refused before the change set was merged. Free.',
+    'Creates a new draft change set that reverses an applied change set. When every touched file still matches the merge commit the inverse edits are exact; when later edits landed they are drafted against the current files and the files that moved are named. The rollback is a change set like any other: nothing is written to GitHub here, its pull request opens only after a person approves it, and the original becomes rolled_back only when the rollback is verified. Refused before the change set was merged, and refuses a second open rollback while one is still in flight. Free.',
   input: z.object({
     changeSetId: ChangeSetId,
     note: z.string().min(1).max(1000).describe('Why this is being rolled back, for the reviewer'),
   }),
   output: z.object({
-    mode: z.enum(['revert_pr', 'proposed']),
-    changeSetId: z.string().describe('The new rollback change set'),
-    approvalId: z.string().nullable(),
-    prNumber: z.number().int().nullable(),
-    prUrl: z.string().nullable(),
+    changeSetId: z.string().describe('The new draft rollback change set'),
+    mode: z.enum(['exact', 'proposed']).describe('exact: every touched file still matches the merge; proposed: later edits landed'),
+    filesUnchanged: z.boolean(),
+    actionClass: z.string().describe('The class the rollback inherits from the original change set'),
+    reach: ReachView.describe('The traffic at risk, from the original change set’s affected URLs'),
     reason: z.string(),
     skipped: z.array(z.object({ index: z.number().int(), reason: z.string() })),
     next: z.string(),
@@ -976,7 +1049,6 @@ export const changesRollback = defineCommand({
   permission: 'changes:apply',
   effect: 'write',
   actionClass: 'draft',
-  approvable: true,
   target: (input) => input.changeSetId,
   handler: async (input, ctx) => {
     const ws = ctx.principal.workspaceId;
@@ -985,6 +1057,26 @@ export const changesRollback = defineCommand({
       throw new AppError('conflict', `Change set ${input.changeSetId} has not been merged, so there is nothing to roll back.`);
     }
     if (run.state === 'rolled_back') throw new AppError('conflict', 'This change set was already rolled back.');
+
+    // One open rollback at a time. A rejected, abandoned or failed proposal is terminal, so another
+    // request is allowed while the original stays exactly as it was.
+    const [inFlight] = await ctx.tx
+      .select({ artifactId: schema.changeSetRuns.artifactId })
+      .from(schema.changeSetRuns)
+      .where(
+        and(
+          eq(schema.changeSetRuns.workspaceId, ws),
+          eq(schema.changeSetRuns.rollbackOf, input.changeSetId),
+          inArray(schema.changeSetRuns.state, [...OPEN_STATES]),
+        ),
+      );
+    if (inFlight) {
+      throw new AppError(
+        'conflict',
+        `Change set ${inFlight.artifactId} is already a rollback of ${input.changeSetId}. Wait for it to be verified, or close it, before proposing another.`,
+      );
+    }
+
     const content = await contentOfRun(ctx.tx, run);
     if (!content) throw new AppError('invalid_input', 'The change set content is not readable, so its changes cannot be reversed.');
     const [artifact] = await ctx.tx
@@ -994,11 +1086,12 @@ export const changesRollback = defineCommand({
     if (!artifact?.siteId) throw new AppError('conflict', 'The change set has no site, so nothing can be reverted.');
     const site = await loadSite(ctx.tx, ws, artifact.siteId);
 
+    // Reads at the repository's current base head: a rollback is drafted like any other change set.
     const drafting = await draftingContext(ctx, site.id, site.name);
-    const connection: GitHubConnection = drafting.connection;
     const paths = sourcePathsOf(content);
 
-    // The safe-rollback rule: a revert is exact only when nothing it touched moved since the merge.
+    // The safe-rollback rule: an exact revert is possible only when nothing it touched moved since
+    // the merge. The same check names the files that did move for a proposal.
     const moved: string[] = [];
     for (const path of paths) {
       try {
@@ -1051,6 +1144,17 @@ export const changesRollback = defineCommand({
         `The inverse edits could not be drafted (${draft.refusals.map((entry) => entry.reason).join(' ')}). Revert the merge commit ${run.mergeCommitSha} by hand.`,
       );
     }
+
+    // The rollback inherits the original's action class and reach, so approving it is judged exactly
+    // like approving the original change again. Its own changes carry the same types, which is what
+    // changes.requestApply recomputes; this answer is for the caller and the review screen.
+    const impact = await changeSetImpact(ctx.tx, {
+      workspaceId: ws,
+      siteId: site.id,
+      artifactId: run.artifactId,
+      content: drafted,
+    });
+
     const validated = (await validateContent('change_set', drafted, 'draft')) as unknown as typeof drafted;
     const id = newId(artifactTypes.change_set.prefix);
     await ctx.tx.insert(schema.artifacts).values({
@@ -1090,118 +1194,38 @@ export const changesRollback = defineCommand({
       toState: 'draft',
       actor: actorOf(ctx),
       reason: exact
-        ? `Rollback of ${input.changeSetId}: every touched file still matches the merge commit, so a revert pull request is exact.`
-        : `Rollback of ${input.changeSetId}: ${moved.join(', ')} changed after the merge, so this is a proposed change set rather than an automatic revert.`,
+        ? `Rollback of ${input.changeSetId}: every touched file still matches the merge commit, so the inverse edits are exact.`
+        : `Rollback of ${input.changeSetId}: ${moved.join(', ')} changed after the merge, so the inverse edits are drafted against the current files.`,
       evidence: { rollbackOf: input.changeSetId, paths, moved },
     });
 
-    let pr: { number: number; url: string } | null = null;
-    if (exact) {
-      // The ADR's safe revert: the files still match the merge, so a revert from the merge commit's
-      // parent is exact. The pull request still needs approval before it is recorded as applied.
-      const revert = await drafting.client
-        .revertPullRequest({
-          mergeCommitSha: run.mergeCommitSha!,
-          paths,
-          branch: `aseo/${id}-v1`,
-          base: connection.settings.baseBranch,
-          title,
-          body: [
-            `## ${title}`,
-            '',
-            summary,
-            '',
-            `Reverts the merge commit ${run.mergeCommitSha} of change set ${input.changeSetId}. Every touched file still matches that commit, so this revert is exact.`,
-            '',
-            '---',
-            'Opened by Agentic SEO. Approving this change set adopts this pull request; merging it rolls the change back.',
-          ].join('\n'),
-        })
-        .catch((error: unknown) => {
-          throw githubAppError(error);
-        });
-      pr = { number: revert.pullRequest.number, url: revert.pullRequest.htmlUrl };
-      await ctx.tx
-        .update(schema.changeSetRuns)
-        .set({
-          branch: `aseo/${id}-v1`,
-          prNumber: pr.number,
-          prUrl: pr.url,
-          headSha: revert.commitSha,
-          updatedAt: at,
-        })
-        .where(and(eq(schema.changeSetRuns.workspaceId, ws), eq(schema.changeSetRuns.artifactId, id)));
-    }
-
-    // The exact revert is already a pull request, so it is submitted for approval to adopt it. A
-    // proposed rollback is a draft: there is no pull request yet, and a person may edit it or
-    // discard it like any other draft.
-    const newRun = await loadRun(ctx.tx, ws, id);
-    let approvalId: string | null = null;
-    if (exact) {
-      approvalId = newId('apr');
-      const movedRun = await transition(ctx.tx, newRun, 'in_review', {
-        reason: `The exact revert pull request #${pr?.number ?? '?'} is open; approve this change set to adopt it.`,
-        actor: actorOf(ctx),
-        evidence: { rollbackOf: input.changeSetId, mode: 'revert_pr', moved, skipped },
-        set: { approvalId },
-      });
-      if (!movedRun) throw new AppError('conflict', 'The rollback moved while it was being created. Reload it with changes.status.');
-      await ctx.tx
-        .update(schema.artifactVersions)
-        .set({ state: 'in_review' })
-        .where(
-          and(
-            eq(schema.artifactVersions.workspaceId, ws),
-            eq(schema.artifactVersions.artifactId, id),
-            eq(schema.artifactVersions.number, 1),
-          ),
-        );
-      await ctx.tx.insert(schema.approvalRequests).values({
-        workspaceId: ws,
-        id: approvalId,
-        artifactId: id,
-        version: 1,
-        status: 'pending',
-        requestedByType: ctx.principal.type,
-        requestedById: ctx.principal.userId,
-        requestedByClient: ctx.principal.clientId ?? null,
-        note: noteWithPolicy(`${input.note} Approving adopts the revert pull request ${pr?.url ?? ''}.`, ctx),
-      });
-    } else {
-      await recordEvent(ctx.tx, {
-        workspaceId: ws,
-        artifactId: id,
-        fromState: 'draft',
-        toState: 'draft',
-        actor: actorOf(ctx),
-        reason: `A proposed rollback, not an automatic revert: ${moved.join(', ')} changed after the merge, so the inverse edits are drafted against the current files for a person to review.`,
-        evidence: { rollbackOf: input.changeSetId, mode: 'proposed', moved, skipped },
-      });
-    }
-
-    await transition(ctx.tx, run, 'rolled_back', {
-      reason: exact
-        ? `Rolled back by change set ${id} through the exact revert pull request #${pr?.number ?? '?'}.`
-        : `Rolled back by proposed change set ${id}; ${moved.join(', ')} changed after the merge.`,
+    // Link the proposal on the original without moving it: only a verified rollback makes the
+    // original `rolled_back` (ADR-0007, safe rollback). The event records that a proposal exists.
+    await ctx.tx
+      .update(schema.changeSetRuns)
+      .set({ rollbackChangeSetId: id, updatedAt: at })
+      .where(and(eq(schema.changeSetRuns.workspaceId, ws), eq(schema.changeSetRuns.artifactId, input.changeSetId)));
+    await recordEvent(ctx.tx, {
+      workspaceId: ws,
+      artifactId: input.changeSetId,
+      fromState: run.state,
+      toState: run.state,
       actor: actorOf(ctx),
-      evidence: { rollbackArtifactId: id, mode: exact ? 'revert_pr' : 'proposed', moved },
+      reason: `Rollback proposed as change set ${id} (${exact ? 'exact' : 'proposed'}). The original changes state only when the rollback is verified.`,
+      evidence: { rollbackArtifactId: id, mode: exact ? 'exact' : 'proposed', moved, skipped },
     });
 
-    const reviewUrl = ctx.services.publicUrl && approvalId ? `${ctx.services.publicUrl}/approvals/${approvalId}` : null;
     return {
-      mode: exact ? ('revert_pr' as const) : ('proposed' as const),
       changeSetId: id,
-      approvalId,
-      prNumber: pr?.number ?? null,
-      prUrl: pr?.url ?? null,
+      mode: exact ? ('exact' as const) : ('proposed' as const),
+      filesUnchanged: exact,
+      actionClass: impact.actionClass,
+      reach: impact.reach,
       reason: exact
-        ? 'Every touched file still matches the merge commit, so a revert pull request was opened and the rollback is waiting for approval.'
-        : `${moved.join(', ')} changed after the merge, so the rollback is a proposed change set with the inverse edits.`,
+        ? 'Every touched file still matches the merge commit, so the rollback is an exact inverse. Review it and request approval; its pull request opens after approval.'
+        : `${moved.join(', ')} changed after the merge, so the rollback is drafted against the current files. Review it and request approval; its pull request opens after approval.`,
       skipped,
-      next: reviewUrl
-        ? `A person must approve the rollback: ${reviewUrl}.`
-        : 'A person must approve the rollback. Check it with changes.status.',
+      next: `Review it with changes.get, then submit it with changes.requestApply: ${id}.`,
     };
   },
 });
