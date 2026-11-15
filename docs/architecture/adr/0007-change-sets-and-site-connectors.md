@@ -27,3 +27,39 @@ After apply, a **verification** job re-fetches the affected URLs and re-runs the
 
 ## Consequences
 URL→source mapping for static sites is the hardest part and needs per-framework adapters. With a PR connector the apply happens when a person merges, so with GitHub, L2/L3 can also mean "auto-merge when checks pass" if the repository allows it.
+
+## Phase 1 implementation notes (2026-11-15)
+
+Building the GitHub connector against the pilot, `TimChr78/martechsignal` (martechsignal.com), settled
+four points the decision left open. They are recorded here because a later connector should expect the
+same shapes.
+
+- **The pilot's deploy is a direct upload, so GitHub never sees it.** `deploy.sh` runs
+  `npx wrangler pages deploy deploy-out` after the build; merging a PR is not deploying. The GitHub
+  Deployments API therefore has nothing for this site, and "PR merged" cannot be read as "live". The
+  connector detects the deploy from the site itself: the build writes `deploy-out/version.txt` whose
+  first line is the deployed commit SHA and whose second line is `built <ISO-8601>`, and the deployed
+  site serves it at `/version.txt`. `deploy.sh` already polls that file after an upload, for the same
+  reason. A change set is deployed when GitHub's compare API reports the deployed SHA is `identical` to
+  or `ahead` of the merge commit; `behind` or `diverged` stays pending. A site that does not publish a
+  version file is a configuration error, not a failed deploy: detection returns `unknown` with the
+  reason, and the change set is not marked failed.
+- **The files that look like pages are often build output.** Blog posts are generated from
+  `content/drafts/<slug>-<YYYY-MM-DD>.md` (YAML frontmatter) by `tools/build_blog.py`, tool and
+  category pages from JSON catalogues by `tools/build_tools.py`, and the sitemap and `llms.txt` by
+  `tools/build_indexes.py`. Editing a generated `index.html` survives until the next deploy and then
+  disappears, so the mapping resolves `/blog/<slug>/` to the dated draft and refuses a generated path
+  with the build script to change instead. The date suffix makes the source a glob
+  (`content/drafts/:slug-*.md`); a route that matches zero or several dated drafts is refused as
+  missing or ambiguous rather than guessed.
+- **The build decides which frontmatter key is the page title.** `build_blog.py` uses
+  `seo_title or title` for `<title>` and `seo_description` for the meta description, falling back to a
+  body excerpt. The mapping therefore names `seo_title` first and `title` second, and `seo_description`
+  for the description. A change to a generated page is a change to the draft that feeds the build, not
+  to a rendered file; a JSON-LD change is refused on such a source because the frontmatter has no field
+  for it and the schema belongs in the build template.
+- **Redirects are a plain `_redirects` file** in the Cloudflare Pages / Netlify format
+  (`/from  /to  301`, `#` comments), so one editor serves both hosts. Rules are edited in place to keep
+  comments and ordering, and a rule that would loop or chain is refused with the final target to point
+  at. Redirecting more than 20 URLs remains a fixed rule that always needs a person
+  (agents-and-autonomy.md §3).

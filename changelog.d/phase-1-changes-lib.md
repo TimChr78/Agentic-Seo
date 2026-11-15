@@ -1,0 +1,6 @@
+- Add the `changes` package: the Phase 1 change catalogue (`meta.title`, `meta.description`, `schema.jsonld`, `image.alt`, `redirect`) as zod schemas with a JSON Schema export and the expectation each change must meet on the deployed page.
+- Add explicit per-site source mapping: ordered route patterns to repository files, frontmatter field fallbacks, refusals for generated paths, shared-layout reach and a dated glob for the pilot's blog drafts.
+- Add minimal-diff editors for HTML, Markdown frontmatter and `_redirects` files; each keeps every byte outside the edited span and refuses a stale `before`, an ambiguous match or a change the source cannot express.
+- Add a GitHub REST client over the fetch egress guard: read refs and files, commit several edits in one commit, open and read pull requests, compare commits, and open a revert PR only when the touched files still match the merge.
+- Add deploy detection from a site's `/version.txt` (for direct uploads such as the pilot) and from the GitHub Deployments API, with `deploy_not_detected` after a configurable deploy window.
+- Add a per-file unified diff and per-URL before/after pairs for change-set review.

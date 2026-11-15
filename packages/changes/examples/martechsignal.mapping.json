@@ -1,0 +1,64 @@
+{
+  "site": "martechsignal.com",
+  "rules": [
+    {
+      "routes": "/",
+      "source": "index.html",
+      "editor": "html"
+    },
+    {
+      "routes": "/about/",
+      "source": "about/index.html",
+      "editor": "html"
+    },
+    {
+      "routes": "/blog/:slug/",
+      "source": "content/drafts/:slug-*.md",
+      "editor": "markdown_frontmatter",
+      "fields": {
+        "title": ["seo_title", "title"],
+        "description": ["seo_description"]
+      }
+    },
+    {
+      "routes": "/tools/:slug/",
+      "source": "tools/:slug/index.html",
+      "editor": "html",
+      "generated": true,
+      "generatedReason": "Tool pages are built from tools.json by tools/build_tools.py. Edit the catalogue entry and re-run the build; editing tools/<slug>/index.html is overwritten."
+    },
+    {
+      "routes": "/authors/:slug/",
+      "source": "authors/:slug/index.html",
+      "editor": "html"
+    },
+    {
+      "routes": "/blog/*/",
+      "source": "tools/build_blog.py",
+      "editor": "html",
+      "layout": true
+    }
+  ],
+  "redirects": {
+    "file": "_redirects",
+    "format": "netlify"
+  },
+  "generated": [
+    {
+      "path": "blog/*/index.html",
+      "reason": "Blog pages are written by tools/build_blog.py from content/drafts/*.md; edit the draft."
+    },
+    {
+      "path": "blog/index.html",
+      "reason": "The blog index is written by tools/build_blog.py from the drafts; it is not a source file."
+    },
+    {
+      "path": "sitemap.xml",
+      "reason": "tools/build_indexes.py writes the sitemap at deploy time."
+    },
+    {
+      "path": "llms.txt",
+      "reason": "tools/build_indexes.py writes llms.txt at deploy time."
+    }
+  ]
+}
