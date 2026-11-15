@@ -61,6 +61,27 @@ describe('redirects editor: add', () => {
     }
   });
 
+  it('refuses a query variant of the source as a loop, since a rule without a query matches any query (review round 4)', () => {
+    const result = applyRedirectEdit('', add('/a', '/a?x=1'));
+    expect(result).toMatchObject({ ok: false, code: 'conflict' });
+    if (!result.ok) expect(result.reason).toMatch(/loop/i);
+  });
+
+  it('refuses an incoming chain whose target carries a query (review round 4)', () => {
+    const result = applyRedirectEdit('/old  /new?x=1  301\n', add('/new', '/end'));
+    expect(result).toMatchObject({ ok: false, code: 'conflict' });
+  });
+
+  it('sees an incoming chain to a path with a literal colon (review round 4)', () => {
+    const result = applyRedirectEdit('/old  /time/12:30/  301\n', add('/time/12:30/', '/end'));
+    expect(result).toMatchObject({ ok: false, code: 'conflict' });
+  });
+
+  it('does not follow the local rules for a target on another origin (review round 4)', () => {
+    const result = applyRedirectEdit('/done  /elsewhere  301\n', add('/old', 'https://other.test/done'));
+    expect(result.ok).toBe(true);
+  });
+
   it('refuses a chain and names the final target', () => {
     const document = '/a/  /b/  301\n/b/  /c/  301\n';
     const result = applyRedirectEdit(document, add('/new/', '/a/'));

@@ -270,7 +270,8 @@ function fromMatches(from: string, requestValue: string): Record<string, string>
  */
 function resolveTarget(to: string, params: Record<string, string>): string | null {
   let unresolved = false;
-  const resolved = to.replace(/:[A-Za-z0-9_]+/g, (token) => {
+  // Only a whole segment is a placeholder (as in `compileFrom`): `/time/12:30/` stays literal.
+  const resolved = to.replace(/(?<=\/):[A-Za-z0-9_]+(?=\/|$|\?|#)/g, (token) => {
     const name = token.slice(1);
     const value = name === 'splat' && params['*'] !== undefined ? params['*'] : params[name];
     if (value === undefined) {
@@ -304,8 +305,18 @@ interface EffectiveTarget {
   target: string | null;
 }
 
-/** The first rule that answers a request value, as the platform applies them (first match wins). */
+/** An absolute URL: a request that leaves this file's rules (another host, or an explicit origin). */
+function isAbsolute(value: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(value) || value.startsWith('//');
+}
+
+/**
+ * The first rule that answers a request value, as the platform applies them (first match wins). An
+ * absolute target is a request to an origin this file does not govern (the rules match the site's
+ * own paths), so no rule answers it: `https://other.test/done` never follows the local `/done`.
+ */
 function effectiveTarget(rules: readonly RuleLine[], requestValue: string): EffectiveTarget | null {
+  if (isAbsolute(requestValue)) return null;
   for (const rule of rules) {
     const params = fromMatches(rule.from, requestValue);
     if (!params) continue;
@@ -414,7 +425,6 @@ interface Incoming {
 }
 
 function incomingOf(rules: readonly RuleLine[], newRule: RuleLine): Incoming {
-  const origin = identityOf(newRule.from);
   const sources: string[] = [];
   let undecidable: RuleLine | null = null;
   for (const rule of rules) {
@@ -429,14 +439,16 @@ function incomingOf(rules: readonly RuleLine[], newRule: RuleLine): Incoming {
         continue;
       }
       source = concrete;
-    } else if (identityOf(rule.to) !== origin) {
+    } else if (isAbsolute(rule.to) || !fromMatches(newRule.from, rule.to)) {
+      // Request matching, not identity: `/old -> /new?x=1` reaches `/new` when `/new` spells no query.
       continue;
     }
     // First match wins: the rule only sends `source` to the new rule's source when no earlier rule
     // answers `source` instead. That is what makes a shadowed pattern not a chain.
     const found = effectiveTarget(rules, source);
     if (!found || found.rule !== rule || found.target === null) continue;
-    if (identityOf(found.target) !== origin) continue;
+    // The target must be answered by the new rule itself, first match included.
+    if (effectiveTarget(rules, found.target)?.rule !== newRule) continue;
     sources.push(source);
   }
   return { sources, undecidable };
@@ -474,7 +486,10 @@ function graphRefusal(change: RedirectChange, proposed: ProposedFile): Refusal |
   let current = newRule.to;
   for (let hops = 0; hops < 20; hops += 1) {
     const found = effectiveTarget(rules, current);
-    if (!found || found.rule === newRule) break;
+    if (!found) break;
+    // Re-entering the new rule is a loop, whatever the identities: `/a -> /a?x=1` is answered by
+    // `/a` again, because a rule without a query matches any query.
+    if (found.rule === newRule) return loopRefusal(change, newRule.to, [...chain, current]);
     if (found.target === null) return undecidableRefusal(change, found.rule, pathOnly(current));
     finalTarget = found.target;
     chain.push(finalTarget);
