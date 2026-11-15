@@ -263,6 +263,19 @@ const SEED: Record<string, { insert: string; appendOnly: boolean }> = {
             VALUES ($1, '00000000-0000-4000-8000-000000000001', 'adt_seed', 82, 10, 10)`,
     appendOnly: false,
   },
+  // Recommendations (0011_recommendations.sql). The run row points at the seeded site, audit and
+  // requester; the priority is a person's order over the seeded artifact. A run is history, so the
+  // app role has no DELETE on it.
+  recommendation_runs: {
+    insert: `INSERT INTO recommendation_runs (workspace_id, id, site_id, audit_id, requested_by_type, requested_by_id)
+            VALUES ($1, 'rrun_00000000000000000000000000000001', '00000000-0000-4000-8000-000000000001', 'adt_seed', 'system', 'seed-user')`,
+    appendOnly: false,
+  },
+  recommendation_priorities: {
+    insert: `INSERT INTO recommendation_priorities (workspace_id, artifact_id, site_id, priority, updated_by)
+            VALUES ($1, 'not_seed', '00000000-0000-4000-8000-000000000001', 0, 'seed-user')`,
+    appendOnly: false,
+  },
 };
 
 describe.skipIf(!hasTestDatabase())('foundation tables', () => {

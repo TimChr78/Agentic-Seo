@@ -1208,3 +1208,68 @@ export const auditScores = pgTable(
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.auditId] }), index('audit_scores_site').on(t.workspaceId, t.siteId, t.computedAt)],
 );
+
+// Recommendations and the runs that produce them (Phase 1 task G). See 0011_recommendations.sql.
+// The recommendation itself is an artifact (`rcm_…`); these two tables hold what an artifact
+// cannot: the record of one synthesis run, and a person's order over a site's recommendations.
+
+export type RecommendationRunState = 'queued' | 'running' | 'completed' | 'failed';
+
+/** One `recommendations.generate` run: what it read, what it created, what it dropped and why. */
+export const recommendationRuns = pgTable(
+  'recommendation_runs',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    /** `rrun_` + 32 hex characters. */
+    id: text('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    /** The audit whose issues the run read; null when the site has no completed audit. */
+    auditId: text('audit_id'),
+    state: text('state').$type<RecommendationRunState>().notNull().default('queued'),
+    maxRecommendations: integer('max_recommendations').notNull().default(10),
+    requestedByType: text('requested_by_type').$type<'user' | 'agent' | 'system'>().notNull(),
+    requestedById: text('requested_by_id').notNull(),
+    /** Candidates the technical specialist proposed, and recommendations the strategist wrote. */
+    candidates: integer('candidates').notNull().default(0),
+    derived: integer('derived').notNull().default(0),
+    createdCount: integer('created_count').notNull().default(0),
+    droppedCount: integer('dropped_count').notNull().default(0),
+    /** `[{ title, reason }]` per item that still failed validation after its retry. */
+    dropped: jsonb('dropped').$type<{ title: string; reason: string }[]>().notNull().default([]),
+    /** The `rcm_…` artifacts this run created, in order. */
+    createdIds: text('created_ids').array().notNull().default([]),
+    inputTokens: integer('input_tokens').notNull().default(0),
+    outputTokens: integer('output_tokens').notNull().default(0),
+    error: text('error'),
+    /** A crashed worker's run is reclaimed once the lease expires. */
+    leaseUntil: ts('lease_until'),
+    attempts: integer('attempts').notNull().default(0),
+    startedAt: ts('started_at'),
+    finishedAt: ts('finished_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    index('recommendation_runs_site').on(t.workspaceId, t.siteId, t.createdAt),
+    index('recommendation_runs_open').on(t.state, t.createdAt),
+  ],
+);
+
+/** A person's order over a site's recommendations; lower sorts first. Never part of the content. */
+export const recommendationPriorities = pgTable(
+  'recommendation_priorities',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    /** The `rcm_…` artifact this order is about. */
+    artifactId: text('artifact_id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    priority: integer('priority').notNull(),
+    updatedBy: text('updated_by').notNull(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.artifactId] }),
+    index('recommendation_priorities_site').on(t.workspaceId, t.siteId, t.priority),
+  ],
+);

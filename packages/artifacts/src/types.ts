@@ -1,4 +1,5 @@
 import { ChangeSchema } from '@agentic-seo/changes';
+import type { ReachEstimate } from '@agentic-seo/commands';
 import { isoDateTime } from '@agentic-seo/core';
 import { z } from 'zod';
 
@@ -10,9 +11,10 @@ import { z } from 'zod';
 // chg change set, brf content brief, smt schema template, rpt report, rtp report template,
 // rkt rank tracker, ait AI visibility tracker, aud audit profile, hag hosted agent.
 //
-// Phase 0/1 implements content for note, site_context, agent_mandate, skill and prompt. The other
-// SEO types have a placeholder schema that refuses content with the phase it arrives in, so their
-// prefixes and names are reserved now and no caller can mistake a draft for a working type.
+// Phase 0/1 implements content for note, site_context, agent_mandate, skill, prompt, change_set and
+// recommendation. The other SEO types have a placeholder schema that refuses content with the phase
+// it arrives in, so their prefixes and names are reserved now and no caller can mistake a draft for
+// a working type.
 
 const Key = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
 const Clock = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'HH:MM, 24-hour');
@@ -271,6 +273,120 @@ const prompt = z
   });
 export type Prompt = z.output<typeof prompt>;
 
+// A recommendation (ADR-0008, domain-model.md §4, DESIGN.md §4.3): what to do about the evidence,
+// why it should work, and how we will know it did not. The synthesis fields are required for every
+// author — a person writing one by hand has to be as falsifiable as an agent — and the command
+// that creates one validates the evidence ids against the database and computes the traffic at
+// stake itself, so a number in here is never invented (packages/recommendations).
+//
+// The status is not part of the content: it is derived from the artifact's own lifecycle (draft,
+// published, rejected) and the change sets whose content points here, so it cannot disagree with
+// what actually happened.
+const recommendationChangeType = z
+  .enum(['meta.title', 'meta.description', 'schema.jsonld', 'image.alt', 'redirect'])
+  .describe('A Phase 1 change type (packages/changes); the catalogue is the limit of what a change set can apply');
+
+const recommendationEvidence = z.strictObject({
+  kind: z
+    .enum(['issue', 'finding', 'search_fact', 'audit'])
+    .describe(
+      'issue: a site issue id; finding: an audit finding id; search_fact: the absolute URL of a page with Search Console data; audit: an audit id',
+    ),
+  id: z
+    .string()
+    .trim()
+    .min(1)
+    .max(2048)
+    .describe('The evidence id, or the page URL for a search_fact; it must exist for this site in this workspace'),
+  note: z.string().trim().min(1).max(500).describe('What this evidence shows, in one line, for a reviewer'),
+});
+
+const reachEstimate = z.discriminatedUnion('kind', [
+  z.strictObject({
+    kind: z.literal('unknown'),
+    reason: z.string().trim().min(1).max(1000).describe('What is missing, in a sentence a person can act on'),
+  }),
+  z.strictObject({
+    kind: z.literal('known'),
+    affectedUrls: z.number().int().min(0).describe('The evidence pages the estimate counted'),
+    clicksAtRisk: z.number().int().nullable().describe('Search Console clicks over 28 days; null when the pages have no history'),
+    impressionsAtRisk: z.number().int().nullable().optional(),
+    clicksAtRiskLastYear: z.number().int().nullable().optional(),
+    impressionsAtRiskLastYear: z.number().int().nullable().optional(),
+    criticalPages: z.array(z.string().max(2000)).max(50).default([]),
+    dataThrough: z.string().max(20).optional().describe('The newest day of page data the estimate used, YYYY-MM-DD'),
+  }),
+]);
+
+/** The content's traffic-at-stake field is packages/commands' ReachEstimate, not a look-alike. */
+export const recommendationReachSchema = reachEstimate satisfies z.ZodType<ReachEstimate>;
+
+const recommendation = z.strictObject({
+  title: z.string().trim().min(1).max(200).describe('What to do, in one line, e.g. "Rewrite the titles of 12 striking-distance pages"'),
+  rationale: z
+    .string()
+    .trim()
+    .min(1)
+    .max(4000)
+    .describe('Why this, why now, in Markdown; cite the evidence by id, never a metric that is not in it'),
+  evidence: z.array(recommendationEvidence).min(1).max(20).describe('What the recommendation rests on; at least one item'),
+  hypothesis: z.string().trim().min(1).max(2000).describe('The causal claim: if we do this, then that, because …'),
+  expectedImpact: z.strictObject({
+    summary: z
+      .string()
+      .trim()
+      .min(1)
+      .max(1000)
+      .describe('What we expect to change, stated as an estimate: "Expected: CTR +10–20% on 34 queries"'),
+    trafficAtStake: reachEstimate.describe('Computed by recommendations.create from the evidence pages, never supplied by a caller'),
+    confidence: z.enum(['low', 'medium', 'high']).describe('How sure we are, given the evidence'),
+  }),
+  effort: z.enum(['small', 'medium', 'large']).describe('How much work this is for a person or an agent'),
+  dependsOn: z
+    .array(z.string().regex(/^rcm_[0-9a-f]{32}$/, 'A recommendation id, e.g. from recommendations.list'))
+    .max(20)
+    .default([])
+    .describe('Recommendations that should land first; cycles are refused'),
+  verificationPlan: z.strictObject({
+    recheck: z.string().trim().min(1).max(2000).describe('What to re-fetch or re-measure, and what it must show'),
+    when: z.string().trim().min(1).max(500).describe('When, e.g. "28 days after the deploy"'),
+  }),
+  falsificationCheck: z
+    .string()
+    .trim()
+    .min(1)
+    .max(1000)
+    .describe('How we would know this failed, in a sentence that starts "We will know this failed if…"'),
+  leadingIndicator: z
+    .string()
+    .trim()
+    .min(1)
+    .max(500)
+    .describe('The earliest signal that it is working or not, e.g. "impressions-weighted CTR, daily"'),
+  proposedChanges: z
+    .array(
+      z.strictObject({
+        type: recommendationChangeType,
+        url: z.string().url().max(2048).describe('The page the change is about'),
+        summary: z.string().trim().min(1).max(500).describe('The edit, in one line, for a reviewer'),
+      }),
+    )
+    .max(20)
+    .default([])
+    .describe('Change sets to draft from this; a hint for whoever implements it, not a change set'),
+  author: z
+    .strictObject({
+      kind: z.enum(['person', 'agent', 'specialist']),
+      specialist: z.enum(['strategist', 'technical']).optional(),
+    })
+    .superRefine((author, ctx) => {
+      if (author.kind === 'specialist' && !author.specialist)
+        ctx.addIssue({ code: 'custom', path: ['specialist'], message: 'A specialist author names which specialist wrote it.' });
+    })
+    .describe('Who wrote this: a person, an agent (API token or MCP client), or a hosted specialist'),
+});
+export type Recommendation = z.output<typeof recommendation>;
+
 /** A type whose content arrives in a later phase: the schema refuses every value with the reason. */
 function placeholder(phase: number) {
   return z.unknown().superRefine((_value, ctx) => {
@@ -395,8 +511,9 @@ export const artifactTypes = {
   recommendation: {
     prefix: 'rcm',
     label: 'Recommendation',
-    description: 'A versioned, evidence-backed recommendation with a hypothesis, verification plan and falsification check.',
-    content: placeholder(1),
+    description:
+      'A versioned, evidence-backed recommendation with a hypothesis, expected impact, verification plan and falsification check. Create one with recommendations.create, which validates its evidence and computes the traffic at stake.',
+    content: recommendation,
   },
   change_set: {
     prefix: 'chg',
