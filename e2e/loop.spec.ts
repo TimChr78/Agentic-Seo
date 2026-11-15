@@ -92,7 +92,7 @@ test('a person turns an audit issue into a recommendation', async ({ page }) => 
   // The recommendation's own screen: consequence first, then the tabs. An issue-created
   // recommendation names no page, and drafting starts from an empty change list.
   await expect(page.getByRole('heading', { level: 1, name: ISSUE_TITLE })).toBeVisible({ timeout: 20_000 });
-  await expect(page.getByText(/Expected: CTR \+5–10%/)).toBeVisible();
+  await expect(page.getByText(/Expected: CTR \+5–10%/).first()).toBeVisible();
   await expect(page.getByText(/draft a change set and name each edit/)).toBeVisible();
   recommendationId = page.url().split('/recommendations/')[1]!;
   expect(recommendationId).toMatch(/^rcm_[0-9a-f]{32}$/);
