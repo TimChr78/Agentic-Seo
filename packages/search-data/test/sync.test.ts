@@ -352,6 +352,40 @@ describe.skipIf(!hasTestDatabase())('the Search Console sync', () => {
     for (const call of later.calls) expect(requestOf(call).startDate >= floor, requestOf(call).startDate).toBe(true);
   });
 
+  it('keeps a row-cap warning through a later finality warning and a clean window (review round 3)', async () => {
+    const site = await newSite('stickywarn');
+    const warningOf = async () =>
+      (
+        await db.admin.query<{ last_warning: string | null }>(
+          `SELECT last_warning FROM gsc_sync_state WHERE workspace_id = $1 AND site_id = $2 AND dataset = 'property_totals'`,
+          [disposable.workspace, site],
+        )
+      ).rows[0]?.last_warning ?? null;
+    const rows = (call: ProviderCallInput) => dayRows(requestOf(call).startDate, requestOf(call).endDate, () => 1);
+    // 1. Every window is capped, down to single days: a row-cap warning.
+    await run(
+      fakeGateway((call) => ({ rows: rows(call), truncated: true, rowLimitReached: 1_000_000 })),
+      0,
+      'property_totals',
+      site,
+    );
+    expect(await warningOf()).toMatch(/row cap/);
+    // 2. Google reports a day incomplete past the finality cap: both warnings.
+    const stale = addDays(TODAY, -20);
+    await run(
+      fakeGateway((call) => ({ rows: rows(call), metadata: { firstIncompleteDate: stale, firstIncompleteHour: null } })),
+      0,
+      'property_totals',
+      site,
+    );
+    expect(await warningOf()).toMatch(/row cap/);
+    expect(await warningOf()).toMatch(/incomplete more than/);
+    // 3. A clean window clears the finality warning, never the row-cap one.
+    await run(fakeGateway(rows), 0, 'property_totals', site);
+    expect(await warningOf()).toMatch(/row cap/);
+    expect(await warningOf()).not.toMatch(/incomplete more than/);
+  });
+
   it('refuses a site with no active connection', async () => {
     const other = randomUUID();
     await db.admin.query(

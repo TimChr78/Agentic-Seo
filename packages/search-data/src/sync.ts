@@ -394,15 +394,21 @@ async function storeWindow(
     const backfillComplete = input.backfill
       ? (backfillThrough !== null && backfillThrough >= input.today) || current.backfillComplete
       : current.backfillComplete;
-    // A non-fatal warning: the read stopped at the row cap, or Google still calls a day incomplete
-    // past the cap. A clean window clears a finality warning, but a row-cap warning stays until the
-    // property changes: the capped day is never re-read complete, so its warning must not vanish.
-    const stickyRowCap = current.lastWarning?.includes('-row cap') ? current.lastWarning : null;
-    const warning = input.fetched.truncated
-      ? `The ${input.definition.dataset.replace('_', ' ')} read for ${input.start} to ${input.end} stopped at the ${input.fetched.rowLimitReached ?? ROW_LIMIT}-row cap, so this window is incomplete.`
-      : firstIncomplete !== null && firstIncomplete <= addDays(input.today, -GSC_FINALITY_CAP_DAYS)
-        ? `Google still reported ${firstIncomplete} incomplete more than ${GSC_FINALITY_CAP_DAYS} days later; its numbers are marked final so the sync stops re-fetching them.`
-        : stickyRowCap;
+    // Non-fatal warnings, one per line: a read stopped at the row cap, or Google still calls a day
+    // incomplete past the finality cap. A finality warning lasts one window; a row-cap warning stays
+    // until the property changes (the capped day is never re-read complete), whatever comes after it.
+    const rowCapLines = (current.lastWarning ?? '').split('\n').filter((line) => line.includes('-row cap'));
+    const lines = [...rowCapLines];
+    if (input.fetched.truncated)
+      lines.push(
+        `The ${input.definition.dataset.replace('_', ' ')} read for ${input.start} to ${input.end} stopped at the ${input.fetched.rowLimitReached ?? ROW_LIMIT}-row cap, so this window is incomplete.`,
+      );
+    if (firstIncomplete !== null && firstIncomplete <= addDays(input.today, -GSC_FINALITY_CAP_DAYS))
+      lines.push(
+        `Google still reported ${firstIncomplete} incomplete more than ${GSC_FINALITY_CAP_DAYS} days later; its numbers are marked final so the sync stops re-fetching them.`,
+      );
+    const unique = [...new Set(lines)];
+    const warning = unique.length ? unique.join('\n') : null;
     const [updated] = await tx
       .update(schema.gscSyncState)
       .set({
