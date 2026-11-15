@@ -1,8 +1,8 @@
 import type { ReachEstimate } from '@agentic-seo/commands';
 import { schema, type Tx } from '@agentic-seo/db';
-import { GSC_CONNECTOR_ID } from '@agentic-seo/integrations';
+import { findLiveConnection, GSC_CONNECTOR_ID } from '@agentic-seo/integrations';
 import { and, eq, sql } from 'drizzle-orm';
-import { addDays, dayString, daysBetween } from './dates';
+import { addDays, daysBetween, today as searchConsoleToday } from './dates';
 import { homePageOf, pageMatchKeys } from './urls';
 
 // Reach: the traffic at risk of one action (agents-and-autonomy.md §3). The policy engine's type
@@ -12,6 +12,10 @@ import { homePageOf, pageMatchKeys } from './urls';
 // `known` needs both an active Search Console connection and page aggregates newer than four days.
 // Anything else is `unknown` with a reason a person can act on; unknown reach always needs a
 // person, it never merely drops a level.
+//
+// URLs are matched on `page_key`, the normalised column the sync writes, so the value the caller
+// names and the value Google returned go through one function: "/", "/a/" and "/a", and "/a?x=1"
+// and "/a/?x=1", are the pages a person means.
 //
 // Last year's window starts 364 days back, so its weekdays line up with this year's and a weekend
 // is not compared with a midweek.
@@ -38,7 +42,7 @@ const unknown = (reason: string): ReachEstimate => ({ kind: 'unknown', reason })
 
 export async function estimateReach(tx: Tx, input: ReachInput): Promise<ReachEstimate> {
   const now = input.now ?? new Date();
-  const today = dayString(now);
+  const today = searchConsoleToday(now);
 
   const [site] = await tx
     .select({ domain: schema.sites.primaryDomain })
@@ -46,17 +50,10 @@ export async function estimateReach(tx: Tx, input: ReachInput): Promise<ReachEst
     .where(and(eq(schema.sites.workspaceId, input.workspaceId), eq(schema.sites.id, input.siteId)));
   if (!site) return unknown('This site does not exist in this workspace, so its traffic at risk cannot be estimated.');
 
-  const [connection] = await tx
-    .select()
-    .from(schema.connections)
-    .where(
-      and(
-        eq(schema.connections.workspaceId, input.workspaceId),
-        eq(schema.connections.siteId, input.siteId),
-        eq(schema.connections.connector, GSC_CONNECTOR_ID),
-      ),
-    );
-  if (!connection || connection.state === 'revoked') return unknown('Search Console is not connected for this site');
+  // The live connection, never the revoked history beside it: after a disconnect and a reconnect the
+  // estimate must read the replacement, not the first row the planner happens to return.
+  const connection = await findLiveConnection(tx, input.workspaceId, input.siteId, GSC_CONNECTOR_ID);
+  if (!connection) return unknown('Search Console is not connected for this site');
   if (connection.state !== 'active')
     return unknown(`Search Console needs to be reconnected for this site${connection.lastError ? `: ${connection.lastError}` : ''}`);
   const property = connection.settings.property;
@@ -102,7 +99,7 @@ export async function estimateReach(tx: Tx, input: ReachInput): Promise<ReachEst
       WHERE workspace_id = ${input.workspaceId}
         AND site_id = ${input.siteId}
         AND property = ${property}
-        AND rtrim(page, '/') = ANY(ARRAY[${sql.join(
+        AND page_key = ANY(ARRAY[${sql.join(
           keys.map((key) => sql`${key}`),
           sql`, `,
         )}]::text[])

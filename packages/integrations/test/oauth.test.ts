@@ -1,7 +1,7 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createDb, type Db, schema } from '@agentic-seo/db';
 import { localKeyProvider } from '@agentic-seo/secrets';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { APP_ROLE, createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
 import {
@@ -16,11 +16,14 @@ import {
   type OAuthDeps,
   REFRESH_REFUSED,
   refreshConnection,
+  revokedColumns,
 } from '../src';
 
 // OAuth 2.0 at its entry points: the authorize URL (PKCE and the hashed state), the callback (state
-// round trip, replay and expiry refusal), the sealed tokens, and the refresh lease. The token
-// endpoint is the `http` seam, so no test reaches Google.
+// round trip, replay, concurrency, staleness and expiry refusal), the sealed tokens, and the refresh
+// lease. The token endpoint is the `http` seam, so no test reaches Google, and it verifies the PKCE
+// verifier against the challenge the authorize URL carried: a dropped or mismatched verifier fails
+// the exchange, exactly as Google refuses it.
 
 const PUBLIC_URL = 'https://seo.example.com';
 const CLIENT = { clientId: 'client-id.apps.googleusercontent.com', clientSecret: 'client-secret' };
@@ -59,14 +62,32 @@ describe.skipIf(!hasTestDatabase())('OAuth 2.0 for Search Console', () => {
     ...overrides,
   });
 
-  /** A token endpoint that answers by grant type and counts each exchange. */
+  /** The `code_challenge` of the most recent authorize URL, for the fake token endpoint. */
+  let challenge = '';
+
+  /**
+   * A token endpoint that answers by grant type, counts each exchange and checks the PKCE verifier:
+   * `S256(verifier)` must equal the challenge the authorize URL carried, as Google checks it.
+   */
   function google(options: { failRefresh?: boolean } = {}) {
     const grants: string[] = [];
+    const pkce: boolean[] = [];
     let access = 1;
     const http: HttpClient = async (_url, init) => {
       const params = new URLSearchParams(init.body ?? '');
       const grant = params.get('grant_type') ?? '';
       grants.push(grant);
+      if (grant === 'authorization_code') {
+        const verifier = params.get('code_verifier') ?? '';
+        const digest = createHash('sha256').update(verifier).digest('base64url');
+        const ok = verifier.length > 0 && digest === challenge;
+        pkce.push(ok);
+        if (!ok)
+          return {
+            status: 400,
+            body: JSON.stringify({ error: 'invalid_grant', error_description: 'PKCE verification failed.' }),
+          };
+      }
       if (grant === 'refresh_token' && options.failRefresh)
         return { status: 400, body: JSON.stringify({ error: 'invalid_grant', error_description: 'Token has been expired or revoked.' }) };
       access += 1;
@@ -80,20 +101,31 @@ describe.skipIf(!hasTestDatabase())('OAuth 2.0 for Search Console', () => {
         }),
       };
     };
-    return { http, grants };
+    return { http, grants, pkce };
   }
 
   async function start(site = siteId) {
-    return db.withWorkspace(disposable.workspace, async (tx) => {
+    const started = await db.withWorkspace(disposable.workspace, async (tx) => {
       const row = await connectionForSite(tx, {
         workspaceId: disposable.workspace,
         siteId: site,
         connector: GSC_CONNECTOR_ID,
         label: 'Google Search Console',
       });
-      const started = await beginAuthorization(tx, { row, kp, client: CLIENT, publicUrl: PUBLIC_URL });
-      return { row, ...started };
+      const began = await beginAuthorization(tx, { row, kp, client: CLIENT, publicUrl: PUBLIC_URL });
+      return { row, ...began };
     });
+    challenge = new URL(started.url).searchParams.get('code_challenge') ?? '';
+    return started;
+  }
+
+  /** The connection's stored state and tokens, read with the owner pool (the test's own view). */
+  async function connectionRow(connectionId: string) {
+    const result = await db.admin.query<{ state: string; secrets: Buffer | null; generation: number }>(
+      'SELECT state, secrets, generation FROM connections WHERE workspace_id = $1 AND id = $2',
+      [disposable.workspace, connectionId],
+    );
+    return result.rows[0]!;
   }
 
   it('round-trips PKCE and the state, then seals the tokens', async () => {
@@ -119,6 +151,8 @@ describe.skipIf(!hasTestDatabase())('OAuth 2.0 for Search Console', () => {
     const fake = google();
     const result = await completeAuthorization(deps({ http: fake.http }), { state, code: 'auth-code' });
     expect(result).toMatchObject({ ok: true });
+    // The exchange proved PKCE: the verifier's S256 digest is the challenge Google was given.
+    expect(fake.pkce).toEqual([true]);
 
     const stored = await db.admin.query<{ state: string; secrets: Buffer; token_expires_at: Date }>(
       'SELECT state, secrets, token_expires_at FROM connections WHERE workspace_id = $1 AND id = $2',
@@ -147,6 +181,90 @@ describe.skipIf(!hasTestDatabase())('OAuth 2.0 for Search Console', () => {
     const result = await completeAuthorization(deps({ http: google().http, now: () => later }), { state, code: 'code' });
     expect(result.ok).toBe(false);
     expect(result.text).toMatch(/expired/i);
+  });
+
+  it('takes the row lock before consuming the state, so two concurrent callbacks exchange once', async () => {
+    const { row, url } = await start();
+    const state = new URL(url).searchParams.get('state') ?? '';
+    const fake = google();
+    // Hold the connection row from outside, so the callback's validate-and-consume has to wait for
+    // this transaction: that wait is the lock. Without it the callback reads the row straight away,
+    // consumes the state and exchanges the code while the holder is still open.
+    const holder = await db.admin.connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT 1 FROM connections WHERE workspace_id = $1 AND id = $2 FOR UPDATE', [disposable.workspace, row.id]);
+      let settled = 0;
+      const callbacks = [
+        completeAuthorization(deps({ http: fake.http }), { state, code: 'first' }),
+        completeAuthorization(deps({ http: fake.http }), { state, code: 'second' }),
+      ].map(async (pending) => {
+        const value = await pending;
+        settled += 1;
+        return { value };
+      });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(fake.grants).toHaveLength(0);
+      expect(settled).toBe(0);
+      await holder.query('COMMIT');
+      const results = await Promise.all(callbacks);
+      // Exactly one exchange and one success: the callback that lost the lock found the marker.
+      expect(fake.grants.filter((grant) => grant === 'authorization_code')).toHaveLength(1);
+      expect(results.filter((result) => result.value.ok)).toHaveLength(1);
+      expect(results.find((result) => !result.value.ok)?.value.text).toMatch(/expired/i);
+    } finally {
+      await holder.query('ROLLBACK').catch(() => undefined);
+      holder.release();
+    }
+  });
+
+  it('refuses a callback whose authorization a newer connect replaced', async () => {
+    const first = await start();
+    const state = new URL(first.url).searchParams.get('state') ?? '';
+    const before = await connectionRow(first.row.id);
+    // The person started again before finishing the first sign-in: the pending state is replaced.
+    await start();
+
+    const fake = google();
+    const result = await completeAuthorization(deps({ http: fake.http }), { state, code: 'auth-code' });
+    expect(result.ok).toBe(false);
+    expect(result.text).toMatch(/expired/i);
+    expect(fake.grants).toHaveLength(0);
+    // Nothing was written: the connection still holds what the newer authorization left, not tokens
+    // from the stale callback.
+    const after = await connectionRow(first.row.id);
+    expect(after.state).toBe(before.state);
+    expect(after.secrets).toEqual(before.secrets);
+  });
+
+  it('refuses a callback after the connection was disconnected', async () => {
+    const { row, url } = await start();
+    const state = new URL(url).searchParams.get('state') ?? '';
+    await db.withWorkspace(disposable.workspace, (tx) =>
+      tx
+        .update(schema.connections)
+        .set(revokedColumns(new Date()))
+        .where(and(eq(schema.connections.workspaceId, disposable.workspace), eq(schema.connections.id, row.id))),
+    );
+
+    const fake = google();
+    const result = await completeAuthorization(deps({ http: fake.http }), { state, code: 'auth-code' });
+    expect(result.ok).toBe(false);
+    expect(result.text).toMatch(/disconnected/i);
+    expect(fake.grants).toHaveLength(0);
+    expect((await connectionRow(row.id)).state).toBe('revoked');
+  });
+
+  it('refuses the exchange when the verifier does not match the challenge', async () => {
+    const { row, url } = await start();
+    const state = new URL(url).searchParams.get('state') ?? '';
+    // A verifier that belongs to some other authorization: Google refuses it, so we must report that.
+    challenge = createHash('sha256').update('a-different-verifier').digest('base64url');
+    const fake = google();
+    const result = await completeAuthorization(deps({ http: fake.http }), { state, code: 'auth-code' });
+    expect(result.ok).toBe(false);
+    expect(result.text).toMatch(/did not complete the connection/i);
+    expect((await connectionRow(row.id)).state).toBe('error');
   });
 
   it('refreshes before expiry under a lease, so two refreshers exchange once', async () => {

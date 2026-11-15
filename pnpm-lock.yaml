@@ -416,6 +416,9 @@ importers:
       '@agentic-seo/providers':
         specifier: workspace:*
         version: link:../providers
+      '@agentic-seo/secrets':
+        specifier: workspace:*
+        version: link:../secrets
       '@agentic-seo/telemetry':
         specifier: workspace:*
         version: link:../telemetry

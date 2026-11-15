@@ -647,6 +647,8 @@ export const connections = pgTable(
     secrets: bytea('secrets'),
     secretsKeyId: text('secrets_key_id'),
     state: text('state').$type<ConnectionState>().notNull().default('pending'),
+    /** Bumped when the property changes or the connection is revoked; fences an in-flight sync. */
+    generation: integer('generation').notNull().default(0),
     lastError: text('last_error'),
     oauthPending: jsonb('oauth_pending').$type<Record<string, unknown>>(),
     tokenExpiresAt: ts('token_expires_at'),
@@ -694,7 +696,11 @@ export const gscPageAggregates = pgTable(
     siteId: uuid('site_id').notNull(),
     property: text('property').notNull(),
     date: date('date', { mode: 'string' }).notNull(),
+    /** The search surface ("web" in Phase 1); in the key so Phase 2 adds types without a rewrite. */
+    searchType: text('search_type').notNull().default('web'),
     page: text('page').notNull(),
+    /** `page` through `normalizePageUrl`: reach and search.pages match on it, never on `page`. */
+    pageKey: text('page_key').notNull(),
     /** ISO 3166-1 alpha-3, or empty when Google returned no country for the row. */
     country: text('country').notNull().default(''),
     device: text('device').notNull().default(''),
@@ -706,15 +712,15 @@ export const gscPageAggregates = pgTable(
     fetchedAt: ts('fetched_at').notNull().defaultNow(),
   },
   (t) => [
-    primaryKey({ columns: [t.workspaceId, t.siteId, t.property, t.date, t.page, t.country, t.device] }),
+    primaryKey({ columns: [t.workspaceId, t.siteId, t.property, t.date, t.searchType, t.page, t.country, t.device] }),
     index('gsc_page_aggregates_range').on(t.workspaceId, t.siteId, t.date),
-    index('gsc_page_aggregates_page').on(t.workspaceId, t.siteId, t.page, t.date),
+    index('gsc_page_aggregates_page').on(t.workspaceId, t.siteId, t.property, t.pageKey, t.date),
   ],
 );
 
 export type GscDataset = 'property_totals' | 'page_aggregates';
 
-/** The sync watermark per site, dataset and search type. */
+/** The sync watermark per site, dataset, search type and property. */
 export const gscSyncState = pgTable(
   'gsc_sync_state',
   {
@@ -722,14 +728,19 @@ export const gscSyncState = pgTable(
     siteId: uuid('site_id').notNull(),
     dataset: text('dataset').$type<GscDataset>().notNull(),
     searchType: text('search_type').notNull().default('web'),
+    property: text('property').notNull(),
     lastFinalDate: date('last_final_date', { mode: 'string' }),
     lastFetchedAt: ts('last_fetched_at'),
     backfillComplete: boolean('backfill_complete').notNull().default(false),
     backfillThrough: date('backfill_through', { mode: 'string' }),
+    /** The newest day every day before which has been fetched; the next incremental run resumes here. */
+    coverageThrough: date('coverage_through', { mode: 'string' }),
     lastError: text('last_error'),
+    /** A non-fatal warning: a truncated window, or data still incomplete past the finality cap. */
+    lastWarning: text('last_warning'),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.workspaceId, t.siteId, t.dataset, t.searchType] })],
+  (t) => [primaryKey({ columns: [t.workspaceId, t.siteId, t.dataset, t.searchType, t.property] })],
 );
 
 export const aiCalls = pgTable(

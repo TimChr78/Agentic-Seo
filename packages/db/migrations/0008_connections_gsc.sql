@@ -25,6 +25,10 @@ CREATE TABLE connections (
   secrets bytea,
   secrets_key_id text,
   state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'active', 'error', 'revoked')),
+  -- Bumped whenever what the connection *means* changes: a new property (`search.gsc.select`) or a
+  -- disconnect. A sync reads it at the start and re-checks it under a share lock before it writes, so
+  -- a run for the old property can never write facts or watermarks that describe the new one.
+  generation integer NOT NULL DEFAULT 0,
   -- A sentence a person can act on ("Google refused the refresh token; reconnect Search Console").
   last_error text,
   -- The OAuth authorization in progress: state hash, PKCE verifier, redirect URI and start time.
@@ -72,8 +76,16 @@ CREATE TABLE gsc_page_aggregates (
   site_id uuid NOT NULL,
   property text NOT NULL,
   date date NOT NULL,
+  -- Which search surface the row belongs to ("web" in Phase 1). In the key, so Phase 2 can store
+  -- image or discover rows without a migration rewrite of the primary key.
+  search_type text NOT NULL DEFAULT 'web',
   -- The page's URL exactly as Search Console returns it.
   page text NOT NULL,
+  -- The same URL through the normaliser in packages/search-data: lower-case scheme and host, no
+  -- fragment, no trailing slash except on the root, query string kept. Reach and search.pages match
+  -- on it, so "/a", "/a/" and "/a/?x=1" vs "/a?x=1" are one page. Stored at write time, so no reader
+  -- has to re-implement the rule in SQL.
+  page_key text NOT NULL,
   -- ISO 3166-1 alpha-3 country and Google's device name; empty when the dimension is not returned.
   country text NOT NULL DEFAULT '',
   device text NOT NULL DEFAULT '',
@@ -83,29 +95,38 @@ CREATE TABLE gsc_page_aggregates (
   position double precision NOT NULL,
   is_final boolean NOT NULL DEFAULT false,
   fetched_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (workspace_id, site_id, property, date, page, country, device),
+  PRIMARY KEY (workspace_id, site_id, property, date, search_type, page, country, device),
   FOREIGN KEY (workspace_id, site_id) REFERENCES sites (workspace_id, id) ON DELETE RESTRICT
 );
 CREATE INDEX gsc_page_aggregates_range ON gsc_page_aggregates (workspace_id, site_id, date);
-CREATE INDEX gsc_page_aggregates_page ON gsc_page_aggregates (workspace_id, site_id, page, date);
+CREATE INDEX gsc_page_aggregates_page ON gsc_page_aggregates (workspace_id, site_id, property, page_key, date);
 
--- The watermark per site, dataset and search type: what has been fetched, how far the first
--- backfill got, the last final day and why the last run failed.
+-- The watermark per site, dataset, search type and property: what has been fetched, how far the
+-- first backfill got, the last final day and why the last run failed. The property is part of the
+-- key: choosing a different property in `search.gsc.select` starts its own backfill and coverage
+-- instead of inheriting the old property's progress.
 CREATE TABLE gsc_sync_state (
   workspace_id uuid NOT NULL,
   site_id uuid NOT NULL,
   dataset text NOT NULL CHECK (dataset IN ('property_totals', 'page_aggregates')),
   search_type text NOT NULL DEFAULT 'web',
-  -- The newest day known to be final. Reach trusts page aggregates only when this is fresh.
+  property text NOT NULL,
+  -- The newest day known to be final, from the API's `first_incomplete_date` metadata.
   last_final_date date,
   last_fetched_at timestamptz,
   -- The first sync backfills 16 months backwards in 30-day chunks. `backfill_through` is the newest
   -- day fully fetched; a failed run resumes at the next day. Complete when it reaches today.
   backfill_complete boolean NOT NULL DEFAULT false,
   backfill_through date,
+  -- The newest day such that every day below it has been fetched. An outage leaves this behind
+  -- today, and the next incremental run starts at `coverage_through + 1` to fill the gap.
+  coverage_through date,
   last_error text,
+  -- A warning that did not fail the run: a window truncated at the row cap, or data Google still
+  -- reported incomplete past the finality cap.
+  last_warning text,
   updated_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (workspace_id, site_id, dataset, search_type),
+  PRIMARY KEY (workspace_id, site_id, dataset, search_type, property),
   FOREIGN KEY (workspace_id, site_id) REFERENCES sites (workspace_id, id) ON DELETE RESTRICT
 );
 

@@ -552,6 +552,21 @@ export const searchConsole: PortDefinition = {
         ),
         finality: z.enum(['provisional', 'final']).nullable(),
         coverage: z.number().nullable().describe('Share of clicks the query rows cover, when the provider reports it'),
+        /**
+         * The provider's own statement about what is still being collected (Search Analytics'
+         * `metadata`). Dates before `firstIncompleteDate` are final; later ones still move.
+         */
+        metadata: z
+          .object({
+            firstIncompleteDate: Day.nullable().describe('The first day whose numbers are still being collected'),
+            firstIncompleteHour: z.string().nullable().describe('Only for hourly requests, ISO 8601 with an offset'),
+          })
+          .nullable()
+          .default(null),
+        /** True when the row cap stopped the read before the provider ran out of rows. */
+        truncated: z.boolean().default(false),
+        /** The row cap the read stopped at, when it did. */
+        rowLimitReached: z.number().int().nullable().default(null),
       }),
       ttlSeconds: DAY,
     },

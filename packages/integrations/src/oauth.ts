@@ -3,7 +3,7 @@ import { AppError, providerDiagnostic, redactCredentials, sha256 } from '@agenti
 import { type Db, schema, type Tx } from '@agentic-seo/db';
 import type { KeyProvider } from '@agentic-seo/secrets';
 import { logger } from '@agentic-seo/telemetry';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { type ConnectionRow, clearedSecrets, connectionSecrets, getConnection, sealConnectionSecrets } from './connections';
 import { guardedHttp, type HttpClient } from './http';
 import { type Connector, connectorOf, type OAuthEndpoints } from './sdk';
@@ -240,7 +240,15 @@ export async function completeAuthorization(deps: OAuthDeps, input: CallbackInpu
   const { workspaceId, connectionId } = decoded;
 
   const prepared = await deps.db.withWorkspace(workspaceId, async (tx) => {
-    const row = await getConnection(tx, workspaceId, connectionId).catch(() => null);
+    // Locked, so two callbacks for the same state cannot both pass the consumption check: the second
+    // waits for the first to commit and then finds the marker (Agentic Marketing #375's rule).
+    // Locked, so two callbacks for the same state cannot both pass the consumption check: the second
+    // waits for the first to commit and then finds the marker (Agentic Marketing #375's rule).
+    const [row] = await tx
+      .select()
+      .from(schema.connections)
+      .where(and(eq(schema.connections.workspaceId, workspaceId), eq(schema.connections.id, connectionId)))
+      .for('update');
     if (!row || row.state === 'revoked') return { ok: false as const, text: 'This connection was disconnected. Start connecting again.' };
     const pending = row.oauthPending as unknown as PendingAuthorization | null;
     if (!pending || pending.stateHash !== hash) return { ok: false as const, text: 'This link has expired. Start connecting again.' };
@@ -554,6 +562,8 @@ export function revokedColumns(now: Date) {
   return {
     ...clearedSecrets(),
     state: 'revoked' as const,
+    // A sync running for this connection sees the bump and stops writing its facts.
+    generation: sql`${schema.connections.generation} + 1`,
     oauthPending: null,
     tokenExpiresAt: null,
     refreshLeaseUntil: null,

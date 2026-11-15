@@ -8,6 +8,7 @@ import {
   connectionSecrets,
   connectionView,
   connectorOf,
+  findLiveConnection,
   GSC_CONNECTOR_ID,
   type HttpClient,
   liveConnection,
@@ -15,9 +16,9 @@ import {
   revokeTokens,
 } from '@agentic-seo/integrations';
 import type { ProviderGateway } from '@agentic-seo/providers';
-import { and, asc, eq, gte, lte, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, lte, ne, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { addDays, dayString, daysBetween } from './dates';
+import { addDays, daysBetween, today as searchConsoleToday } from './dates';
 import { parseProperty, propertyMatchesSite, suggestProperty } from './properties';
 
 // The Search Console commands (agents-and-autonomy.md §2 `search.*`, data-providers.md §5). Reads
@@ -80,17 +81,39 @@ async function loadSite(tx: Tx, workspaceId: string, siteId: string) {
   return site;
 }
 
-/** The site's active GSC connection, or the reason it is not usable yet. */
-async function activeConnection(tx: Tx, workspaceId: string, siteId: string) {
-  const row = await liveConnection(tx, workspaceId, siteId, GSC_CONNECTOR_ID);
-  if (!row) throw new AppError('precondition_failed', 'Search Console is not connected for this site. Run search.gsc.connect first.');
+/** Why a live connection cannot be used yet, or null when it is active. */
+function unusableReason(row: typeof schema.connections.$inferSelect): AppError | null {
   if (row.state === 'pending')
-    throw new AppError(
+    return new AppError(
       'precondition_failed',
       'The Search Console connection has not finished authorizing. Run search.gsc.connect and complete the Google sign-in.',
     );
   if (row.state === 'error')
-    throw new AppError('conflict', row.lastError ?? 'The Search Console connection needs to be reconnected. Run search.gsc.connect.');
+    return new AppError('conflict', row.lastError ?? 'The Search Console connection needs to be reconnected. Run search.gsc.connect.');
+  if (row.state !== 'active')
+    return new AppError('conflict', `The Search Console connection is ${row.state}. Run search.gsc.connect again.`);
+  return null;
+}
+
+/**
+ * The site's active GSC connection, or the reason it is not usable yet. Read without a row lock: a
+ * read that then calls Google must not hold it, because the token refresh locks the same row in its
+ * own transaction (finding in review round 1: that was a deadlock, not a wait).
+ */
+async function activeConnection(tx: Tx, workspaceId: string, siteId: string) {
+  const row = await findLiveConnection(tx, workspaceId, siteId, GSC_CONNECTOR_ID);
+  if (!row) throw new AppError('precondition_failed', 'Search Console is not connected for this site. Run search.gsc.connect first.');
+  const reason = unusableReason(row);
+  if (reason) throw reason;
+  return row;
+}
+
+/** The active connection, locked for the statement that writes it. Hold it only for that write. */
+async function lockedActiveConnection(tx: Tx, workspaceId: string, siteId: string) {
+  const row = await liveConnection(tx, workspaceId, siteId, GSC_CONNECTOR_ID);
+  if (!row) throw new AppError('precondition_failed', 'Search Console is not connected for this site. Run search.gsc.connect first.');
+  const reason = unusableReason(row);
+  if (reason) throw reason;
   return row;
 }
 
@@ -206,9 +229,11 @@ export const gscSelect = defineCommand({
   target: (input) => input.siteId,
   handler: async (input, ctx) => {
     const site = await loadSite(ctx.tx, ctx.principal.workspaceId, input.siteId);
-    const row = await activeConnection(ctx.tx, ctx.principal.workspaceId, site.id);
+    const seen = await activeConnection(ctx.tx, ctx.principal.workspaceId, site.id);
     // The live list, not a cached one: a re-authorization can change which properties are visible.
-    const sites = await listProperties(ctx, row, site.id, true);
+    // No row lock is held here: the token refresh inside the call locks the connection in its own
+    // transaction, and holding the row across it would deadlock the two.
+    const sites = await listProperties(ctx, seen, site.id, true);
     if (!sites.some((entry) => entry.siteUrl === input.property)) {
       const available = sites.map((entry) => entry.siteUrl).join(', ') || 'none';
       throw new AppError(
@@ -216,20 +241,32 @@ export const gscSelect = defineCommand({
         `“${input.property}” is not a property this Google account can read. Properties available: ${available}. Run search.gsc.properties to see them.`,
       );
     }
+    // The provider call took time: re-lock and re-read before writing. A disconnect, a reconnect or
+    // another property choice that committed meanwhile wins, and this call reports it instead of
+    // overwriting it.
+    const row = await lockedActiveConnection(ctx.tx, ctx.principal.workspaceId, site.id);
+    if (row.id !== seen.id)
+      throw new AppError(
+        'conflict',
+        'The Search Console connection was replaced while the property list was loading. Run search.gsc.select again.',
+      );
     const previous = typeof row.settings.property === 'string' ? row.settings.property : null;
     const now = new Date();
     const [updated] = await ctx.tx
       .update(schema.connections)
-      .set({ settings: { ...row.settings, property: input.property }, state: 'active', lastError: null, updatedAt: now })
+      .set({
+        settings: { ...row.settings, property: input.property },
+        state: 'active',
+        lastError: null,
+        // A new property is a new meaning for this connection: the generation fences a sync that
+        // started on the old one, and its watermarks live under its own property key besides.
+        ...(previous === input.property ? {} : { generation: sql`${schema.connections.generation} + 1` }),
+        updatedAt: now,
+      })
       .where(and(eq(schema.connections.workspaceId, ctx.principal.workspaceId), eq(schema.connections.id, row.id)))
       .returning();
-    // A different property needs its own 16-month backfill; the old watermarks describe the old
-    // property. The facts already stored stay, keyed by their property, so nothing mixes.
-    if (previous !== input.property)
-      await ctx.tx
-        .update(schema.gscSyncState)
-        .set({ backfillComplete: false, backfillThrough: null, lastFinalDate: null, lastFetchedAt: null, lastError: null, updatedAt: now })
-        .where(and(eq(schema.gscSyncState.workspaceId, ctx.principal.workspaceId), eq(schema.gscSyncState.siteId, site.id)));
+    // The facts already stored stay, keyed by their property, and the new property starts its own
+    // watermark and 16-month backfill on the next sync.
     return connectionView(updated!);
   },
 });
@@ -248,11 +285,19 @@ export const gscDisconnect = defineCommand({
   target: (input) => input.siteId,
   handler: async (input, ctx) => {
     const site = await loadSite(ctx.tx, ctx.principal.workspaceId, input.siteId);
-    const row = await liveConnection(ctx.tx, ctx.principal.workspaceId, site.id, GSC_CONNECTOR_ID);
+    const row = await findLiveConnection(ctx.tx, ctx.principal.workspaceId, site.id, GSC_CONNECTOR_ID);
     if (!row) throw new AppError('not_found', 'Search Console is not connected for this site, so there is nothing to disconnect.');
+    // Revoke outside any row lock: the provider call can take seconds, and the refresh worker locks
+    // the same row. The write below re-locks and revalidates.
     const connector = connectorOf(row.connector);
     const secrets = await connectionSecrets(ctx.tx, row, ctx.services.keyProvider);
     const googleRevoked = await revokeTokens(connector, row.settings, secrets, ctx.services.integrationHttp);
+    const locked = await liveConnection(ctx.tx, ctx.principal.workspaceId, site.id, GSC_CONNECTOR_ID);
+    if (!locked || locked.id !== row.id)
+      throw new AppError(
+        'conflict',
+        'The Search Console connection was replaced while it was being disconnected, so nothing was changed. Run search.gsc.disconnect again.',
+      );
     await ctx.tx
       .update(schema.connections)
       .set(revokedColumns(new Date()))
@@ -264,18 +309,24 @@ export const gscDisconnect = defineCommand({
 const datasetStatus = z.object({
   dataset: z.enum(['property_totals', 'page_aggregates']),
   searchType: z.string(),
+  /** The property this watermark belongs to. */
+  property: z.string(),
   lastFinalDate: z.string().nullable(),
   lastFetchedAt: z.string().nullable(),
+  /** The newest day every day below it has been fetched; an outage leaves it behind today. */
+  coverageThrough: z.string().nullable(),
   backfillComplete: z.boolean(),
   backfillThrough: z.string().nullable(),
   lastError: z.string().nullable(),
+  /** A warning that did not fail the run: a truncated window or data stuck incomplete. */
+  lastWarning: z.string().nullable(),
 });
 
 export const gscStatus = defineCommand({
   name: 'search.gsc.status',
   title: 'Search Console status',
   description:
-    'Shows the Search Console connection: its state, the selected property, the last sync error and each dataset’s watermark (the newest final day, the backfill progress). Use it to diagnose “no data” or a reconnect prompt. Free.',
+    'Shows the Search Console connection: its state, the selected property, the last sync error and each dataset’s watermark (the newest final day, the coverage, the backfill progress). Use it to diagnose “no data” or a reconnect prompt. Free.',
   input: z.object({ siteId: SiteId }),
   output: z.object({
     connection: ConnectionView.nullable(),
@@ -288,23 +339,34 @@ export const gscStatus = defineCommand({
   target: (input) => input.siteId,
   handler: async (input, ctx) => {
     const site = await loadSite(ctx.tx, ctx.principal.workspaceId, input.siteId);
-    const row = await liveConnection(ctx.tx, ctx.principal.workspaceId, site.id, GSC_CONNECTOR_ID);
+    const row = await findLiveConnection(ctx.tx, ctx.principal.workspaceId, site.id, GSC_CONNECTOR_ID);
+    const property = row && typeof row.settings.property === 'string' ? (row.settings.property as string) : null;
     const states = await ctx.tx
       .select()
       .from(schema.gscSyncState)
-      .where(and(eq(schema.gscSyncState.workspaceId, ctx.principal.workspaceId), eq(schema.gscSyncState.siteId, site.id)))
+      .where(
+        and(
+          eq(schema.gscSyncState.workspaceId, ctx.principal.workspaceId),
+          eq(schema.gscSyncState.siteId, site.id),
+          // Only the selected property's watermarks: a previous property's progress is history.
+          ...(property ? [eq(schema.gscSyncState.property, property)] : []),
+        ),
+      )
       .orderBy(asc(schema.gscSyncState.dataset));
     return {
       connection: row ? connectionView(row) : null,
-      property: row && typeof row.settings.property === 'string' ? (row.settings.property as string) : null,
+      property,
       datasets: states.map((state) => ({
         dataset: state.dataset,
         searchType: state.searchType,
+        property: state.property,
         lastFinalDate: state.lastFinalDate,
         lastFetchedAt: state.lastFetchedAt?.toISOString() ?? null,
+        coverageThrough: state.coverageThrough,
         backfillComplete: state.backfillComplete,
         backfillThrough: state.backfillThrough,
         lastError: state.lastError,
+        lastWarning: state.lastWarning,
       })),
     };
   },
@@ -332,17 +394,29 @@ export const gscSync = defineCommand({
     const row = await activeConnection(ctx.tx, ctx.principal.workspaceId, site.id);
     propertyOf(row);
     const now = new Date();
-    if (row.lastSyncRequestedAt && now.getTime() - row.lastSyncRequestedAt.getTime() < SYNC_COOLDOWN_MS) {
-      const seconds = Math.ceil((SYNC_COOLDOWN_MS - (now.getTime() - row.lastSyncRequestedAt.getTime())) / 1000);
+    // Claim the rate-limit slot with one guarded update instead of read-then-write: two requests in
+    // the same instant cannot both pass, and no row lock is needed.
+    const notBefore = new Date(now.getTime() - SYNC_COOLDOWN_MS);
+    const [claimed] = await ctx.tx
+      .update(schema.connections)
+      .set({ lastSyncRequestedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(schema.connections.workspaceId, ctx.principal.workspaceId),
+          eq(schema.connections.id, row.id),
+          ne(schema.connections.state, 'revoked'),
+          sql`(${schema.connections.lastSyncRequestedAt} IS NULL OR ${schema.connections.lastSyncRequestedAt} < ${notBefore})`,
+        ),
+      )
+      .returning({ id: schema.connections.id });
+    if (!claimed) {
+      const since = row.lastSyncRequestedAt ? now.getTime() - row.lastSyncRequestedAt.getTime() : SYNC_COOLDOWN_MS;
+      const seconds = Math.max(1, Math.ceil((SYNC_COOLDOWN_MS - since) / 1000));
       throw new AppError(
         'conflict',
         `A Search Console sync for this site was requested less than a minute ago. Try again in ${seconds} seconds.`,
       );
     }
-    await ctx.tx
-      .update(schema.connections)
-      .set({ lastSyncRequestedAt: now, updatedAt: now })
-      .where(and(eq(schema.connections.workspaceId, ctx.principal.workspaceId), eq(schema.connections.id, row.id)));
     const job = () => enqueue('gsc_sync', { workspaceId: ctx.principal.workspaceId, siteId: site.id });
     // Queue only after this transaction commits, so the worker cannot read a row that is not there yet.
     if (ctx.afterCommit) ctx.afterCommit(job);
@@ -354,7 +428,9 @@ export const gscSync = defineCommand({
 const MAX_RANGE_DAYS = 550;
 
 function rangeOf(input: { startDate?: string; endDate?: string }, now: Date) {
-  const today = dayString(now);
+  // Search Console's day, not UTC's: its calendar is America/Los_Angeles, so the default end is the
+  // day Google calls today (18:00 Pacific is already tomorrow in UTC).
+  const today = searchConsoleToday(now);
   const end = input.endDate ?? today;
   const start = input.startDate ?? addDays(end, -27);
   if (start > end) throw new AppError('invalid_input', `The start date ${start} is after the end date ${end}.`);
@@ -517,6 +593,8 @@ export const searchPages = defineCommand({
     const { start, end } = rangeOf(input, new Date());
     const offset = decodeCursor(input.cursor);
     const searchType = 'web';
+    // Group by `page_key`, the normalised identity the sync stores, so "/a" and "/a/" are one row
+    // and the answer matches what reach counts. The key is returned as the page.
     const result = await ctx.tx.execute<{
       page: string;
       clicks: string;
@@ -524,7 +602,7 @@ export const searchPages = defineCommand({
       ctr: string;
       position: string;
     }>(sql`
-      SELECT page,
+      SELECT page_key AS page,
         SUM(clicks)::text AS clicks,
         SUM(impressions)::text AS impressions,
         (CASE WHEN SUM(impressions) > 0 THEN SUM(clicks) / SUM(impressions) ELSE 0 END)::text AS ctr,
@@ -535,8 +613,8 @@ export const searchPages = defineCommand({
         AND property = ${property}
         AND search_type = ${searchType}
         AND date BETWEEN ${start} AND ${end}
-      GROUP BY page
-      ORDER BY SUM(clicks) DESC, page ASC
+      GROUP BY page_key
+      ORDER BY SUM(clicks) DESC, page_key ASC
       LIMIT ${input.limit + 1} OFFSET ${offset}`);
     const rows = result.rows.slice(0, input.limit);
     return {

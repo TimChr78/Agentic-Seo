@@ -178,14 +178,14 @@ const SEED: Record<string, { insert: string; appendOnly: boolean }> = {
     appendOnly: false,
   },
   gsc_page_aggregates: {
-    insert: `INSERT INTO gsc_page_aggregates (workspace_id, site_id, property, date, page, clicks, impressions, ctr, position)
+    insert: `INSERT INTO gsc_page_aggregates (workspace_id, site_id, property, date, page, page_key, clicks, impressions, ctr, position)
             VALUES ($1, '00000000-0000-4000-8000-000000000001', 'sc-domain:seed-site.example', '2026-11-01',
-              'https://seed-site.example/', 10, 100, 0.1, 3)`,
+              'https://seed-site.example/', 'https://seed-site.example/', 10, 100, 0.1, 3)`,
     appendOnly: false,
   },
   gsc_sync_state: {
-    insert: `INSERT INTO gsc_sync_state (workspace_id, site_id, dataset, search_type, last_final_date, backfill_through)
-            VALUES ($1, '00000000-0000-4000-8000-000000000001', 'property_totals', 'web', '2026-11-01', '2026-11-01')`,
+    insert: `INSERT INTO gsc_sync_state (workspace_id, site_id, dataset, search_type, property, last_final_date, backfill_through)
+            VALUES ($1, '00000000-0000-4000-8000-000000000001', 'property_totals', 'web', 'sc-domain:seed-site.example', '2026-11-01', '2026-11-01')`,
     appendOnly: false,
   },
   workspace_members: {

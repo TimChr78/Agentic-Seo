@@ -10,8 +10,6 @@ import { createGoogleSearchConsoleAdapter } from '../src/adapters/google-search-
 // database) a cache key that never lets one property's data answer another's question. No test
 // reaches the internet: the `request` option is the seam.
 
-const NOW = new Date('2026-11-15T12:00:00Z');
-
 function ctx(overrides: Partial<AdapterCallContext> = {}, options: Record<string, unknown> = {}): AdapterCallContext {
   return {
     workspaceId: '11111111-1111-4111-8111-111111111111',
@@ -53,7 +51,6 @@ describe('the Google Search Console adapter', () => {
     const adapter = createGoogleSearchConsoleAdapter({
       accessToken: async () => 'token',
       request: script.request,
-      now: () => NOW,
     });
     const result = (await adapter.call(
       'searchAnalytics',
@@ -88,7 +85,7 @@ describe('the Google Search Console adapter', () => {
   it('paginates with startRow until a short page', async () => {
     const pages: Record<string, unknown>[] = [{ rows: [row(['a'], 1), row(['b'], 2)] }, { rows: [row(['c'], 3)] }];
     const script = scripted((body) => pages[Number(body.startRow ?? 0) === 0 ? 0 : 1]);
-    const adapter = createGoogleSearchConsoleAdapter({ accessToken: async () => 'token', request: script.request, now: () => NOW });
+    const adapter = createGoogleSearchConsoleAdapter({ accessToken: async () => 'token', request: script.request });
     const result = (await adapter.call(
       'searchAnalytics',
       {
@@ -107,20 +104,95 @@ describe('the Google Search Console adapter', () => {
     expect(result.data.rows).toHaveLength(3);
   });
 
-  it('marks a window that ends within three days as provisional and an older one as final', async () => {
-    const script = scripted(() => ({ rows: [row(['2026-11-15'], 1)] }));
-    const adapter = createGoogleSearchConsoleAdapter({ accessToken: async () => 'token', request: script.request, now: () => NOW });
+  it('takes finality from the response metadata instead of guessing from age', async () => {
+    const script = scripted(() => ({
+      rows: [row(['2026-11-12'], 1)],
+      metadata: { first_incomplete_date: '2026-11-13', first_incomplete_hour: '2026-11-13T00:00:00-08:00' },
+    }));
+    const adapter = createGoogleSearchConsoleAdapter({ accessToken: async () => 'token', request: script.request });
     const ask = async (endDate: string) =>
       (await adapter.call(
         'searchAnalytics',
-        { property: 'sc-domain:example.com', startDate: endDate, endDate, dimensions: ['date'], rowLimit: 10, searchType: 'web' },
+        { property: 'sc-domain:example.com', startDate: '2026-11-12', endDate, dimensions: ['date'], rowLimit: 10, searchType: 'web' },
         ctx(),
         limits,
-      )) as { data: { finality: string } };
-    expect((await ask('2026-11-15')).data.finality).toBe('provisional');
-    expect((await ask('2026-11-13')).data.finality).toBe('provisional');
+      )) as { data: { finality: string; metadata: unknown } };
+    // The window reaches the first incomplete day: provisional. Ending before it: final.
+    const moving = await ask('2026-11-15');
+    expect(moving.data.finality).toBe('provisional');
+    expect(moving.data.metadata).toEqual({
+      firstIncompleteDate: '2026-11-13',
+      firstIncompleteHour: '2026-11-13T00:00:00-08:00',
+    });
     expect((await ask('2026-11-12')).data.finality).toBe('final');
-    expect((await ask('2026-11-11')).data.finality).toBe('final');
+
+    // Without the field Google reported nothing incomplete in the range, so the rows are final.
+    const clean = scripted(() => ({ rows: [row(['2026-11-01'], 1)] }));
+    const plain = createGoogleSearchConsoleAdapter({ accessToken: async () => 'token', request: clean.request });
+    const result = (await plain.call(
+      'searchAnalytics',
+      {
+        property: 'sc-domain:example.com',
+        startDate: '2026-11-01',
+        endDate: '2026-11-01',
+        dimensions: ['date'],
+        rowLimit: 10,
+        searchType: 'web',
+      },
+      ctx(),
+      limits,
+    )) as { data: { finality: string; metadata: unknown } };
+    expect(result.data.finality).toBe('final');
+    expect(result.data.metadata).toBeNull();
+  });
+
+  it('pages past 25,000 rows, which is the per-request limit and not the end of the read', async () => {
+    const full = Array.from({ length: 25_000 }, (_, i) => row(['2026-10-01', `https://example.com/p${i}`], 1));
+    const script = scripted((body) =>
+      Number(body.startRow ?? 0) === 0 ? { rows: full } : { rows: [row(['2026-10-01', 'https://example.com/last'], 1)] },
+    );
+    const adapter = createGoogleSearchConsoleAdapter({ accessToken: async () => 'token', request: script.request });
+    const result = (await adapter.call(
+      'searchAnalytics',
+      {
+        property: 'sc-domain:example.com',
+        startDate: '2026-10-01',
+        endDate: '2026-10-30',
+        dimensions: ['date', 'page'],
+        rowLimit: 25_000,
+        searchType: 'web',
+      },
+      ctx({}, { aggregationType: 'byPage' }),
+      limits,
+    )) as { data: { rows: unknown[]; truncated: boolean } };
+
+    expect(script.calls.map((call) => call.body?.startRow)).toEqual([0, 25_000]);
+    expect(result.data.rows).toHaveLength(25_001);
+    expect(result.data.truncated).toBe(false);
+  });
+
+  it('stops at the row cap and reports the window truncated instead of dropping rows quietly', async () => {
+    const page = Array.from({ length: 25 }, (_, i) => row(['2026-10-01', `https://example.com/p${i}`], 1));
+    const script = scripted(() => ({ rows: page }));
+    const adapter = createGoogleSearchConsoleAdapter({ accessToken: async () => 'token', request: script.request, maxRows: 30 });
+    const result = (await adapter.call(
+      'searchAnalytics',
+      {
+        property: 'sc-domain:example.com',
+        startDate: '2026-10-01',
+        endDate: '2026-10-30',
+        dimensions: ['date', 'page'],
+        rowLimit: 25,
+        searchType: 'web',
+      },
+      ctx({}, { aggregationType: 'byPage' }),
+      limits,
+    )) as { data: { rows: unknown[]; truncated: boolean; rowLimitReached: number | null } };
+
+    expect(script.calls.map((call) => call.body?.startRow)).toEqual([0, 25]);
+    expect(result.data.rows).toHaveLength(30);
+    expect(result.data.truncated).toBe(true);
+    expect(result.data.rowLimitReached).toBe(30);
   });
 
   it('lists the properties the grant can read', async () => {

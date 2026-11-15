@@ -1,10 +1,11 @@
 // Page URLs from Search Console are absolute and may carry a trailing slash, a fragment or an
-// upper-case host. Reach compares the URL a command names with the rows Google returns, so both
-// sides go through the same normalisation: lower-case scheme and host, no fragment, no trailing
-// slash on a path. A query string is kept: it identifies a page that Google reports separately.
+// upper-case host. Reach and search.pages compare the URL a caller names with the rows Google
+// returned, so one function defines the identity and the writer stores its result: both sides agree
+// by construction, and no reader re-implements the rule in SQL.
 //
-// The SQL side uses `rtrim(page, '/')`, the same rule for the stored URL, so a slash mismatch on
-// either side still matches. A row's URL is otherwise stored exactly as Google returned it.
+// The identity: lower-case scheme and host (what `URL` does), no fragment, no trailing slash except
+// on the root ("/a/" and "/a" are the same page; "/" stays "/"), and the query string kept, because
+// Google reports "/a?x=1" and "/a?x=2" as separate pages.
 
 export function normalizePageUrl(raw: string): string {
   const trimmed = raw.trim();
@@ -12,10 +13,10 @@ export function normalizePageUrl(raw: string): string {
     const url = new URL(trimmed);
     url.hash = '';
     const path = url.pathname.length > 1 && url.pathname.endsWith('/') ? url.pathname.slice(0, -1) : url.pathname;
-    url.pathname = path;
+    url.pathname = path || '/';
     return url.toString();
   } catch {
-    // Not a URL a browser can parse: compare it exactly, without a trailing slash.
+    // Not a URL a browser can parse: compare it exactly, without a trailing slash, but keep "/".
     return trimmed.length > 1 ? trimmed.replace(/\/+$/, '') : trimmed;
   }
 }

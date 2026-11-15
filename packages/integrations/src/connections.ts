@@ -1,7 +1,7 @@
 import { AppError, newId } from '@agentic-seo/core';
 import { schema, type Tx } from '@agentic-seo/db';
 import { type KeyProvider, openJson, sealJson } from '@agentic-seo/secrets';
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq, ne } from 'drizzle-orm';
 import { z } from 'zod';
 
 // Connections are per site and per connector (domain-model.md §1): the settings a person chose and
@@ -55,7 +55,34 @@ export async function getConnection(tx: Tx, workspaceId: string, id: string): Pr
   return row;
 }
 
-/** The site's live (not revoked) connection for a connector, locked for the caller's write. */
+/**
+ * The site's one live connection for a connector: pending, active or error, never revoked. The
+ * partial unique index `connections_site_connector_live` allows one such row, and the revoked
+ * history beside it must never answer for it, so the state filter is in SQL and the order is
+ * deterministic. Read-only: a caller that is about to write takes `liveConnection` instead.
+ */
+export async function findLiveConnection(tx: Tx, workspaceId: string, siteId: string, connector: string): Promise<ConnectionRow | null> {
+  const [row] = await tx
+    .select()
+    .from(schema.connections)
+    .where(
+      and(
+        eq(schema.connections.workspaceId, workspaceId),
+        eq(schema.connections.siteId, siteId),
+        eq(schema.connections.connector, connector),
+        ne(schema.connections.state, 'revoked'),
+      ),
+    )
+    .orderBy(desc(schema.connections.createdAt), desc(schema.connections.id))
+    .limit(1);
+  return row ?? null;
+}
+
+/**
+ * The site's live connection for a connector, locked for the caller's write. Hold this only for the
+ * statement that writes: never across a provider call, whose token refresh locks the same row in
+ * another transaction (that is a deadlock, not a wait).
+ */
 export async function liveConnection(tx: Tx, workspaceId: string, siteId: string, connector: string): Promise<ConnectionRow | null> {
   const [row] = await tx
     .select()
@@ -65,10 +92,13 @@ export async function liveConnection(tx: Tx, workspaceId: string, siteId: string
         eq(schema.connections.workspaceId, workspaceId),
         eq(schema.connections.siteId, siteId),
         eq(schema.connections.connector, connector),
+        ne(schema.connections.state, 'revoked'),
       ),
     )
+    .orderBy(desc(schema.connections.createdAt), desc(schema.connections.id))
+    .limit(1)
     .for('update');
-  return row && row.state !== 'revoked' ? row : null;
+  return row ?? null;
 }
 
 /**

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createDb, type Db } from '@agentic-seo/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { APP_ROLE, createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
-import { addDays, dayString, estimateReach } from '../src';
+import { addDays, dayString, estimateReach, normalizePageUrl } from '../src';
 
 // Reach at its entry point (`estimateReach`): known only with an active connection and fresh page
 // aggregates, the 28-day sum with trailing-slash URL variants, last year's window, and an unknown
@@ -47,12 +47,13 @@ describe.skipIf(!hasTestDatabase())('reach from Search Console page aggregates',
     await disposable?.close();
   });
 
-  async function page(day: string, url: string, clicks: number, impressions = clicks * 10) {
+  /** One page row, written the way the sync writes it: the exact URL and its normalised key. */
+  async function page(day: string, url: string, clicks: number, impressions = clicks * 10, site = siteId) {
     await db.admin.query(
       `INSERT INTO gsc_page_aggregates
-         (workspace_id, site_id, property, date, page, country, device, clicks, impressions, ctr, position, is_final)
-       VALUES ($1, $2, $3, $4, $5, '', '', $6, $7, 0.1, 3, true)`,
-      [disposable.workspace, siteId, PROPERTY, day, url, clicks, impressions],
+         (workspace_id, site_id, property, date, page, page_key, country, device, clicks, impressions, ctr, position, is_final)
+       VALUES ($1, $2, $3, $4, $5, $6, '', '', $7, $8, 0.1, 3, true)`,
+      [disposable.workspace, site, PROPERTY, day, url, normalizePageUrl(url), clicks, impressions],
     );
   }
 
@@ -95,6 +96,60 @@ describe.skipIf(!hasTestDatabase())('reach from Search Console page aggregates',
       criticalPages: ['https://example.com/'],
       dataThrough: addDays(TODAY, -1),
     });
+  });
+
+  it('matches the home page whether the URL is written with a trailing slash or not', async () => {
+    await page(addDays(TODAY, -2), 'https://example.com/', 8);
+    // The root keeps its slash in the normalised key, so the bare origin is the same page.
+    const result = await reach({ urls: ['https://example.com'] });
+    expect(result).toMatchObject({ kind: 'known', clicksAtRisk: 8, impressionsAtRisk: 80 });
+    expect(await reach({ urls: ['https://example.com/'] })).toMatchObject({ clicksAtRisk: 8 });
+  });
+
+  it('treats a query string as part of the page, and a slash before it as the same page', async () => {
+    await page(addDays(TODAY, -2), 'https://example.com/a/?x=1', 6);
+    await page(addDays(TODAY, -2), 'https://example.com/a?x=2', 4);
+    // "/a/?x=1" and "/a?x=1" are the same page; "/a?x=2" is a different one.
+    expect(await reach({ urls: ['https://example.com/a?x=1'] })).toMatchObject({ clicksAtRisk: 6 });
+    expect(await reach({ urls: ['https://example.com/a/?x=1'] })).toMatchObject({ clicksAtRisk: 6 });
+    expect(await reach({ urls: ['https://example.com/a?x=2'] })).toMatchObject({ clicksAtRisk: 4 });
+  });
+
+  it('reads the reconnected connection, not the revoked history beside it', async () => {
+    const reconnected = randomUUID();
+    await db.admin.query(
+      `INSERT INTO sites (workspace_id, id, name, primary_domain, verification_token)
+       VALUES ($1, $2, 'Reconnected', 'reconnected.example', 'verify-token')`,
+      [disposable.workspace, reconnected],
+    );
+    // The old, revoked connection still has its property and its facts.
+    await db.admin.query(
+      `INSERT INTO connections (workspace_id, id, site_id, connector, label, settings, state)
+       VALUES ($1, $2, $3, 'google-search-console', 'Search Console', $4::jsonb, 'revoked')`,
+      [disposable.workspace, `con_${'c'.repeat(32)}`, reconnected, JSON.stringify({ property: 'sc-domain:old.example' })],
+    );
+    await page(addDays(TODAY, -10), 'https://reconnected.example/p', 500, 5_000, reconnected);
+    await db.admin.query(
+      `INSERT INTO gsc_page_aggregates
+         (workspace_id, site_id, property, date, page, page_key, country, device, clicks, impressions, ctr, position, is_final)
+       VALUES ($1, $2, 'sc-domain:old.example', $3, 'https://reconnected.example/p', 'https://reconnected.example/p', '', '', 500, 5000, 0.1, 3, true)`,
+      [disposable.workspace, reconnected, addDays(TODAY, -10)],
+    );
+    // The replacement connection reads a different property, with fresher facts.
+    await db.admin.query(
+      `INSERT INTO connections (workspace_id, id, site_id, connector, label, settings, state)
+       VALUES ($1, $2, $3, 'google-search-console', 'Search Console', $4::jsonb, 'active')`,
+      [disposable.workspace, `con_${'d'.repeat(32)}`, reconnected, JSON.stringify({ property: 'sc-domain:reconnected.example' })],
+    );
+    await db.admin.query(
+      `INSERT INTO gsc_page_aggregates
+         (workspace_id, site_id, property, date, page, page_key, country, device, clicks, impressions, ctr, position, is_final)
+       VALUES ($1, $2, 'sc-domain:reconnected.example', $3, 'https://reconnected.example/p', 'https://reconnected.example/p', '', '', 3, 30, 0.1, 3, true)`,
+      [disposable.workspace, reconnected, addDays(TODAY, -1)],
+    );
+
+    const result = await reach({ urls: ['https://reconnected.example/p'], siteId: reconnected });
+    expect(result).toMatchObject({ kind: 'known', clicksAtRisk: 3, dataThrough: addDays(TODAY, -1) });
   });
 
   it('reports null clicks, not zero, for a page with no search history', async () => {
