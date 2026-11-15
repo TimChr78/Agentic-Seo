@@ -416,10 +416,24 @@ export class FakeGitHub {
         this.json(response, 404, { message: 'Not Found' });
         return DONE;
       }
-      this.json(response, 200, {
-        truncated: false,
-        tree: [...entries].map(([path, entry]) => ({ path, type: entry.type, mode: entry.mode, sha: entry.sha })),
-      });
+      // Like GitHub's recursive tree: leaves plus one `tree` entry per directory, whose SHA changes
+      // whenever anything below it does (review round 3: a nested edit changes its directories).
+      const leaves = [...entries].map(([path, entry]) => ({ path, type: entry.type, mode: entry.mode, sha: entry.sha }));
+      const directories = new Map<string, string[]>();
+      for (const leaf of leaves) {
+        const parts = leaf.path.split('/');
+        for (let depth = 1; depth < parts.length; depth += 1) {
+          const dir = parts.slice(0, depth).join('/');
+          directories.set(dir, [...(directories.get(dir) ?? []), `${leaf.path}:${leaf.mode}:${leaf.sha}`]);
+        }
+      }
+      const trees = [...directories].map(([path, members]) => ({
+        path,
+        type: 'tree',
+        mode: '040000',
+        sha: createHash('sha1').update(members.sort().join('\n')).digest('hex'),
+      }));
+      this.json(response, 200, { truncated: false, tree: [...trees, ...leaves] });
       return DONE;
     }
     if (rest[0] === 'pulls' && method === 'POST') {

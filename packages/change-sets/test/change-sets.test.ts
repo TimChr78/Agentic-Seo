@@ -1180,6 +1180,56 @@ describe.skipIf(!hasTestDatabase())('change sets and the GitHub connector', () =
     expect((await call(changesStatus, { changeSetId })).run.state).toBe('verified');
   });
 
+  it('records an inverse the drafter refuses as uncovered, so the rollback is never exact (review round 3)', async () => {
+    const created = await call(
+      changesCreate,
+      createBody([titleChange('/about/', 'Old about', 'New about'), titleChange('/contact/', 'Contact', 'New contact')], {
+        title: 'Rewrite two titles',
+      }),
+    );
+    const submitted = await call(changesRequestApply, { changeSetId: created.changeSetId, note: 'Apply.' });
+    await call(approvalsApprove, { approvalId: submitted.approvalId }, personB);
+    await drain();
+    const open = await call(changesStatus, { changeSetId: created.changeSetId });
+    const mergeSha = github.merge(open.run.prNumber as number);
+    site.setPage('/about/', pageHtml('New about', 'Old description'));
+    site.setPage('/contact/', pageHtml('New contact', 'Old description'));
+    site.setVersion(mergeSha);
+    await poll();
+    await drain();
+    expect((await call(changesStatus, { changeSetId: created.changeSetId })).run.state).toBe('verified');
+
+    // The contact page's source is deleted after the merge: its inverse cannot be drafted.
+    github.pushEntry(DEFAULT_BRANCH, 'contact/index.html', null);
+    const rollback = await call(changesRollback, { changeSetId: created.changeSetId, note: 'Both titles were wrong.' });
+    expect(rollback.mode).toBe('proposed');
+    expect(rollback.uncoveredChanges.map((entry: { index: number }) => entry.index)).toEqual([1]);
+    expect((await call(changesStatus, { changeSetId: rollback.changeSetId })).run.uncoveredChanges).toHaveLength(1);
+  });
+
+  it('refuses to reopen a rejected rollback proposal while another is open, with a clear message (review round 3)', async () => {
+    const { changeSetId, prNumber } = await openPullRequest();
+    const mergeSha = github.merge(prNumber);
+    site.setPage('/about/', pageHtml('New about', 'Old description'));
+    site.setVersion(mergeSha);
+    await poll();
+    await drain();
+
+    const first = await call(changesRollback, { changeSetId, note: 'The title tested badly.' });
+    const submitted = await call(changesRequestApply, { changeSetId: first.changeSetId, note: 'Roll it back.' });
+    await call(approvalsReject, { approvalId: submitted.approvalId, note: 'Not this week.' }, personB);
+    const second = await call(changesRollback, { changeSetId, note: 'Second attempt.' });
+    expect(second.changeSetId).not.toBe(first.changeSetId);
+
+    await expect(call(changesUpdateDraft, { changeSetId: first.changeSetId, summary: 'Try the first one again.' })).rejects.toThrow(
+      new RegExp(`Rollback ${second.changeSetId} of ${changeSetId} is already open`),
+    );
+    // Its changes are the original's inverses: a hand edit is refused too.
+    await expect(
+      call(changesUpdateDraft, { changeSetId: second.changeSetId, changes: [titleChange('/about/', 'New about', 'Other')] }),
+    ).rejects.toThrow(/Call changes\.rollback again/);
+  });
+
   it('refuses change-set content through config.import, for a new artifact and an existing one', async () => {
     const created = await call(changesCreate, createBody([titleChange('/about/', 'Old about', 'New about')]));
     const stored = (await call(changesGet, { changeSetId: created.changeSetId })).content as Record<string, unknown>;

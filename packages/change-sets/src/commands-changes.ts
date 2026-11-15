@@ -498,6 +498,36 @@ export const changesUpdateDraft = defineCommand({
         `This change set is waiting for approval (${pending[0]!.id}). Have it rejected, or approve it, before redrafting it.`,
       );
     }
+    if (run.rollbackOf) {
+      // A rollback proposal's changes are the inverses of the original's, and its coverage was
+      // recorded when it was proposed: a hand-edited or partial redraft could drop an inverse
+      // without recording it. Ask for a new proposal instead.
+      if (input.changes || input.allowPartial)
+        throw new AppError(
+          'invalid_input',
+          `This is a rollback of ${run.rollbackOf}; its changes are the inverses of that change set. Call changes.rollback again for a new proposal instead of editing its changes.`,
+        );
+      // Reopening a closed proposal while another rollback of the same change set is open would
+      // break the one-open-rollback rule. Lock the original (the order changes.rollback uses), then
+      // look for another open proposal.
+      await lockRun(ctx.tx, ws, run.rollbackOf);
+      const [other] = await ctx.tx
+        .select({ artifactId: schema.changeSetRuns.artifactId })
+        .from(schema.changeSetRuns)
+        .where(
+          and(
+            eq(schema.changeSetRuns.workspaceId, ws),
+            eq(schema.changeSetRuns.rollbackOf, run.rollbackOf),
+            sql`${schema.changeSetRuns.artifactId} <> ${run.artifactId}`,
+            sql`${schema.changeSetRuns.state} IN ('draft', 'in_review', 'approved', 'applying', 'pr_open', 'merged', 'deploying', 'deployed')`,
+          ),
+        );
+      if (other)
+        throw new AppError(
+          'conflict',
+          `Rollback ${other.artifactId} of ${run.rollbackOf} is already open, so this proposal cannot be reopened. Continue with that one, or close it first.`,
+        );
+    }
     const latest = await ctx.tx
       .select()
       .from(schema.artifactVersions)
@@ -1145,6 +1175,8 @@ export const changesRollback = defineCommand({
 
     // The inverse of each change, re-resolved and applied against the current files.
     const inverses: Change[] = [];
+    /** The original change each inverse reverses, so a refusal at drafting maps back to it. */
+    const inverseOrigin: number[] = [];
     const uncoveredChanges: { index: number; reason: string }[] = [];
     for (const [index, drafted] of content.changes.entries()) {
       // The file as it is now: the inverse's `before` has to be what the file carries today, or a
@@ -1156,8 +1188,10 @@ export const changesRollback = defineCommand({
         currentText = null;
       }
       const inverse = inverseOf(drafted, currentText);
-      if (inverse.ok) inverses.push(inverse.change);
-      else uncoveredChanges.push({ index, reason: inverse.reason });
+      if (inverse.ok) {
+        inverses.push(inverse.change);
+        inverseOrigin.push(index);
+      } else uncoveredChanges.push({ index, reason: inverse.reason });
     }
     if (!inverses.length) {
       throw new AppError(
@@ -1185,6 +1219,15 @@ export const changesRollback = defineCommand({
         `The inverse edits could not be drafted (${draft.refusals.map((entry) => entry.reason).join(' ')}). Revert the merge commit ${run.mergeCommitSha} by hand.`,
       );
     }
+    // An inverse the drafter refused (its source moved, was deleted, or the editor refused it) is
+    // not covered either: map it back to the original change, so a partial proposal can never be
+    // called exact or complete the original.
+    for (const refusal of draft.refusals) {
+      const index = inverseOrigin[refusal.index];
+      if (index !== undefined && !uncoveredChanges.some((entry) => entry.index === index))
+        uncoveredChanges.push({ index, reason: refusal.reason });
+    }
+    uncoveredChanges.sort((a, b) => a.index - b.index);
 
     // The rollback inherits the original's action class and reach: approving it is judged exactly
     // like approving the original change again, even when this proposal covers only some of its

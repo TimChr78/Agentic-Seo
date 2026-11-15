@@ -185,8 +185,13 @@ export async function headMatchesPlan(
   if (base?.truncated || head.truncated) {
     return { ok: false, reason: 'GitHub truncated the file list, so the commit’s contents cannot be verified' };
   }
-  const baseMap = baseEntries ?? new Map((base?.entries ?? []).map((entry) => [entry.path, entry]));
-  const headMap = new Map(head.entries.map((entry) => [entry.path, entry]));
+  // Leaf entries only (files, symlinks, submodules). A directory's SHA changes whenever anything
+  // inside it does, so `about/` differs from the base exactly when `about/index.html` was edited;
+  // the leaves already say everything the directories could, and git has no empty directories.
+  const leaves = (entries: Iterable<GitHubTreeEntry>) =>
+    new Map([...entries].filter((entry) => entry.type !== 'tree').map((entry) => [entry.path, entry]));
+  const baseMap = leaves(baseEntries ? baseEntries.values() : (base?.entries ?? []));
+  const headMap = leaves(head.entries);
 
   // Every path we write must be a file at the base, so the planned tree is well defined.
   for (const path of texts.keys()) {
