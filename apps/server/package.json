@@ -13,6 +13,7 @@
     "@agentic-seo/ai": "workspace:*",
     "@agentic-seo/artifacts": "workspace:*",
     "@agentic-seo/auth": "workspace:*",
+    "@agentic-seo/checks": "workspace:*",
     "@agentic-seo/client": "workspace:*",
     "@agentic-seo/commands": "workspace:*",
     "@agentic-seo/core": "workspace:*",

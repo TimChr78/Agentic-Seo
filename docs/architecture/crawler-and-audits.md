@@ -80,6 +80,8 @@ Render modes per audit: `never`, `auto` (render pages where the raw HTML has lit
 
 ## 5. The check catalogue
 
+The catalogue lives in `@agentic-seo/checks`. The package is the source of truth; [check-catalogue.md](check-catalogue.md) is generated from it by `node packages/checks/scripts/catalogue-md.mjs`, and a test fails when the committed table is stale. Every check declares a `scope` (`page`, `site` or `cross_page`) and an `evaluator` (`page`, `site` or `finalize`); cross-page checks carry a precise `definition` that the finalize SQL implements.
+
 A check is code:
 
 ```ts
@@ -87,7 +89,7 @@ export const titleTooLong = defineCheck({
   id: 'title.too_long',
   category: 'on_page',
   severity: 'low',                 // critical | high | medium | low | info
-  scope: 'page',                   // page | site | link | template
+  scope: 'page',                   // page | site | cross_page
   kind: 'deterministic',           // deterministic | judged
   appliesTo: (p) => p.isIndexable && p.isHtml,
   run: (p) => p.title && pixelWidth(p.title) > 580
@@ -123,7 +125,7 @@ Each check carries a test fixture. A synthetic "bad SEO" test site (as OpenSEO's
 
 **Judged checks** run on a **sample** (key pages from site context, the top traffic pages from GSC, one page per template cluster). They have a per-audit token budget. Their output schema is fixed (score, rationale, quoted evidence), they are logged in the AI decision log, and they are marked "Assessed by AI" in the UI. A judged check never produces a `critical` finding alone.
 
-**Freshness rules** (as claude-seo's quality gates) live as data next to the checks, with a `reviewed_at` date. Examples: FAQ rich results retired in May 2026; HowTo deprecated; INP replaced FID. CI warns when a rule is more than 6 months unreviewed.
+**Freshness rules** (as claude-seo's quality gates) live as data next to the checks in `packages/checks/src/rules.ts`, with a `reviewed_at` date. Examples: FAQ rich results retired in May 2026; HowTo deprecated; INP replaced FID. A script, `node packages/checks/scripts/stale-rules.mjs`, warns when a rule is more than 6 months unreviewed; wiring the warning into CI is still to do.
 
 ## 6. Health score
 
