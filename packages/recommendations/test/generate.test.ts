@@ -1054,6 +1054,55 @@ describe.skipIf(!hasTestDatabase())('specialist installation against a person’
     }
   }, 120_000);
 
+  it('adopts a person’s published playbook even when a newer draft has the same title (review round 3)', async () => {
+    await ctx.db.admin.query('DELETE FROM recommendation_specialists WHERE workspace_id = $1', [ws]);
+    await ctx.db.admin.query(`DELETE FROM artifacts WHERE workspace_id = $1 AND type = 'skill'`, [ws]);
+    const owner = userPrincipal('user_owner', ws, 'owner');
+    const make = (instructions: string) =>
+      ctx.executor.execute(
+        createArtifact,
+        {
+          type: 'skill',
+          name: STRATEGIST_SKILL_TITLE,
+          content: { title: STRATEGIST_SKILL_TITLE, instructions, allowedTools: [], tags: [] },
+        },
+        owner,
+        { surface: 'rest' },
+      );
+    const published = await make('A person’s published strategist playbook.');
+    await ctx.db.admin.query(`UPDATE artifact_versions SET state = 'published' WHERE workspace_id = $1 AND artifact_id = $2`, [
+      ws,
+      published.artifactId,
+    ]);
+    await ctx.db.admin.query(
+      `UPDATE artifacts SET published_version = 1, updated_at = now() - interval '1 hour' WHERE workspace_id = $1 AND id = $2`,
+      [ws, published.artifactId],
+    );
+    const newerDraft = await make('A newer, unpublished draft under the same title.');
+    const llm = await fakeLlm((request) => {
+      if (request.user.includes('Propose at most')) return { text: JSON.stringify({ candidates: [candidate([issueId])] }) };
+      return { text: JSON.stringify({ recommendations: [draft()] }) };
+    });
+    try {
+      await ctx.db.admin.query('DELETE FROM ai_providers WHERE workspace_id = $1', [ws]);
+      await seedProvider(ctx.db, ws, keyProvider, { baseUrl: llm.baseUrl });
+      const queued = await ctx.executor.execute(generateRecommendations, { siteId }, owner, { surface: 'rest' });
+      await runRecommendationGeneration(
+        ctx.db,
+        { workspaceId: ws, runId: queued.runId, siteId },
+        { kp: keyProvider, fetch: loopbackFetch, execute: ctx.executor.execute },
+      );
+      const mapping = await ctx.db.admin.query<{ artifact_id: string }>(
+        `SELECT artifact_id FROM recommendation_specialists WHERE workspace_id = $1 AND specialist = 'strategist'`,
+        [ws],
+      );
+      expect(mapping.rows[0]?.artifact_id).toBe(published.artifactId);
+      expect(mapping.rows[0]?.artifact_id).not.toBe(newerDraft.artifactId);
+    } finally {
+      await llm.close();
+    }
+  });
+
   it('never seeds over a person’s draft that carries the built-in title, and uses its own artifact', async () => {
     // The reviewer's case: the platform's identity is a mapping, not a title, so a person's draft
     // named exactly like the built-in playbook is never written to — and never used.

@@ -1,7 +1,7 @@
 import { artifactTypes, type Skill } from '@agentic-seo/artifacts';
 import { hashValue, newId } from '@agentic-seo/core';
 import { schema, type Tx } from '@agentic-seo/db';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, sql } from 'drizzle-orm';
 
 // The two specialists of task G (agents-and-autonomy.md §5) are `skill` artifacts, not code: a
 // playbook is Markdown written for a model, versioned and reviewed like any other artifact, so a
@@ -265,6 +265,9 @@ async function installSpecialist(
         eq(schema.artifacts.type, 'skill'),
         eq(schema.artifacts.archived, false),
         eq(schema.artifacts.name, definition.title),
+        // Published ones only, before ordering: a newer unpublished draft with the same title must
+        // not hide a person's published playbook.
+        isNotNull(schema.artifacts.publishedVersion),
       ),
     )
     .orderBy(sql`${schema.artifacts.updatedAt} DESC`)
