@@ -70,7 +70,7 @@ erDiagram
 | **Local grid** | A geo-grid local rank check for a business and keyword (claude-seo `maps`, OpenSEO local SEO) |
 | **AI visibility tracker** | Prompts × engines × market × schedule, with brand and competitor names to match |
 | **AI answer** | One engine's answer to one prompt on one run: mentions, citations (sources), sentiment, position |
-| **Search facts** | Three separate GSC datasets, because summing detail rows never reproduces totals (anonymised queries, row limits): **property totals** (date, search type), **page aggregates** (date, page, country, device) and **query detail** (date, query, page…). Each row set records aggregation type, search type, completeness and a finality watermark. Plus GA4 organic landing-page facts. Partitioned by month |
+| **Search facts** | Three separate GSC datasets, because summing detail rows never reproduces totals (anonymised queries, row limits): **property totals** (date, search type), **page aggregates** (date, page, country, device) and **query detail** (date, query, page…). Each row set records aggregation type, search type, completeness and a finality watermark. Plus GA4 organic landing-page facts. Phase 1 stores the first two as plain tables indexed by `(workspace_id, site_id, date)` rather than monthly partitions: partitioning needs the date in every primary key and a parent-table grant that row-level security does not enforce per partition, so the monthly split is deferred (decision recorded in `0008_connections_gsc.sql`) |
 
 ## 4. The agentic loop
 

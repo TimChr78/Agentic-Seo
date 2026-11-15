@@ -56,9 +56,15 @@ importers:
       '@agentic-seo/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@agentic-seo/integrations':
+        specifier: workspace:*
+        version: link:../../packages/integrations
       '@agentic-seo/providers':
         specifier: workspace:*
         version: link:../../packages/providers
+      '@agentic-seo/search-data':
+        specifier: workspace:*
+        version: link:../../packages/search-data
       '@agentic-seo/secrets':
         specifier: workspace:*
         version: link:../../packages/secrets
@@ -345,6 +351,33 @@ importers:
         specifier: 8.12.4
         version: 8.12.4
 
+  packages/integrations:
+    dependencies:
+      '@agentic-seo/commands':
+        specifier: workspace:*
+        version: link:../commands
+      '@agentic-seo/core':
+        specifier: workspace:*
+        version: link:../core
+      '@agentic-seo/db':
+        specifier: workspace:*
+        version: link:../db
+      '@agentic-seo/fetch':
+        specifier: workspace:*
+        version: link:../fetch
+      '@agentic-seo/secrets':
+        specifier: workspace:*
+        version: link:../secrets
+      '@agentic-seo/telemetry':
+        specifier: workspace:*
+        version: link:../telemetry
+      drizzle-orm:
+        specifier: 0.45.4
+        version: 0.45.4(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(kysely@0.29.9)(pg@8.23.1)
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
+
   packages/providers:
     dependencies:
       '@agentic-seo/commands':
@@ -356,6 +389,36 @@ importers:
       '@agentic-seo/db':
         specifier: workspace:*
         version: link:../db
+      '@agentic-seo/fetch':
+        specifier: workspace:*
+        version: link:../fetch
+      drizzle-orm:
+        specifier: 0.45.4
+        version: 0.45.4(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(kysely@0.29.9)(pg@8.23.1)
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
+
+  packages/search-data:
+    dependencies:
+      '@agentic-seo/commands':
+        specifier: workspace:*
+        version: link:../commands
+      '@agentic-seo/core':
+        specifier: workspace:*
+        version: link:../core
+      '@agentic-seo/db':
+        specifier: workspace:*
+        version: link:../db
+      '@agentic-seo/integrations':
+        specifier: workspace:*
+        version: link:../integrations
+      '@agentic-seo/providers':
+        specifier: workspace:*
+        version: link:../providers
+      '@agentic-seo/telemetry':
+        specifier: workspace:*
+        version: link:../telemetry
       drizzle-orm:
         specifier: 0.45.4
         version: 0.45.4(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(kysely@0.29.9)(pg@8.23.1)

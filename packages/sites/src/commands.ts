@@ -456,14 +456,31 @@ export const siteChecklist = defineCommand({
       .from(schema.secrets)
       .where(and(eq(schema.secrets.workspaceId, ws), eq(schema.secrets.name, 'dataforseo.login')))
       .limit(1);
+    // Search Console counts as connected only when the authorization is active *and* a property is
+    // selected: without a property the sync has nothing to read. `google-search-console` is the
+    // connector id packages/integrations registers (GSC_CONNECTOR_ID); sites does not depend on it
+    // just for this one fact.
+    const [gsc] = await ctx.tx
+      .select({ id: schema.connections.id })
+      .from(schema.connections)
+      .where(
+        and(
+          eq(schema.connections.workspaceId, ws),
+          eq(schema.connections.siteId, site.id),
+          eq(schema.connections.connector, 'google-search-console'),
+          eq(schema.connections.state, 'active'),
+          sql`${schema.connections.settings} ->> 'property' IS NOT NULL`,
+        ),
+      )
+      .limit(1);
     return {
       siteVerified: site.verifiedAt !== null,
-      // Connections (GSC, GA4, CMS) arrive with their own phase; until then both facts are false
-      // rather than a guess. Audits arrive with the crawler, so the count is honestly zero.
-      searchConsole: false,
+      searchConsole: gsc !== undefined,
       competitors: competitors?.value ?? 0,
+      // Audits arrive with the crawler, so the count is honestly zero.
       audits: 0,
       dataForSeoKey: key !== undefined,
+      // The GitHub CMS connector arrives with Phase 1's change sets.
       siteConnector: false,
     };
   },

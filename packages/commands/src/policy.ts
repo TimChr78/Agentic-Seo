@@ -43,6 +43,17 @@ export type ReachEstimate =
       clicksAtRisk: number | null;
       /** Key pages from site context (home, pricing, top converters), named for the approver. */
       criticalPages: string[];
+      /**
+       * GSC impressions at risk over the same 28 days, or null without search history. Added with
+       * the page aggregates (Phase 1); older readers ignore it.
+       */
+      impressionsAtRisk?: number | null;
+      /** Clicks over the same 28 days a year earlier (364 days back, so weekdays align). */
+      clicksAtRiskLastYear?: number | null;
+      /** Impressions over the same 28 days a year earlier. */
+      impressionsAtRiskLastYear?: number | null;
+      /** The newest day of page aggregates the estimate used, YYYY-MM-DD. */
+      dataThrough?: string;
     };
 
 /** The Phase 0 answer: no page aggregate dataset exists yet, so reach is always unknown. */

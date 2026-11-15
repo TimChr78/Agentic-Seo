@@ -11,6 +11,8 @@ export type {
   AiUse,
   ApprovalPolicy,
   ApprovalStatus,
+  ConnectionState,
+  GscDataset,
   InputWarningPrincipal,
   LearningEvidence,
   LearningStatus,

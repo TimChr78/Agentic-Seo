@@ -16,13 +16,16 @@ import { createDb } from '@agentic-seo/db';
 import { createProviderGateway } from '@agentic-seo/providers';
 import { endpointLocation, logger } from '@agentic-seo/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
+import { makeWorkerUtils } from 'graphile-worker';
 import { type Context, Hono } from 'hono';
 import { agentLedgerServices } from './agents/ledger';
 import type { Config } from './config';
+import { googleOAuthDeps, providerAdapters } from './google';
 import { bodyLimit } from './http/body-limit';
 import { type BrowserRequestPolicy, browserBody, formCsrfRefusal } from './http/csrf';
 import { MCP_MAX_BODY, mcpEndpoint } from './http/mcp';
 import { metricsHandler } from './http/metrics';
+import { oauthCallbackRoute } from './http/oauth-callback';
 import { consentPage, invitePage, loginPage, pageNonce, pagesCsp } from './http/pages';
 import { restApi } from './http/rest';
 import { securityHeaders } from './http/security-headers';
@@ -92,14 +95,23 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   const directory = authDirectory(db);
   const inputWarnings = createInputWarningRecorder(db);
   const metrics = createMetricsRegistry();
-  // Phase 0 configures no data adapter yet: the gateway is the one route to paid APIs, and a port
-  // without a configured adapter answers with the key that unlocks it instead of faking data.
-  // The usage commands (budgets, spend, unresolved) work without adapters, from the database.
-  const providers = createProviderGateway({ db, adapters: [] });
+  // The gateway is the one route to paid or rate-limited APIs. Search Console is the first adapter;
+  // a port without a configured adapter answers with the key that unlocks it instead of faking data.
+  const providers = createProviderGateway({ db, adapters: providerAdapters(config, db, keyProvider) });
+  // Commands queue background work (search.gsc.sync); the queue lives on the admin connection
+  // because Graphile Worker's tables are installation-level, not tenant data.
+  let queueUtils: ReturnType<typeof makeWorkerUtils> | undefined;
+  const enqueueTask = async (identifier: string, payload: Record<string, unknown>) => {
+    queueUtils ??= makeWorkerUtils({ pgPool: db.admin });
+    const utils = await queueUtils;
+    await utils.addJob(identifier, payload, { maxAttempts: 3 });
+  };
   const services: Services = {
     keyProvider,
     directory,
     providers,
+    googleOAuth: config.googleOAuth,
+    enqueueTask,
     publicUrl: config.publicUrl,
     serverVersion: VERSION,
     strictInputs: config.strictInputs,
@@ -142,7 +154,14 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     metrics.recordHttp(group(), statusClass(c.res.status), (performance.now() - started) / 1000);
   });
   // Baseline security headers on every response; routes with their own policy keep it.
-  app.use('*', securityHeaders({ https: config.publicUrl.startsWith('https://') }));
+  app.use(
+    '*',
+    securityHeaders({
+      https: config.publicUrl.startsWith('https://'),
+      // The OAuth callback carries a one-time code and the state in its URL.
+      noReferrerPaths: ['/oauth/callback'],
+    }),
+  );
 
   /**
    * Resolves the client IP once, then replaces any caller-supplied value of the resolved header.
@@ -308,6 +327,17 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
       (c) => mcp(c.req.raw),
     );
   }
+  // Where Google returns the person after they allow access. Without an OAuth client there is no
+  // callback to serve; the commands and `aseo doctor` name the two settings that enable it.
+  const googleOAuth = googleOAuthDeps(config, db, keyProvider);
+  app.get(
+    '/oauth/callback',
+    googleOAuth
+      ? oauthCallbackRoute(googleOAuth)
+      : (c: Context) =>
+          c.text('Google Search Console is not configured on this server. Set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET.', 404),
+  );
+
   app.route('/', restApi({ auth, db, executor, origin }));
 
   // API-owned roots answer JSON on every role, even when nothing below them matched. An unmatched
