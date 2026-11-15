@@ -320,8 +320,15 @@ export async function prepareScoreTables(tx: Tx, ref: { workspaceId: string; sit
         LIMIT ${SCORE_BATCH}`);
       const rows = clickBatch.rows as unknown as { page_key: string; clicks: number }[];
       if (!rows.length) break;
-      const keys = rows.map((row) => normalizePageUrl(row.page_key));
-      const clicks = rows.map((row) => Number(row.clicks));
+      // Stored keys can collapse to one page under this normalisation (`/a` and `/a//`): sum them
+      // here, or one INSERT … ON CONFLICT would update the same row twice and abort finalize.
+      const merged = new Map<string, number>();
+      for (const row of rows) {
+        const key = normalizePageUrl(row.page_key);
+        merged.set(key, (merged.get(key) ?? 0) + Number(row.clicks));
+      }
+      const keys = [...merged.keys()];
+      const clicks = [...merged.values()];
       await tx.execute(sql`
         INSERT INTO fz_clicks (page_key, clicks)
         SELECT unnest(ARRAY[${sql.join(
@@ -397,7 +404,16 @@ export async function scoreOpenIssues(
   window: ScoreWindow,
 ): Promise<{ result: ScoreResult; unchecked: number }> {
   const states = emptyCategoryStates();
-  if (window.pages === 0) return { result: finalizeScore(states, 0, false), unchecked: 0 };
+  if (window.pages === 0) {
+    // No page was evaluated: the score is null, but the open issues this audit could not judge are
+    // still coverage it must report.
+    const counted = await tx.execute(sql`
+      SELECT count(*)::int AS n FROM issues i
+      WHERE i.workspace_id = ${ref.workspaceId} AND i.site_id = ${ref.siteId} AND i.state = 'open'
+        AND NOT EXISTS (SELECT 1 FROM fz_judged j WHERE j.check_id = i.check_id AND j.subject_key = i.subject_key)`);
+    const n = Number((counted.rows as unknown as { n: number }[])[0]?.n ?? 0);
+    return { result: finalizeScore(states, 0, false), unchecked: n };
+  }
   const averageWeight = window.totalWeight / window.pages;
   let unchecked = 0;
   let after: string | null = null;

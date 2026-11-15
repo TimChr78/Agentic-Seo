@@ -338,6 +338,13 @@ async function buildJudgedSubjects(tx: Tx, args: { workspaceId: string; siteId: 
         AND (${GATE_PREDICATES[group.gate]})
       ON CONFLICT DO NOTHING`);
   }
+  // A failure this audit proved is a judgement too, whether or not every relationship needed to
+  // establish a pass was readable, and whether or not its issue exists yet (a first audit's issues
+  // are opened after this table is built).
+  await tx.execute(sql`
+    INSERT INTO fz_judged (check_id, subject_key)
+    SELECT check_id, subject_key FROM fz_latest
+    ON CONFLICT DO NOTHING`);
   await tx.execute(sql`ANALYZE fz_judged`);
 }
 
