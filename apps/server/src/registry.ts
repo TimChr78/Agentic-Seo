@@ -3,6 +3,7 @@ import { artifactCommands, configCommands, learningsCommands, undoAgent } from '
 import { agentCommands, memberCommands, tokenCommands } from '@agentic-seo/auth';
 import { checkCommands } from '@agentic-seo/checks';
 import type { AnyCommand } from '@agentic-seo/commands';
+import { auditCommands } from '@agentic-seo/crawl';
 import { providerCommands } from '@agentic-seo/providers';
 import { searchDataCommands } from '@agentic-seo/search-data';
 import { secretCommands } from '@agentic-seo/secrets';
@@ -25,6 +26,7 @@ export const commands = [
   ...configCommands,
   ...siteCommands,
   ...checkCommands,
+  ...auditCommands,
   ...aiCommands,
   ...providerCommands,
   ...searchDataCommands,

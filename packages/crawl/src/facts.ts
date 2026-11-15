@@ -89,8 +89,17 @@ export interface HtmlFacts {
   charset: string | null;
   hreflang: { lang: string; href: string }[];
   headings: Heading[];
+  /** Links in document order, capped at {@link HTML_FACTS_MAX_LINKS}. */
   links: PageLink[];
+  /** Images in document order, capped at {@link HTML_FACTS_MAX_IMAGES}. */
   images: PageImage[];
+  /**
+   * More links were present than the cap kept. Optional and additive (not part of the original
+   * contract): checks that count links should treat a truncated list as evidence, not a total.
+   */
+  linksTruncated?: boolean;
+  /** More images were present than the cap kept; see {@link HtmlFacts.linksTruncated}. */
+  imagesTruncated?: boolean;
   jsonLd: JsonLdBlock[];
   /** `itemtype` values of microdata items. */
   microdataTypes: string[];
@@ -185,4 +194,10 @@ export interface SiteFacts {
   home: PageFacts | null;
   /** Whether `http://` of the primary host redirects to `https://`; null when not tested. */
   httpRedirectsToHttps: boolean | null;
+  /**
+   * Whether sitemap seeding stopped at a cap (documents, queued sitemaps, decompressed bytes or
+   * wall time). Optional and additive; the reasons are also appended to the last sitemap's
+   * `errors`. A truncated sitemap list means coverage is not the whole site.
+   */
+  sitemapsTruncated?: boolean;
 }

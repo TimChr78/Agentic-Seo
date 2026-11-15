@@ -76,6 +76,19 @@ describe('safeFetch', () => {
     expect(result.text).toBe('<title>Moved</title>');
   });
 
+  it('returns the 3xx itself when maxRedirects is 0, so a caller can police each hop', async () => {
+    const site = await startSite((req, res) => {
+      if (req.url === '/old') return redirectTo(res, '/new', 302);
+      ok(res, 'arrived', 'text/plain');
+    });
+    const result = await safeFetch(`http://site.test:${site.port}/old`, { ...siteOptions(site.port), maxRedirects: 0 });
+    expect(result.status).toBe(302);
+    expect(result.url).toBe(`http://site.test:${site.port}/old`);
+    expect(result.redirects).toEqual([{ url: `http://site.test:${site.port}/old`, status: 302, location: '/new' }]);
+    // The target was never contacted.
+    expect(site.requests.map((request) => request.url)).toEqual(['/old']);
+  });
+
   it('follows a 303 with a GET and drops the body', async () => {
     const site = await startSite((req, res) => {
       if (req.url === '/submit') {

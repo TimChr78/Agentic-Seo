@@ -192,6 +192,38 @@ const SEED: Record<string, { insert: string; appendOnly: boolean }> = {
     insert: `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, 'seed-user', 'viewer')`,
     appendOnly: false,
   },
+  // The crawl engine's working state (0007_crawl.sql). Inserted last because these rows point at
+  // the seeded site and audit; `crawl_host_leases` and `crawl_host_pacing` carry no workspace_id,
+  // so they are not tenant tables.
+  audits: {
+    insert: `INSERT INTO audits (workspace_id, id, site_id, scope, state, requested_by_type, requested_by_id)
+            VALUES ($1, 'adt_seed', '00000000-0000-4000-8000-000000000001', 'site', 'queued', 'user', 'seed-user')`,
+    appendOnly: false,
+  },
+  crawl_frontier: {
+    insert: `INSERT INTO crawl_frontier (workspace_id, audit_id, url_hash, url, discovered_by, section)
+            VALUES ($1, 'adt_seed', 'hash-seed', 'https://seed-site.example/', 'seed', '/')`,
+    appendOnly: false,
+  },
+  page_snapshots: {
+    insert: `INSERT INTO page_snapshots (workspace_id, id, site_id, audit_id, url, final_url, status, facts)
+            VALUES ($1, 'snp_seed', '00000000-0000-4000-8000-000000000001', 'adt_seed', 'https://seed-site.example/', 'https://seed-site.example/', 200, '{}'::jsonb)`,
+    appendOnly: false,
+  },
+  pages: {
+    insert: `INSERT INTO pages (workspace_id, id, site_id, url, last_audit_id, last_status)
+            VALUES ($1, 'pag_seed', '00000000-0000-4000-8000-000000000001', 'https://seed-site.example/', 'adt_seed', 200)`,
+    appendOnly: false,
+  },
+  link_edges: {
+    insert: `INSERT INTO link_edges (workspace_id, audit_id, from_url_hash, to_url_hash, to_url, internal)
+            VALUES ($1, 'adt_seed', 'hash-seed', 'hash-two', 'https://seed-site.example/two', true)`,
+    appendOnly: false,
+  },
+  page_link_stats: {
+    insert: `INSERT INTO page_link_stats (workspace_id, audit_id, url_hash) VALUES ($1, 'adt_seed', 'hash-seed')`,
+    appendOnly: false,
+  },
 };
 
 describe.skipIf(!hasTestDatabase())('foundation tables', () => {

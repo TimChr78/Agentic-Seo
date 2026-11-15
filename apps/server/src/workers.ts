@@ -1,5 +1,6 @@
 import { runQueuedPromptTests } from '@agentic-seo/ai';
 import { cleanupExpiredOAuthWorkspaceSelections } from '@agentic-seo/auth';
+import { type CrawlChunkPayload, PgHostLimiter, reconcileCrawls, runCrawlChunk } from '@agentic-seo/crawl';
 import type { Db } from '@agentic-seo/db';
 import { GSC_CONNECTOR_ID, refreshDueConnections } from '@agentic-seo/integrations';
 import { createProviderGateway } from '@agentic-seo/providers';
@@ -10,11 +11,17 @@ import { type Runner, run, type TaskList } from 'graphile-worker';
 import type { Config } from './config';
 import { googleOAuthDeps, providerAdapters } from './google';
 import { keyProviderFor } from './keys';
+import { VERSION } from './version';
 
-// Background work (ADR-0004). Phase 0 has two jobs: the cross-tenant cleanup of abandoned OAuth
-// consent choices, and the queued prompt tests of the AI gateway. Phase 1 adds the Google token
-// refresher and the Search Console sync. The crawler, change-set application and report rendering
-// arrive with their phases; their tasks go into the same list.
+// Background work (ADR-0004). Phase 0 has two recurring jobs: the cross-tenant cleanup of abandoned
+// OAuth consent choices, which cannot run in a request (it must see every workspace) and belongs to
+// the scheduler, and the queued prompt test cases of the AI gateway, which call a model outside any
+// transaction. Phase 1 adds the Google token refresher, the Search Console sync and the crawler:
+// `crawl_chunk` seeds robots.txt and the sitemaps on its first run, then crawls up to 200 URLs of one
+// audit, and `crawl_reconcile` dispatches queued audits and repairs stalled ones. `audits.run`
+// enqueues its first chunk transactionally through migration 0007's `crawl_enqueue`; the reconciler
+// is the fallback for an install whose Graphile schema did not exist yet. Change-set application and
+// report rendering arrive with their phases; their tasks go into the same list.
 //
 // Both `worker` and `scheduler` start a runner: in Graphile Worker the same runtime executes jobs
 // and a scheduler only decides when to enqueue them, and one process may hold both roles. Only the
@@ -33,26 +40,50 @@ export const CONNECTIONS_REFRESH_TASK = 'connections_refresh';
 /** One site's Search Console sync, or the daily fan-out when it has no payload. */
 export const GSC_SYNC_TASK = 'gsc_sync';
 
+/** One crawl chunk of one audit (crawler-and-audits.md §2). */
+export const CRAWL_CHUNK_TASK = 'crawl_chunk';
+
+/** The cross-tenant audit dispatcher and repairer; every write it makes is workspace-scoped. */
+export const CRAWL_RECONCILE_TASK = 'crawl_reconcile';
+
 /**
  * Recurring jobs in Graphile Worker's crontab format (minute hour day-of-month month weekday task).
- * Google's access tokens last an hour, so the refresher runs every five minutes with a ten-minute
- * margin: a token is renewed before a call can use it. The Search Console sync runs once a day,
- * early in the UTC morning; the on-demand command enqueues the same per-site job.
+ * Prompt tests are picked up within a minute, which is the latency the command's copy promises;
+ * hourly is plenty for the consent choice, which lives for a day. Google's access tokens last an
+ * hour, so the refresher runs every five minutes with a ten-minute margin. The Search Console sync
+ * runs once a day, early in the UTC morning; the on-demand command enqueues the same per-site job.
+ * The crawl reconciler runs every minute: it dispatches queued audits and repairs stalled ones.
  */
 export const CRONTAB = [
   `* * * * * ${AI_PROMPT_TESTS_TASK}`,
   `0 * * * * ${CLEANUP_OAUTH_SELECTIONS_TASK}`,
   `*/5 * * * * ${CONNECTIONS_REFRESH_TASK}`,
   `0 3 * * * ${GSC_SYNC_TASK}`,
+  `* * * * * ${CRAWL_RECONCILE_TASK}`,
 ].join('\n');
+
+/** Options the crawl tasks accept; the version goes into the honest user agent. */
+export interface CrawlWorkerOptions {
+  crawlVersion?: string;
+  /** The most requests in flight to one host, globally. Default 4. */
+  maxConcurrencyPerHost?: number;
+}
 
 /**
  * The task list. Each phase adds its tasks here; an unknown job is retried and then fails visibly.
  * `config` is optional so a test can list the tasks without building a server configuration; a job
  * that needs Google does nothing when the installation has no OAuth client.
  */
-export function taskListFor(db: Db, kp: KeyProvider, config?: Config): TaskList {
+export function taskListFor(db: Db, kp: KeyProvider, config?: Config, options: CrawlWorkerOptions = {}): TaskList {
   const providers = config ? createProviderGateway({ db, adapters: providerAdapters(config, db, kp) }) : undefined;
+  // One limiter per worker process: its leases live in Postgres, so every replica still shares the
+  // per-host limit.
+  const limiter = new PgHostLimiter(db, {
+    owner: `worker:${process.pid}`,
+    ...(options.maxConcurrencyPerHost === undefined ? {} : { maxConcurrencyPerHost: options.maxConcurrencyPerHost }),
+  });
+  const enqueueChunk = (payload: CrawlChunkPayload) => ({ jobKey: `crawl_chunk:${payload.auditId}:${payload.chunk}` });
+  const dispatchKey = (payload: CrawlChunkPayload) => ({ jobKey: `crawl_dispatch:${payload.auditId}` });
   return {
     [CLEANUP_OAUTH_SELECTIONS_TASK]: async () => {
       const removed = await cleanupExpiredOAuthWorkspaceSelections(db);
@@ -91,6 +122,24 @@ export function taskListFor(db: Db, kp: KeyProvider, config?: Config): TaskList 
         await helpers.addJob(GSC_SYNC_TASK, { workspaceId: row.workspace_id, siteId: row.site_id }, { maxAttempts: 3 });
       if (rows.length) logger.info({ sites: rows.length }, 'queued Search Console syncs');
     },
+    [CRAWL_CHUNK_TASK]: async (payload, helpers) => {
+      const result = await runCrawlChunk(db, payload as CrawlChunkPayload, {
+        limiter,
+        version: options.crawlVersion ?? VERSION,
+        logger,
+        enqueueNext: (next, spec) =>
+          helpers
+            .addJob(CRAWL_CHUNK_TASK, next, { ...enqueueChunk(next), ...(spec?.runAt ? { runAt: spec.runAt } : {}) })
+            .then(() => undefined),
+      });
+      logger.info({ ...result, auditId: (payload as CrawlChunkPayload).auditId }, 'crawl chunk ran');
+    },
+    [CRAWL_RECONCILE_TASK]: async (_payload, helpers) => {
+      const result = await reconcileCrawls(db, {
+        enqueue: (next) => helpers.addJob(CRAWL_CHUNK_TASK, next, dispatchKey(next)).then(() => undefined),
+      });
+      if (result.dispatched || result.finalized || result.repaired) logger.info(result, 'crawl reconciler ran');
+    },
   };
 }
 
@@ -106,7 +155,7 @@ export interface WorkerHandle {
  * runner finishes the jobs it holds before it resolves.
  */
 export async function startWorkers(config: Config, signal: AbortSignal, db: Db): Promise<WorkerHandle> {
-  const taskList = taskListFor(db, keyProviderFor(config), config);
+  const taskList = taskListFor(db, keyProviderFor(config), config, { crawlVersion: VERSION });
   const scheduled = config.roles.has('scheduler');
   const runner = await run({
     connectionString: config.adminDatabaseUrl,
