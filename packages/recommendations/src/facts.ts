@@ -2,8 +2,7 @@ import { findGitHubConnection, githubSettings } from '@agentic-seo/change-sets';
 import { CHANGE_TYPES, EDITOR_CAPABILITIES, type SiteMapping } from '@agentic-seo/changes';
 import { checkById } from '@agentic-seo/checks';
 import { schema, type Tx } from '@agentic-seo/db';
-import { findLiveConnection, GSC_CONNECTOR_ID } from '@agentic-seo/integrations';
-import { addDays, pageMatchKeys, today as searchConsoleToday } from '@agentic-seo/search-data';
+import { addDays, gscScopeOf, pageMatchKeys, today as searchConsoleToday } from '@agentic-seo/search-data';
 import { logger } from '@agentic-seo/telemetry';
 import { and, eq, sql } from 'drizzle-orm';
 
@@ -96,7 +95,12 @@ async function auditFor(tx: Tx, workspaceId: string, siteId: string, auditId?: s
 }
 
 /** Clicks over 28 days per normalised page key, for the issues' pages only. */
-async function clicksByPage(tx: Tx, workspaceId: string, siteId: string, urls: string[], now: Date): Promise<Map<string, number>> {
+async function clicksByPage(
+  tx: Tx,
+  input: { workspaceId: string; siteId: string; property: string; searchType: string },
+  urls: string[],
+  now: Date,
+): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   if (!urls.length) return out;
   const today = searchConsoleToday(now);
@@ -105,8 +109,10 @@ async function clicksByPage(tx: Tx, workspaceId: string, siteId: string, urls: s
   const { rows } = await tx.execute<{ page_key: string; clicks: string }>(sql`
     SELECT page_key, COALESCE(SUM(clicks), 0)::text AS clicks
       FROM gsc_page_aggregates
-     WHERE workspace_id = ${workspaceId}
-       AND site_id = ${siteId}
+     WHERE workspace_id = ${input.workspaceId}
+       AND site_id = ${input.siteId}
+       AND property = ${input.property}
+       AND search_type = ${input.searchType}
        AND page_key = ANY(ARRAY[${sql.join(
          keys.map((key) => sql`${key}`),
          sql`, `,
@@ -186,15 +192,24 @@ export async function gatherFacts(tx: Tx, input: GatherFactsInput): Promise<Fact
     .from(schema.sites)
     .where(and(eq(schema.sites.workspaceId, input.workspaceId), eq(schema.sites.id, input.siteId)));
   const found = await auditFor(tx, input.workspaceId, input.siteId, input.auditId);
-  const connection = await findLiveConnection(tx, input.workspaceId, input.siteId, GSC_CONNECTOR_ID);
-  const connected = connection?.state === 'active';
+  // The live connection's selected property and search type: the same scope reach and evidence use,
+  // so a property the site was moved off never inflates the numbers a model reasons over.
+  const scope = await gscScopeOf(tx, input.workspaceId, input.siteId);
+  const connected = scope.ok;
 
   let dataThrough: string | null = null;
-  if (connected) {
+  if (scope.ok) {
     const [latest] = await tx
       .select({ date: sql<string | null>`max(${schema.gscPageAggregates.date})::text` })
       .from(schema.gscPageAggregates)
-      .where(and(eq(schema.gscPageAggregates.workspaceId, input.workspaceId), eq(schema.gscPageAggregates.siteId, input.siteId)));
+      .where(
+        and(
+          eq(schema.gscPageAggregates.workspaceId, input.workspaceId),
+          eq(schema.gscPageAggregates.siteId, input.siteId),
+          eq(schema.gscPageAggregates.property, scope.property),
+          eq(schema.gscPageAggregates.searchType, scope.searchType),
+        ),
+      );
     dataThrough = latest?.date ?? null;
   }
 
@@ -210,7 +225,14 @@ export async function gatherFacts(tx: Tx, input: GatherFactsInput): Promise<Fact
     .limit(MAX_FACTS_ISSUES);
 
   const allUrls = issueRows.flatMap((row) => (row.affectedUrls.length ? row.affectedUrls : [row.subject]));
-  const clicks = connected ? await clicksByPage(tx, input.workspaceId, input.siteId, allUrls, now) : new Map<string, number>();
+  const clicks = scope.ok
+    ? await clicksByPage(
+        tx,
+        { workspaceId: input.workspaceId, siteId: input.siteId, property: scope.property, searchType: scope.searchType },
+        allUrls,
+        now,
+      )
+    : new Map<string, number>();
 
   const issues: FactIssue[] = issueRows.map((row) => {
     const urls = (row.affectedUrls.length ? row.affectedUrls : [row.subject]).filter((url) => /^https?:\/\//.test(url));

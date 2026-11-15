@@ -25,6 +25,8 @@ export interface ApplyDeps {
   kp: KeyProvider;
   /** Test seam for GitHub (a local fake server). */
   github?: GitHubSeam;
+  /** Test seam for the origin a site's host answers on (production: https). */
+  siteUrlFor?: (host: string) => string;
   now?: () => Date;
 }
 
@@ -240,7 +242,12 @@ export async function runChangesApply(db: Db, payload: { workspaceId: string; ar
 
   type Prepared =
     | { ok: false; status: 'skipped' | 'failed'; reason: string }
-    | { ok: true; run: Awaited<ReturnType<typeof loadRun>>; content: ChangeSetContent; site: { domain: string; name: string } };
+    | {
+        ok: true;
+        run: Awaited<ReturnType<typeof loadRun>>;
+        content: ChangeSetContent;
+        site: { domain: string; name: string; hosts: string[] };
+      };
 
   const prepared: Prepared = await db.withWorkspace(payload.workspaceId, async (tx) => {
     const run = await loadRun(tx, payload.workspaceId, payload.artifactId);
@@ -271,6 +278,7 @@ export async function runChangesApply(db: Db, payload: { workspaceId: string; ar
       .select({
         domain: schema.sites.primaryDomain,
         name: schema.sites.name,
+        hosts: schema.sites.hosts,
         archived: schema.sites.archived,
         verifiedAt: schema.sites.verifiedAt,
       })
@@ -360,6 +368,8 @@ export async function runChangesApply(db: Db, payload: { workspaceId: string; ar
     // 0. The stored source details are server-owned. Re-derive them from the base commit before
     // anything is written: a path, hash or diff the caller forged is not the change a person saw.
     const problems = await revalidateChangeSet(content, {
+      site: { name: site.name, primaryDomain: site.domain, hosts: site.hosts },
+      ...(deps.siteUrlFor ? { originFor: deps.siteUrlFor } : {}),
       mapping: settings.mapping,
       listFiles: async (prefix, ref) => (await client.listTree(ref, prefix)).paths,
       readFile: async (path, ref) => (await client.getFile(path, ref)).content,

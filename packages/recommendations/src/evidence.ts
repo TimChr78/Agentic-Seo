@@ -1,5 +1,5 @@
 import { schema, type Tx } from '@agentic-seo/db';
-import { addDays, pageMatchKeys, today as searchConsoleToday } from '@agentic-seo/search-data';
+import { addDays, gscScopeOf, pageMatchKeys, today as searchConsoleToday } from '@agentic-seo/search-data';
 import { and, eq, sql } from 'drizzle-orm';
 
 // Evidence is what a recommendation rests on (domain-model.md §4): an issue, a finding, a page with
@@ -84,7 +84,12 @@ const isUrl = (value: string): boolean => {
 };
 
 /** The 28-day summary of one page's Search Console rows, or nulls when it has none. */
-async function searchFactOf(tx: Tx, workspaceId: string, siteId: string, url: string, now: Date): Promise<SearchFactSummary> {
+async function searchFactOf(
+  tx: Tx,
+  input: { workspaceId: string; siteId: string; property: string; searchType: string },
+  url: string,
+  now: Date,
+): Promise<SearchFactSummary> {
   const keys = pageMatchKeys([url]);
   const today = searchConsoleToday(now);
   const { rows } = await tx.execute<{ clicks: string; impressions: string; position: string | null; latest: string | null; n: string }>(sql`
@@ -94,8 +99,10 @@ async function searchFactOf(tx: Tx, workspaceId: string, siteId: string, url: st
            max(date)::text AS latest,
            count(*)::text AS n
       FROM gsc_page_aggregates
-     WHERE workspace_id = ${workspaceId}
-       AND site_id = ${siteId}
+     WHERE workspace_id = ${input.workspaceId}
+       AND site_id = ${input.siteId}
+       AND property = ${input.property}
+       AND search_type = ${input.searchType}
        AND page_key = ANY(ARRAY[${sql.join(
          keys.map((key) => sql`${key}`),
          sql`, `,
@@ -121,6 +128,9 @@ export async function resolveEvidence(
   input: { workspaceId: string; siteId: string; items: readonly EvidenceItem[]; now?: Date },
 ): Promise<EvidenceResolution> {
   const now = input.now ?? new Date();
+  // One read of the live connection's property, so every search_fact item is summed from the same
+  // property and search type as reach (the selected one, never every property the site ever had).
+  const scope = await gscScopeOf(tx, input.workspaceId, input.siteId);
   const resolved: ResolvedEvidence[] = [];
   const problems: EvidenceProblem[] = [];
   for (const [index, item] of input.items.entries()) {
@@ -239,7 +249,14 @@ export async function resolveEvidence(
       });
       continue;
     }
-    const summary = await searchFactOf(tx, input.workspaceId, input.siteId, item.id, now);
+    const summary = scope.ok
+      ? await searchFactOf(
+          tx,
+          { workspaceId: input.workspaceId, siteId: input.siteId, property: scope.property, searchType: scope.searchType },
+          item.id,
+          now,
+        )
+      : { url: item.id, clicks: null, impressions: null, position: null, dataThrough: null };
     if (summary.clicks === null) {
       problems.push({
         index,

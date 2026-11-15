@@ -1,24 +1,21 @@
-import v8 from 'node:v8';
-import vm from 'node:vm';
 import { finalizeAudit } from '@agentic-seo/crawl';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { hasTestDatabase } from '../../db/test/disposable';
 import { pageFacts } from './fixtures';
-import { type AuditTestContext, addSite, createAuditTestContext, findingsOf, goodPage, issueRows, scoreRow, seedAudit } from './support';
+import {
+  type AuditTestContext,
+  addSite,
+  createAuditTestContext,
+  findingsOf,
+  forceGc,
+  goodPage,
+  issueRows,
+  scoreRow,
+  seedAudit,
+} from './support';
 
 // Review round 2 on PR #21, one public-entry-point test per finding. Each test fails against the
 // implementation before this round (see the pull request's "Review round 2" section).
-
-/**
- * A `gc` that works without `--expose-gc`: Node exposes the collector once the flag is set at
- * runtime (v8.setFlagsFromString + a fresh VM context), which is enough to measure live heap.
- */
-function forceGc(): () => void {
-  const existing = (globalThis as { gc?: () => void }).gc;
-  if (existing) return existing;
-  v8.setFlagsFromString('--expose-gc');
-  return vm.runInNewContext('gc') as () => void;
-}
 
 type IssueRow = {
   check_id: string;

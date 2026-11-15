@@ -20,6 +20,7 @@ import {
   urlOf,
 } from '@agentic-seo/changes';
 import { extractHtml, type HtmlFacts } from '@agentic-seo/crawl';
+import { changeHostProblem, type SiteHosts, type SiteOriginFor } from './site-host';
 
 // Drafting a change set means proving it can be applied before anyone is asked to review it. Each
 // change is resolved through the site's mapping to a repository file, the editor applies it in
@@ -30,14 +31,22 @@ import { extractHtml, type HtmlFacts } from '@agentic-seo/crawl';
 // base head, compares `sourceHash`, and re-applies the changes in the same order to build the
 // commit. One function, so "what was reviewed" and "what is written" cannot disagree.
 
-/** Everything drafting and applying need from the repository, resolved at one commit. */
-export interface DraftDeps {
+/** The repository reads one change's source resolution needs (the site binding is checked first). */
+export interface SourceReads {
   mapping: SiteMapping;
   baseSha: string;
   /** Repository paths under a prefix at baseSha (packages/changes' `listFiles`). */
   listFiles: (prefix: string) => Promise<readonly string[]>;
   /** A file's text at baseSha. */
   readFile: (path: string) => Promise<string>;
+}
+
+/** Everything drafting and applying need from the repository, resolved at one commit. */
+export interface DraftDeps extends SourceReads {
+  /** The site the changes belong to: every change URL must be a page on its hosts. */
+  site: SiteHosts;
+  /** Test seam for the origin a host answers on; production uses HTTPS. */
+  originFor?: SiteOriginFor;
 }
 
 /** One change the library refused, with the change's own place in the set. */
@@ -102,7 +111,7 @@ export type { ResolvedSource };
  */
 export async function resolveChangeSource(
   change: Change,
-  deps: DraftDeps,
+  deps: SourceReads,
   fileCache: Map<string, Promise<string>>,
 ): Promise<ResolvedSource | Refusal> {
   if (change.type === 'redirect') {
@@ -156,6 +165,13 @@ export async function draftChanges(changes: readonly Change[], deps: DraftDeps):
 
   for (const [index, change] of changes.entries()) {
     const url = urlOf(change);
+    // The site's own pages only: a change for another host would resolve through this site's
+    // mapping, edit this site's repository and verify a page this site does not serve.
+    const offSite = changeHostProblem(change, deps.site, deps.originFor);
+    if (offSite) {
+      refusals.push({ index, url, code: 'invalid', reason: offSite });
+      continue;
+    }
     let resolved: ResolvedSource | Refusal;
     try {
       resolved = await resolveChangeSource(change, deps, cache);

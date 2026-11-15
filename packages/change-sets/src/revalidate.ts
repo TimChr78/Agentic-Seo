@@ -2,6 +2,7 @@ import type { ChangeSetContent, ChangeSetDraftedChange } from '@agentic-seo/arti
 import { applyChange, renderDiff, type SiteMapping, sourceHashOf } from '@agentic-seo/changes';
 import { canonicalJson } from '@agentic-seo/core';
 import { resolveChangeSource } from './draft';
+import { changeHostProblem, type SiteHosts, type SiteOriginFor } from './site-host';
 
 // A change set's stored source path, base commit, source hash and diff are server-owned: drafting
 // derives them from the repository, and the reviewer approves what that derivation produced. This
@@ -16,6 +17,10 @@ import { resolveChangeSource } from './draft';
 
 /** The repository reads a re-derivation needs, at the commit each change was drafted from. */
 export interface RevalidateReads {
+  /** The site the change set belongs to: a stored change must still name one of its pages. */
+  site: SiteHosts;
+  /** Test seam for the origin a host answers on; production uses HTTPS. */
+  originFor?: SiteOriginFor;
   mapping: SiteMapping;
   listFiles: (prefix: string, ref: string) => Promise<readonly string[]>;
   readFile: (path: string, ref: string) => Promise<string>;
@@ -73,6 +78,15 @@ export async function revalidateChangeSet(content: ChangeSetContent, reads: Reva
   for (const [index, drafted] of content.changes.entries()) {
     const problem = (reason: string) => problems.push({ index, path: drafted.source.path, reason });
     const change = drafted.change;
+
+    // The site binding is re-checked here, not only at drafting: a change set written straight to the
+    // database would otherwise resolve through this site's mapping and be applied and verified
+    // against a page on another host.
+    const offSite = changeHostProblem(change, reads.site, reads.originFor);
+    if (offSite) {
+      problem(offSite);
+      continue;
+    }
 
     let resolved: Awaited<ReturnType<typeof resolveChangeSource>>;
     try {

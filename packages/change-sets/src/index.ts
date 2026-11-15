@@ -8,6 +8,7 @@ export * from './impact';
 export * from './poll';
 export * from './publish-hook';
 export * from './revalidate';
+export * from './site-host';
 export * from './state';
 export * from './tasks';
 export * from './verify';
