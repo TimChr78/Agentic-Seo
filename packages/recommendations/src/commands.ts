@@ -15,8 +15,10 @@ import { schema, type Tx } from '@agentic-seo/db';
 import { estimateReach } from '@agentic-seo/search-data';
 import { and, count, eq, type SQL, sql } from 'drizzle-orm';
 import { z } from 'zod';
+import { dependencyProblems } from './dependencies';
 import { enqueueRecommendationRun } from './enqueue';
 import { type EvidenceItem, pagesOf, problemsText, type ResolvedEvidence, resolveEvidence } from './evidence';
+import { specialistOfAgentName } from './specialists';
 import { deriveStatus, linkedChangeSets, RECOMMENDATION_STATUSES, type RecommendationStatus, statusCaseSql, statusSql } from './status';
 
 // The recommendation commands (agents-and-autonomy.md §2, domain-model.md §4). A recommendation is
@@ -103,40 +105,24 @@ const DraftFields = {
   leadingIndicator: z.string().trim().min(1).max(500).describe('The earliest signal that it is working or not'),
 } as const;
 
-/** The author of a recommendation created through a command: the principal, never a claim. */
-const authorOf = (ctx: CommandContext): Recommendation['author'] =>
-  ctx.principal.type === 'user' ? { kind: 'person' } : { kind: 'agent' };
+/**
+ * The author of a recommendation created through a command: the principal, never a claim. The
+ * hosted specialists are agent principals too; their agents rows carry the names the platform
+ * created them with, which is what makes their drafts read as "the strategist wrote this".
+ */
+const authorOf = (ctx: CommandContext): Recommendation['author'] => {
+  if (ctx.principal.type === 'user') return { kind: 'person' };
+  const specialist = specialistOfAgentName(ctx.principal.agent.name);
+  return specialist ? { kind: 'specialist', specialist } : { kind: 'agent' };
+};
 
 /** Refuses dependency ids that do not exist on this site, and any cycle the new edges would close. */
 async function checkDependencies(
   tx: Tx,
   input: { workspaceId: string; siteId: string; recommendationId?: string; dependsOn: string[] },
 ): Promise<void> {
-  if (!input.dependsOn.length) return;
-  const { rows } = await tx.execute<{ id: string; depends_on: string[] }>(sql`
-    SELECT a.id, COALESCE(ARRAY(SELECT jsonb_array_elements_text(v.content -> 'dependsOn')), '{}') AS depends_on
-      FROM artifacts a
-      JOIN artifact_versions v ON v.workspace_id = a.workspace_id AND v.artifact_id = a.id AND v.number = a.latest_version
-     WHERE a.workspace_id = ${input.workspaceId} AND a.site_id = ${input.siteId} AND a.type = 'recommendation'`);
-  const graph = new Map(rows.map((row) => [row.id, row.depends_on]));
-  const self = input.recommendationId ?? '(this recommendation)';
-  for (const dependency of input.dependsOn)
-    if (!graph.has(dependency))
-      throw new AppError(
-        'invalid_input',
-        `The dependency ${dependency} is not a recommendation on this site. Use recommendations.list to find the ids that exist here.`,
-      );
-  // Walk the edges from the new ones: reaching the recommendation itself is a cycle.
-  const seen = new Set<string>();
-  const stack = [...input.dependsOn];
-  while (stack.length) {
-    const next = stack.pop() as string;
-    if (next === self)
-      throw new AppError('invalid_input', `These dependencies form a cycle through ${self}. A recommendation cannot wait on itself.`);
-    if (seen.has(next)) continue;
-    seen.add(next);
-    stack.push(...(graph.get(next) ?? []));
-  }
+  const problems = await dependencyProblems(tx, input);
+  if (problems.length) throw new AppError('invalid_input', problems.join(' '));
 }
 
 interface BuiltDraft {

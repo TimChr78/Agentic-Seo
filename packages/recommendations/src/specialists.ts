@@ -1,7 +1,7 @@
 import { artifactTypes, type Skill } from '@agentic-seo/artifacts';
 import { hashValue, newId } from '@agentic-seo/core';
 import { schema, type Tx } from '@agentic-seo/db';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 
 // The two specialists of task G (agents-and-autonomy.md §5) are `skill` artifacts, not code: a
 // playbook is Markdown written for a model, versioned and reviewed like any other artifact, so a
@@ -17,6 +17,13 @@ import { and, eq, sql } from 'drizzle-orm';
 
 export const TECHNICAL_SKILL_TITLE = 'Technical specialist: prioritise issues into candidates';
 export const STRATEGIST_SKILL_TITLE = 'Strategist: synthesise recommendations';
+
+/** The agents row each specialist writes as; a person can pause it like any other agent. */
+export const specialistAgentName = (name: SpecialistName): string => (name === 'technical' ? 'Technical specialist' : 'Strategist');
+
+/** The specialist behind an agents row, by the name the platform created it with; null for any other agent. */
+export const specialistOfAgentName = (agentName: string): SpecialistName | null =>
+  agentName === specialistAgentName('strategist') ? 'strategist' : agentName === specialistAgentName('technical') ? 'technical' : null;
 
 export type SpecialistName = 'technical' | 'strategist';
 
@@ -146,8 +153,14 @@ async function publishedSkill(tx: Tx, artifactId: string, version: number): Prom
 /**
  * Seeds the two specialist skills on first use and returns the published playbooks. Serialised per
  * workspace with an advisory lock, so two runs starting together cannot create two pairs; the second
- * one reads what the first wrote. A skill a person already created with the same title is adopted,
- * never overwritten.
+ * one reads what the first wrote.
+ *
+ * A skill a person already published under the specialist's title is adopted, never overwritten. A
+ * skill under that title with no published version is a person's unpublished draft: the run leaves
+ * it alone and uses the platform's own seeded playbook (a separate artifact, titled "… (built in)")
+ * instead, so nobody's draft is rewritten and the run still has instructions it is allowed to read.
+ * Publishing the person's draft later makes the next run adopt it; the built-in one then stays as
+ * an unused skill rather than being deleted under someone.
  */
 export async function ensureSpecialists(tx: Tx, workspaceId: string, sponsorUserId: string): Promise<InstalledSpecialist[]> {
   // One lock for the pair, not one per skill: both are created in the same transaction.
@@ -155,25 +168,41 @@ export async function ensureSpecialists(tx: Tx, workspaceId: string, sponsorUser
   const installed: InstalledSpecialist[] = [];
   for (const definition of specialistDefinitions) {
     const content = contentOf(definition);
-    const [existing] = await tx
-      .select({ id: schema.artifacts.id, publishedVersion: schema.artifacts.publishedVersion })
+    const builtInTitle = builtInTitleOf(definition);
+    // RLS scopes this to the workspace; the type and titles identify the pair we seed and the
+    // artifact a person may have written in its place.
+    const rows = await tx
+      .select({
+        id: schema.artifacts.id,
+        name: schema.artifacts.name,
+        latestVersion: schema.artifacts.latestVersion,
+        publishedVersion: schema.artifacts.publishedVersion,
+      })
       .from(schema.artifacts)
       .where(
-        // RLS scopes this to the workspace; the type and name identify the pair we seed.
-        and(eq(schema.artifacts.type, 'skill'), eq(schema.artifacts.name, definition.title), eq(schema.artifacts.archived, false)),
+        and(
+          eq(schema.artifacts.type, 'skill'),
+          eq(schema.artifacts.archived, false),
+          inArray(schema.artifacts.name, [definition.title, builtInTitle]),
+        ),
       );
-    if (existing) {
-      const published = existing.publishedVersion ? await publishedSkill(tx, existing.id, existing.publishedVersion) : null;
+    // The person's own published playbook wins over the built-in one.
+    const own = rows.find((row) => row.name === definition.title && row.publishedVersion);
+    const builtIn = rows.find((row) => row.name === builtInTitle);
+    const adoptable = own ?? (builtIn?.publishedVersion ? builtIn : undefined);
+    if (adoptable?.publishedVersion) {
+      const published = await publishedSkill(tx, adoptable.id, adoptable.publishedVersion);
       if (published) {
-        installed.push({ name: definition.name, artifactId: existing.id, version: existing.publishedVersion!, skill: published });
+        installed.push({ name: definition.name, artifactId: adoptable.id, version: adoptable.publishedVersion, skill: published });
         continue;
       }
-      // An unpublished or unreadable skill is replaced by a fresh published version, so a run never
-      // depends on a playbook nobody published.
-      const number = (existing.publishedVersion ?? 0) + 1;
+    }
+    // No readable published playbook: seed one on the built-in artifact (never on a person's draft).
+    if (builtIn) {
+      const number = builtIn.latestVersion + 1;
       await tx.insert(schema.artifactVersions).values({
         workspaceId,
-        artifactId: existing.id,
+        artifactId: builtIn.id,
         number,
         state: 'published',
         content,
@@ -185,14 +214,12 @@ export async function ensureSpecialists(tx: Tx, workspaceId: string, sponsorUser
       await tx
         .update(schema.artifacts)
         .set({ latestVersion: number, publishedVersion: number, updatedAt: new Date() })
-        .where(eq(schema.artifacts.id, existing.id));
-      installed.push({ name: definition.name, artifactId: existing.id, version: number, skill: content });
+        .where(eq(schema.artifacts.id, builtIn.id));
+      installed.push({ name: definition.name, artifactId: builtIn.id, version: number, skill: content });
       continue;
     }
     const id = newId('skl');
-    await tx
-      .insert(schema.artifacts)
-      .values({ workspaceId, id, type: 'skill', name: definition.title, latestVersion: 1, publishedVersion: 1 });
+    await tx.insert(schema.artifacts).values({ workspaceId, id, type: 'skill', name: builtInTitle, latestVersion: 1, publishedVersion: 1 });
     await tx.insert(schema.artifactVersions).values({
       workspaceId,
       artifactId: id,
@@ -208,6 +235,9 @@ export async function ensureSpecialists(tx: Tx, workspaceId: string, sponsorUser
   }
   return installed;
 }
+
+/** The platform's own playbook artifact when a person's draft holds the plain title. */
+export const builtInTitleOf = (definition: SpecialistDefinition): string => `${definition.title} (built in)`;
 
 /** The default model tier a specialist's playbook asks for. */
 export const tierOfSpecialist = (name: SpecialistName): 'fast' | 'deep' => definitionOf(name).tier;

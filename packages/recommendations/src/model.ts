@@ -61,10 +61,52 @@ export const recommendationDraftSchema = z.object({
       }),
     )
     .max(20)
+    .default([])
     .describe('The changes it implies; only types the site can apply'),
 });
 
 export const strategistOutputSchema = z.object({ recommendations: z.array(recommendationDraftSchema).max(20) });
+
+/**
+ * The envelope a call returns, before any item is judged: `recommendations` and `candidates` are
+ * loose objects. The transport only enforces that the model answered with JSON in the right shape;
+ * each item is validated strictly afterwards, so one item missing a field is retried and dropped
+ * alone instead of failing the whole answer (which used to throw and lose every valid sibling).
+ */
+const looseItem = z.record(z.string(), z.unknown());
+export const candidateEnvelopeSchema = z.object({ candidates: z.array(looseItem).max(20) });
+export const recommendationEnvelopeSchema = z.object({ recommendations: z.array(looseItem).max(20) });
+export type CandidateEnvelope = z.output<typeof candidateEnvelopeSchema>;
+export type RecommendationEnvelope = z.output<typeof recommendationEnvelopeSchema>;
+
+/** One item as the model wrote it, with what the strict schema said about it. */
+export interface CheckedItem<T> {
+  /** The parsed item, or null when the strict schema refused it. */
+  value: T | null;
+  /** The item as written, for the retry prompt. */
+  raw: unknown;
+  /** The `title` the model wrote, when it is a string: how a retry's answer is matched back. */
+  title: string | null;
+  /** The strict schema's problems, as sentences a retry can act on. */
+  errors: string[];
+}
+
+/** Validates each loose item against the strict schema, keeping the refused ones and why. */
+export function validateItems<T>(items: readonly unknown[], schema: z.ZodType<T>): CheckedItem<T>[] {
+  return items.map((raw) => {
+    const parsed = schema.safeParse(raw);
+    const title = (raw as { title?: unknown } | null)?.title;
+    const label = typeof title === 'string' && title.trim() ? title : null;
+    return parsed.success
+      ? { value: parsed.data, raw, title: label, errors: [] }
+      : {
+          value: null,
+          raw,
+          title: label,
+          errors: parsed.error.issues.map((issue) => `${issue.path.join('.') || 'item'}: ${issue.message}`),
+        };
+  });
+}
 
 export type TechnicalCandidate = z.output<typeof technicalCandidateSchema>;
 /** One recommendation as the strategist returns it: the content without the server-derived fields. */

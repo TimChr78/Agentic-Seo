@@ -514,6 +514,11 @@ export const artifactTypes = {
     description:
       'A versioned, evidence-backed recommendation with a hypothesis, expected impact, verification plan and falsification check. Create one with recommendations.create, which validates its evidence and computes the traffic at stake.',
     content: recommendation,
+    // The traffic at stake is computed from the evidence pages with the reach estimate, and the
+    // evidence, dependencies and prose are checked against this workspace and site. A caller that
+    // wrote the content itself could publish an invented estimate; only recommendations.create and
+    // recommendations.update, which resolve the evidence and compute the reach, may write it.
+    serverOwned: true,
   },
   change_set: {
     prefix: 'chg',

@@ -31,6 +31,10 @@ const PROSE_FIELDS: { path: string; text: (item: RecommendationDraft) => string 
   { path: 'verificationPlan.when', text: (item) => item.verificationPlan.when },
   { path: 'falsificationCheck', text: (item) => item.falsificationCheck },
   { path: 'leadingIndicator', text: (item) => item.leadingIndicator },
+  // Every other field a person reads: an evidence note and a proposed change's summary are prose
+  // the strategist writes, and a promise hidden in one is as visible as one in the rationale.
+  { path: 'evidence[].note', text: (item) => item.evidence.map((evidence) => evidence.note).join('\n') },
+  { path: 'proposedChanges[].summary', text: (item) => item.proposedChanges.map((change) => change.summary).join('\n') },
 ];
 
 /** A number as written: "1,240", "28", "10". Trailing punctuation is not part of it. */
@@ -74,11 +78,16 @@ export function proseProblems(item: RecommendationDraft, facts: FactsPayload): s
       );
     }
   }
-  const prose = PROSE_FIELDS.map((field) => field.text(item)).join('\n');
-  for (const word of FORBIDDEN_WORDS) {
-    const pattern = new RegExp(`\\b${word.replace(' ', '\\s+')}\\b`, 'i');
-    if (pattern.test(prose))
-      problems.push(`the text uses "${word}", which a recommendation never says. State an expectation ("Expected: …"), never a promise`);
+  const prose = (item: RecommendationDraft): { path: string; text: string }[] =>
+    PROSE_FIELDS.map((field) => ({ path: field.path, text: field.text(item) }));
+  for (const field of prose(item)) {
+    for (const word of FORBIDDEN_WORDS) {
+      const pattern = new RegExp(`\\b${word.replace(' ', '\\s+')}\\b`, 'i');
+      if (pattern.test(field.text))
+        problems.push(
+          `${field.path} uses "${word}", which a recommendation never says. State an expectation ("Expected: …"), never a promise`,
+        );
+    }
   }
   return problems;
 }

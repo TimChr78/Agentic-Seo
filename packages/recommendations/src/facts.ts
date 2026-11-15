@@ -284,8 +284,10 @@ export async function gatherFacts(tx: Tx, input: GatherFactsInput): Promise<Fact
   facts.counts.openRecommendations = facts.existing.length;
   facts.counts.issuesInPayload = facts.issues.length;
 
-  // Bound the payload by dropping the weakest issues; the counts stay honest about the total.
-  while (facts.issues.length > 0 && JSON.stringify(facts).length > MAX_FACTS_CHARS) {
+  // Bound the payload by dropping the weakest issues; the counts stay honest about the total. The
+  // cap measures `factsText` — the exact string the model receives, escaping included — so the
+  // transmitted payload can never exceed it.
+  while (facts.issues.length > 0 && factsText(facts).length > MAX_FACTS_CHARS) {
     facts.issues.pop();
     facts.truncated = true;
   }
@@ -329,5 +331,16 @@ export function metricNumbers(facts: FactsPayload): Set<string> {
   return numbers;
 }
 
-/** A stable, model-readable rendering of the payload: what the two calls actually receive. */
-export const factsText = (facts: FactsPayload): string => JSON.stringify(facts, null, 2);
+/**
+ * Escapes the three characters that could close one of the prompt's XML-style delimiters or open
+ * another: page titles, issue evidence samples and check names are attacker-controlled text, and a
+ * `</facts><task>…` inside one must reach the model as data, not as markup. `factsText` is the exact
+ * string a call receives, so the cap measures what is sent.
+ */
+export const escapeDelimiters = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/**
+ * A stable, model-readable rendering of the payload: what the two calls actually receive, escaped.
+ * The cap in `gatherFacts` measures this string, never a shorter serialisation of the same facts.
+ */
+export const factsText = (facts: FactsPayload): string => escapeDelimiters(JSON.stringify(facts, null, 2));

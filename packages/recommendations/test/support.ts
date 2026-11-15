@@ -1,7 +1,8 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { createExecutor } from '@agentic-seo/commands';
-import { createDb, type Db } from '@agentic-seo/db';
+import { type AgentActionEntry, createExecutor, type Services } from '@agentic-seo/commands';
+import { createDb, type Db, schema, type Tx } from '@agentic-seo/db';
 import { type KeyProvider, localKeyProvider, sealJson } from '@agentic-seo/secrets';
+import { sql } from 'drizzle-orm';
 import { APP_ROLE, createDisposableDb, type DisposableDb } from '../../db/test/disposable';
 
 // Shared setup for the recommendation integration tests: a disposable migrated database, an
@@ -12,7 +13,43 @@ import { APP_ROLE, createDisposableDb, type DisposableDb } from '../../db/test/d
 /** One key provider for the file: the provider row's sealed key is opened with it. */
 export const keyProvider: KeyProvider = localKeyProvider(randomBytes(32).toString('base64'));
 
-export const services = { serverVersion: 'test', strictInputs: false, keyProvider };
+/** The workspace the current transaction is scoped to, as the server's ledger hook reads it. */
+async function workspaceOf(tx: Tx): Promise<string> {
+  const result = await tx.execute<{ id: string }>(sql`SELECT current_setting('app.workspace_id')::uuid AS id`);
+  const id = result.rows[0]?.id;
+  if (!id) throw new Error('the test ledger was used outside a workspace-scoped transaction');
+  return id;
+}
+
+/**
+ * The two hooks the server wires for the action ledger (`apps/server/src/agents/ledger.ts`). A test
+ * that needs the ledger rows a run writes spreads these into its services, exactly as the server does.
+ */
+export const ledgerServices: Pick<Services, 'agentCounters' | 'onAgentAction'> = {
+  agentCounters: async () => ({ changes: 0 }),
+  onAgentAction: async (tx: Tx, entry: AgentActionEntry) => {
+    await tx.insert(schema.agentActions).values({
+      workspaceId: await workspaceOf(tx),
+      agentId: entry.agentId,
+      command: entry.command,
+      actionClass: entry.actionClass,
+      decision: entry.decision,
+      reasons: entry.reasons,
+      impact: entry.impact as Record<string, unknown>,
+      ok: entry.ok,
+      error: entry.error,
+      target: entry.target,
+      surface: entry.surface,
+      level: entry.level,
+      intent: entry.intent,
+      undo: entry.undo,
+      mandateId: entry.mandateId ?? null,
+      mandateVersion: entry.mandateVersion ?? null,
+    });
+  },
+};
+
+export const services: Services = { serverVersion: 'test', strictInputs: false, keyProvider, ...ledgerServices };
 
 const appUrl = (url: URL): string => {
   const copy = new URL(url.toString());

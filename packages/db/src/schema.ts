@@ -1244,6 +1244,11 @@ export const recommendationRuns = pgTable(
     /** A crashed worker's run is reclaimed once the lease expires. */
     leaseUntil: ts('lease_until'),
     attempts: integer('attempts').notNull().default(0),
+    /**
+     * The fencing token, bumped on every claim. A worker passes its claim's token on every write, so
+     * one whose lease expired after another took the run over writes nothing.
+     */
+    attemptToken: bigint('attempt_token', { mode: 'number' }).notNull().default(0),
     startedAt: ts('started_at'),
     finishedAt: ts('finished_at'),
     createdAt: ts('created_at').notNull().defaultNow(),

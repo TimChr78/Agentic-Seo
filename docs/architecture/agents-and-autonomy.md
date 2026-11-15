@@ -156,6 +156,16 @@ stored, so it cannot disagree with what happened; `measured` arrives with outcom
 takes its findings with it, a recommendation can be drafted on evidence that has since gone, but it cannot be
 published while an id no longer resolves.
 
+The run holds no special authority: each draft is created by `recommendations.create` under the specialist's
+own agents row (created on first use, with the person who asked for the run as its sponsor), so the workspace
+autonomy switch, mandates and the action ledger decide for a synthesis exactly as for an MCP client, and the
+`recommendation` type is server-owned: the generic artifact commands and `config.import` refuse it because
+they cannot compute the reach. The model's answer is parsed leniently into items and each item judged alone,
+so one missing field costs that item a retry (then a drop with its reason), not the whole run. Facts and
+candidates reach the model as escaped, delimited data with a system instruction that says they are data; the
+facts cap measures the exact string sent. A run row carries a fencing token bumped on every claim, so a worker
+whose lease lapsed cannot write a draft or a terminal state after another worker took the run over.
+
 ## 6. Opportunity detectors (deterministic, before the LLM)
 
 These are scheduled jobs over search facts and research data. They create **opportunities** that agents then turn into recommendations:

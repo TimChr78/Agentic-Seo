@@ -467,9 +467,15 @@ function refuseAgentsFor(ctx: CommandContext, type: string) {
 export function refuseServerOwned(type: string) {
   const def = artifactTypes[type as ArtifactType] as { serverOwned?: boolean; label: string } | undefined;
   if (!def?.serverOwned) return;
+  // Each server-owned type names its own drafting command: the fields it derives differ (a change
+  // set's source and diff, a recommendation's evidence-validated reach).
+  const hint =
+    type === 'recommendation'
+      ? 'Use recommendations.create to create one or recommendations.update to change it.'
+      : 'Use changes.create to draft one or changes.updateDraft to redraft it.';
   throw new AppError(
     'invalid_input',
-    `${def.label} content is built from the repository, so the generic artifact commands cannot write it. Use changes.create to draft one or changes.updateDraft to redraft it.`,
+    `${def.label} content is built from server-derived fields, so the generic artifact commands cannot write it. ${hint}`,
   );
 }
 

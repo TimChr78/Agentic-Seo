@@ -50,6 +50,10 @@ CREATE TABLE recommendation_runs (
   -- A lease, so a crashed worker's run is picked up again by the reconciler rather than forever.
   lease_until timestamptz,
   attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  -- The fencing token: bumped on every claim, so a worker whose lease expired cannot write a
+  -- recommendation or a terminal state after another worker took the run over. `attempts` counts
+  -- retries; this names which worker owns the run right now.
+  attempt_token bigint NOT NULL DEFAULT 0 CHECK (attempt_token >= 0),
   started_at timestamptz,
   finished_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),

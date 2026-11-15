@@ -1,5 +1,6 @@
 import { runQueuedPromptTests } from '@agentic-seo/ai';
-import { cleanupExpiredOAuthWorkspaceSelections } from '@agentic-seo/auth';
+import { activeMandate } from '@agentic-seo/artifacts';
+import { authDirectory, cleanupExpiredOAuthWorkspaceSelections } from '@agentic-seo/auth';
 import {
   CHANGES_APPLY_TASK,
   CHANGES_POLL_TASK,
@@ -8,6 +9,7 @@ import {
   runChangesPollTask,
   runChangesVerifyTask,
 } from '@agentic-seo/change-sets';
+import { createExecutor, type Services } from '@agentic-seo/commands';
 import { type CrawlChunkPayload, PgHostLimiter, reconcileCrawls, runCrawlChunk } from '@agentic-seo/crawl';
 import type { Db } from '@agentic-seo/db';
 import { buildUserAgent } from '@agentic-seo/fetch';
@@ -23,6 +25,7 @@ import { runGscSync } from '@agentic-seo/search-data';
 import type { KeyProvider } from '@agentic-seo/secrets';
 import { logger } from '@agentic-seo/telemetry';
 import { type Runner, run, type TaskList } from 'graphile-worker';
+import { agentLedgerServices } from './agents/ledger';
 import type { Config } from './config';
 import { googleOAuthDeps, providerAdapters } from './google';
 import { keyProviderFor } from './keys';
@@ -97,6 +100,19 @@ export interface CrawlWorkerOptions {
  */
 export function taskListFor(db: Db, kp: KeyProvider, config?: Config, options: CrawlWorkerOptions = {}): TaskList {
   const providers = config ? createProviderGateway({ db, adapters: providerAdapters(config, db, kp) }) : undefined;
+  // The recommendation run creates its drafts through the command layer, as the specialist's own
+  // agent principal, so the workspace autonomy switch, mandates and the action ledger decide for it
+  // exactly as they do for an MCP client. The services here are the two the executor needs for that;
+  // a worker process has no request behind it, so nothing else is wired.
+  const recommendationServices: Services = {
+    serverVersion: VERSION,
+    strictInputs: false,
+    keyProvider: kp,
+    directory: authDirectory(db),
+    activeMandate,
+    ...agentLedgerServices(),
+  };
+  const recommendationExecutor = createExecutor(db, recommendationServices);
   // One limiter per worker process: its leases live in Postgres, so every replica still shares the
   // per-host limit.
   const limiter = new PgHostLimiter(db, {
@@ -184,9 +200,10 @@ export function taskListFor(db: Db, kp: KeyProvider, config?: Config, options: C
       });
     },
     // A recommendation run: two structured model calls outside any transaction, each under the
-    // provider's budget, then the drafts and the run row in one transaction.
+    // provider's budget, then the drafts through recommendations.create and the run row closed under
+    // the run's fencing token.
     [RECOMMENDATIONS_GENERATE_TASK]: async (payload) => {
-      const outcome = await runRecommendationGeneration(db, payload, { kp });
+      const outcome = await runRecommendationGeneration(db, payload, { kp, execute: recommendationExecutor.execute });
       if (outcome.status !== 'completed') logger.info({ ...outcome }, 'recommendation run did not create anything');
     },
     [RECOMMENDATIONS_RECONCILE_TASK]: async (_payload, helpers) => {
