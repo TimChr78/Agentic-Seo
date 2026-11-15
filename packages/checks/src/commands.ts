@@ -58,7 +58,7 @@ export const checksCatalogue = defineCommand({
   name: 'checks.catalogue',
   title: 'List audit checks',
   description:
-    'List the checks in the SEO audit catalogue, optionally filtered by category, severity, scope or evaluator. Each item carries the id, category, severity, scope, evaluator, a plain explanation, the fix type and the official references. Use it to choose a check before reading or explaining a finding. Read-only; it runs no crawl and calls no provider.',
+    'List the checks in the SEO audit catalogue, optionally filtered by category, severity, scope or evaluator. Each item carries the id, category, severity, scope, evaluator, a plain explanation, the fix type and the official references. Use it to choose a check before reading or explaining a finding. Read-only and free: it runs no crawl and calls no provider.',
   input: z.object({
     category: z.enum(checkCategories).optional().describe('Only checks in this category'),
     severity: z.enum(severities).optional().describe('Only checks with this default severity'),
@@ -86,7 +86,7 @@ export const checksExplain = defineCommand({
   name: 'checks.explain',
   title: 'Explain an audit check',
   description:
-    'Return one check in full: what it detects, why it matters, what to do, its fix type, its official references, the freshness rules it depends on and, for a cross-page check, the exact definition the finalize step evaluates. Use it to explain a finding or plan a fix. Read-only; it runs no crawl and calls no provider.',
+    'Return one check in full: what it detects, why it matters, what to do, its fix type, its official references, the freshness rules it depends on and, for a cross-page check, the exact definition the finalize step evaluates. Use it to explain a finding or plan a fix. Read-only and free: it runs no crawl and calls no provider.',
   input: z.object({ checkId: z.string().min(1).describe('The dotted check id, e.g. title.too_long') }),
   output: z.object({ check: CheckDetailSchema }),
   permission: 'sites:read',

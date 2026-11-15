@@ -230,7 +230,7 @@ export const auditStatus = defineCommand({
   name: 'audits.status',
   title: 'Audit status',
   description:
-    'One audit’s state, why it ended partial or failed, its counters and its coverage, plus how many URLs are pending, leased or skipped. Use it to follow a crawl; there is no ETA. Poll no more than every few seconds.',
+    'One audit’s state, why it ended partial or failed, its counters and its coverage, plus how many URLs are pending, leased or skipped. Use it to follow a crawl; there is no ETA. Poll no more than every few seconds. Free.',
   input: z.object({ auditId: AuditId }),
   output: z.object({
     audit: AuditSchema,
@@ -271,7 +271,7 @@ export const listAudits = defineCommand({
   name: 'audits.list',
   title: 'List audits',
   description:
-    'The workspace’s audits, newest first, optionally for one site or one state. Use it to find the latest run and its state; `audits.pages` reads what an audit saw. Pages are cursored: pass `nextCursor` back as `cursor`.',
+    'The workspace’s audits, newest first, optionally for one site or one state. Use it to find the latest run and its state; `audits.pages` reads what an audit saw. Pages are cursored: pass `nextCursor` back as `cursor`. Free.',
   input: z.object({
     siteId: SiteId.optional(),
     state: z.enum(['queued', 'running', 'finalizing', 'completed', 'partial', 'failed', 'cancelled']).optional(),
@@ -346,7 +346,7 @@ export const auditPages = defineCommand({
   name: 'audits.pages',
   title: 'Audit pages',
   description:
-    'The pages one audit stored, in URL order: status, title, depth and whether robots.txt allowed them. Filter by status class to find errors or blocked pages. Use `audits.page` for one page’s full facts. Cursored: pass `nextCursor` back as `cursor`.',
+    'The pages one audit stored, in URL order: status, title, depth and whether robots.txt allowed them. Filter by status class to find errors or blocked pages. Use `audits.page` for one page’s full facts. Cursored: pass `nextCursor` back as `cursor`. Free.',
   input: z.object({
     auditId: AuditId,
     status: z
@@ -431,7 +431,7 @@ export const auditPage = defineCommand({
   name: 'audits.page',
   title: 'Audit page facts',
   description:
-    'The full extracted facts for one page of an audit: status, redirects, headers, timings and the HTML facts (title, meta, canonical, robots, hreflang, headings, links, images, JSON-LD, word count, content hash, mixed content). Use it to explain a finding. Identify the page by `url` or by the `snapshotId` that audits.pages returns.',
+    'The full extracted facts for one page of an audit: status, redirects, headers, timings and the HTML facts (title, meta, canonical, robots, hreflang, headings, links, images, JSON-LD, word count, content hash, mixed content). Use it to explain a finding. Identify the page by `url` or by the `snapshotId` that audits.pages returns. Free.',
   input: z.object({
     auditId: AuditId,
     url: z.string().min(1).max(2_048).optional().describe('The page URL as audits.pages lists it'),
@@ -464,7 +464,7 @@ export const cancelAudit = defineCommand({
   name: 'audits.cancel',
   title: 'Cancel an audit',
   description:
-    'Stop an audit. A running chunk finishes the pages it has in flight and stops within a few pages; the pages already crawled stay viewable, and the audit is finalized with reason “cancelled”. Use it to free the site for a new audit or to stop a crawl that was too broad.',
+    'Stop an audit. A running chunk finishes the pages it has in flight and stops within a few pages; the pages already crawled stay viewable, and the audit is finalized with reason “cancelled”. Use it to free the site for a new audit or to stop a crawl that was too broad. Free.',
   input: z.object({ auditId: AuditId }),
   output: z.object({ audit: AuditSchema }),
   permission: 'audits:run',

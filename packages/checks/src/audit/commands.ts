@@ -149,7 +149,7 @@ export const auditIssues = defineCommand({
   name: 'audits.issues',
   title: 'List site issues',
   description:
-    'List a site’s issues, worst first: severity, then how many pages are affected. Each issue groups the findings of one check on one subject across audits, and carries its state (open, resolved, ignored), the pages affected over the pages the last audit evaluated, and the clicks over the last 28 days that its pages earn in Search Console (null without a connection). Filter by state, severity, category or check. Use audits.issue for one issue’s evidence, explanation and history. Read-only; no crawl, no provider call.',
+    'List a site’s issues, worst first: severity, then how many pages are affected. Each issue groups the findings of one check on one subject across audits, and carries its state (open, resolved, ignored), the pages affected over the pages the last audit evaluated, and the clicks over the last 28 days that its pages earn in Search Console (null without a connection). Filter by state, severity, category or check. Use audits.issue for one issue’s evidence, explanation and history. Read-only and free; no crawl, no provider call.',
   input: z.object({
     siteId: SiteId,
     state: StateSchema.optional().describe('Only issues in this state'),
@@ -218,7 +218,7 @@ export const auditIssue = defineCommand({
   name: 'audits.issue',
   title: 'Issue detail',
   description:
-    'One issue in full: its definition (the catalogue check, why it matters, the fix type, official references and, for a cross-page check, the exact definition), the latest evidence item by item, the affected pages with what was found versus what was expected, its history across audits, and its ignore metadata. Use it before proposing a fix or writing a recommendation. Read-only; no crawl, no provider call.',
+    'One issue in full: its definition (the catalogue check, why it matters, the fix type, official references and, for a cross-page check, the exact definition), the latest evidence item by item, the affected pages with what was found versus what was expected, its history across audits, and its ignore metadata. Use it before proposing a fix or writing a recommendation. Read-only and free; no crawl, no provider call.',
   input: z.object({ issueId: IssueId }),
   output: z.object({
     issue: IssueDetailSchema,
@@ -336,7 +336,7 @@ export const auditFindings = defineCommand({
   name: 'audits.findings',
   title: 'Audit findings',
   description:
-    'The findings one audit produced, in subject order: one row per check failing on one subject, with its severity, category, capped evidence and the issue it belongs to. Filter by check, category or severity to see one problem’s evidence across pages. Findings are evidence and are never edited; the issue they group is what changes. Read-only; no crawl, no provider call.',
+    'The findings one audit produced, in subject order: one row per check failing on one subject, with its severity, category, capped evidence and the issue it belongs to. Filter by check, category or severity to see one problem’s evidence across pages. Findings are evidence and are never edited; the issue they group is what changes. Read-only and free; no crawl, no provider call.',
   input: z.object({
     auditId: z.string().min(1).max(64).describe('Audit id, e.g. adt_0192f3c2b4'),
     checkId: z.string().min(1).max(100).optional().describe('Only findings of this check'),
@@ -407,7 +407,7 @@ export const auditScore = defineCommand({
   name: 'audits.score',
   title: 'Audit health score',
   description:
-    'The health score of one audit, or of the site’s latest scored audit: 0–100, the per-category weights, penalties and contributions, the pages evaluated (the denominator), the open issues the audit could not judge (excluded from the score and reported as unchecked coverage), and the categories and checks that were not evaluated, with the reason each one was skipped. A null score with a reason means nothing could be evaluated. Use it for the audit overview and to compare audits; audits.issues says what to fix. Read-only; no crawl, no provider call.',
+    'The health score of one audit, or of the site’s latest scored audit: 0–100, the per-category weights, penalties and contributions, the pages evaluated (the denominator), the open issues the audit could not judge (excluded from the score and reported as unchecked coverage), and the categories and checks that were not evaluated, with the reason each one was skipped. A null score with a reason means nothing could be evaluated. Use it for the audit overview and to compare audits; audits.issues says what to fix. Read-only and free; no crawl, no provider call.',
   input: z.object({
     siteId: SiteId,
     auditId: z.string().min(1).max(64).optional().describe('The audit to read; omit for the site’s latest scored audit'),
@@ -500,7 +500,7 @@ export const checksIgnore = defineCommand({
   name: 'checks.ignore',
   title: 'Ignore an issue',
   description:
-    'Mark an issue as ignored, with a required reason of at least 10 characters. Ignored issues stay visible in audits.issues with state “ignored”, keep recording that they were seen, and are never resolved by a later audit: use it for a deliberate exception (a required noindex, a staging host). The reason is what a reviewer and a future agent read, so say why. A person with sites:write can call it; an agent’s call is judged by the policy engine, and a settings change needs a person. Undo with checks.unignore.',
+    'Mark an issue as ignored, with a required reason of at least 10 characters. Ignored issues stay visible in audits.issues with state “ignored”, keep recording that they were seen, and are never resolved by a later audit: use it for a deliberate exception (a required noindex, a staging host). The reason is what a reviewer and a future agent read, so say why. A person with sites:write can call it; an agent’s call is judged by the policy engine, and a settings change needs a person. Undo with checks.unignore. Free.',
   input: z.object({
     issueId: IssueId,
     reason: z
@@ -533,7 +533,7 @@ export const checksUnignore = defineCommand({
   name: 'checks.unignore',
   title: 'Unignore an issue',
   description:
-    'Return an ignored issue to the open list, clearing the ignore reason and who set it. A later audit then treats it like any open issue: it can be resolved by a passing audit or regressed by a new failure. Use it when the exception no longer applies. A person with sites:write can call it; an agent’s call is judged by the policy engine.',
+    'Return an ignored issue to the open list, clearing the ignore reason and who set it. A later audit then treats it like any open issue: it can be resolved by a passing audit or regressed by a new failure. Use it when the exception no longer applies. A person with sites:write can call it; an agent’s call is judged by the policy engine. Free.',
   input: z.object({ issueId: IssueId }),
   output: z.object({ issue: IssueSchema }),
   permission: 'sites:write',

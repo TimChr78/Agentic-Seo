@@ -140,7 +140,7 @@ The scheduler enqueues tracker runs. The worker asks the provider gateway for an
 
 ### 4.4 Agent session over MCP
 
-An external agent connects to `/mcp` with OAuth 2.1. On the consent screen a person chooses its scopes. The agent then reads `site-context://<site>` and `learnings://<site>`, calls research and audit tools (paid tools show their estimated cost before running), and drafts recommendations or change sets. It submits them under its mandate. Everything is recorded in the action ledger.
+An external agent connects to `/mcp` with OAuth 2.1. On the consent screen a person chooses its scopes. The agent then reads `site-context://<site>`, `issues://<site>` and `learnings://current`, calls research and audit tools (paid tools show their estimated cost before running), and drafts recommendations or change sets. It submits them under its mandate. Everything is recorded in the action ledger. Phase 1 also serves the `audit-and-propose` prompt, which walks the agent through the thin loop.
 
 ## 5. Events (internal and for agents)
 

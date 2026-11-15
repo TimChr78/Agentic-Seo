@@ -1,0 +1,6 @@
+- Serve the Phase 1 MCP resources from commands: `checks://catalogue`, `change-types://catalogue` (the JSON Schema and verification each change type promises) and the templates `site-context://<site>` (the published site context) and `issues://<site>` (open issues, worst first). A principal without the backing command's permission does not see a resource.
+- Add `changes.types`, the read command behind `change-types://catalogue`: every change type with its action class, what a re-fetch must show and the JSON Schema it accepts.
+- Add the `audit-and-propose` MCP prompt: the thin loop for one site, from `audits.issues` through evidence-backed `recommendations.create` to a draft change set, with the rule that no metric comes from anywhere but a tool.
+- Rewrite the server instructions around the thin loop (verify → audit → issues → recommendation → change set → a person approves → pull request → status).
+- Give every Phase 1 command an LLM-facing description that says what it costs, and fail the registry test when one is shorter than 180 characters or lacks a cost clause.
+- Refuse people-only commands to an agent with a clear error over MCP, for OAuth connections as well as API tokens, instead of answering "tool not found".

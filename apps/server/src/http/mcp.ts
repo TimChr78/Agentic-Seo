@@ -3,11 +3,11 @@ import { type AnyCommand, type Executor, type Principal, ROLE_PERMISSIONS } from
 import { AppError } from '@agentic-seo/core';
 import type { Db } from '@agentic-seo/db';
 import { requireMcpAuth } from '@better-auth/mcp';
-import { type AuthInfo, createMcpHandler, McpServer, type StandardSchemaWithJSON } from '@modelcontextprotocol/server';
+import { type AuthInfo, createMcpHandler, McpServer, ResourceTemplate, type StandardSchemaWithJSON } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { commands } from '../registry';
 import { VERSION } from '../version';
-import { MCP_GUIDE_URI, MCP_INSTRUCTIONS } from './mcpInstructions';
+import { auditAndProposePrompt, MCP_GUIDE_URI, MCP_INSTRUCTIONS } from './mcpInstructions';
 
 // MCP surface (spec 2026-07-28, SDK v2): a stateless server per request for the authenticated
 // principal. Each command the principal may run becomes a tool; humans-only commands are not
@@ -84,6 +84,47 @@ export function missingScope(principal: Principal, toolName: string, style: McpT
   return ROLE_PERMISSIONS[principal.role].includes(cmd.permission) ? cmd.permission : null;
 }
 
+/**
+ * The command a resource or prompt runs. A resource never reads SQL itself: it goes through the
+ * command layer for the same validation, permission check and tenancy every tool call gets.
+ */
+function commandNamed(name: string): AnyCommand {
+  const cmd = commands.find((c) => c.name === name);
+  if (!cmd) throw new Error(`the MCP surface needs the ${name} command`);
+  return cmd;
+}
+
+/** Whether the principal may run every command a template needs; otherwise the template is hidden. */
+function mayRunAll(principal: Principal, names: readonly string[]): boolean {
+  return names.every((name) => {
+    const cmd = commandNamed(name);
+    return cmd.permission !== null && principal.permissions.has(cmd.permission);
+  });
+}
+
+/**
+ * One template's read: a site id from the URI, resolved through commands only. `site-context` shows
+ * the *published* site context, because that is the version every other read and the copilot see;
+ * a draft is not yet the site's context.
+ */
+async function readSiteContext(principal: Principal, executor: Executor, siteId: string) {
+  if (!siteId) throw new AppError('invalid_input', 'The URI needs a site id, e.g. site-context://<siteId>.');
+  const site = await executor.execute(commandNamed('sites.get'), { siteId }, principal, { surface: 'mcp' });
+  const artifactId = site.site.contextArtifactId as string | null;
+  if (!artifactId)
+    throw new AppError(
+      'not_found',
+      `Site ${siteId} has no site context artifact yet. A person drafts one with artifacts.create (type site_context) and publishes it.`,
+    );
+  const latest = await executor.execute(commandNamed('artifacts.get'), { artifactId }, principal, { surface: 'mcp' });
+  if (latest.publishedVersion === null)
+    throw new AppError('not_found', `The site context for site ${siteId} is not published yet, so there is nothing to read.`);
+  const published = await executor.execute(commandNamed('artifacts.get'), { artifactId, version: latest.publishedVersion }, principal, {
+    surface: 'mcp',
+  });
+  return { siteId, artifactId, version: latest.publishedVersion, content: published.version.content };
+}
+
 export function mcpServerFor(
   principal: Principal,
   executor: Executor,
@@ -101,9 +142,10 @@ export function mcpServerFor(
     },
     async (uri) => ({ contents: [{ uri: uri.href, text: MCP_INSTRUCTIONS, mimeType: 'text/markdown' }] }),
   );
-  // The JSON Schema catalogue for every artifact type and the workspace's current learnings. Both
-  // are resources rather than tools because a client reads them for context; the commands behind
-  // them stay callable and permission-checked in the usual way.
+  // Resources are context a client reads before it acts, so they are not tools. Each is backed by
+  // one command (or, for a site, a short chain of them), and a principal without the command's
+  // permission does not see it at all. The catalogue resources are static; the two site resources
+  // are templates so one registration serves every site the connection can reach.
   const resources: { name: string; uri: string; title: string; description: string; command: string; input: unknown }[] = [
     {
       name: 'artifact-types',
@@ -121,10 +163,26 @@ export function mcpServerFor(
       command: 'learnings.list',
       input: { status: 'active' },
     },
+    {
+      name: 'check-catalogue',
+      uri: 'checks://catalogue',
+      title: 'Audit check catalogue',
+      description: 'Every audit check with its category, severity, scope, explanation, fix type and official references.',
+      command: 'checks.catalogue',
+      input: {},
+    },
+    {
+      name: 'change-types',
+      uri: 'change-types://catalogue',
+      title: 'Change type catalogue',
+      description: 'Every change a change set can carry, with its action class, what verifies it and the JSON Schema it accepts.',
+      command: 'changes.types',
+      input: {},
+    },
   ];
   for (const resource of resources) {
-    const cmd = commands.find((c) => c.name === resource.command);
-    if (!cmd?.permission || !principal.permissions.has(cmd.permission)) continue;
+    const cmd = commandNamed(resource.command);
+    if (!cmd.permission || !principal.permissions.has(cmd.permission)) continue;
     server.registerResource(
       resource.name,
       resource.uri,
@@ -135,6 +193,60 @@ export function mcpServerFor(
       },
     );
   }
+  const templates: {
+    name: string;
+    uriTemplate: string;
+    title: string;
+    description: string;
+    /** Every command the read runs; the template is hidden unless the principal may run all of them. */
+    commands: readonly string[];
+    read: (siteId: string) => Promise<unknown>;
+  }[] = [
+    {
+      name: 'site-context',
+      uriTemplate: 'site-context://{siteId}',
+      title: 'Site context',
+      description:
+        'The site’s published site context: business overview, current goal, positioning, writing preferences, key pages and competitors.',
+      commands: ['sites.get', 'artifacts.get'],
+      read: (siteId) => readSiteContext(principal, executor, siteId),
+    },
+    {
+      name: 'issues',
+      uriTemplate: 'issues://{siteId}',
+      title: 'Open issues',
+      description:
+        'The site’s ten most important open issues, ranked by severity × the Search Console clicks over 28 days they put at risk (affected pages when there is no Search Console data).',
+      commands: ['audits.issues'],
+      read: (siteId) => readTopIssues(principal, executor, siteId),
+    },
+  ];
+  for (const template of templates) {
+    if (!mayRunAll(principal, template.commands)) continue;
+    server.registerResource(
+      template.name,
+      new ResourceTemplate(template.uriTemplate, { list: undefined }),
+      { title: template.title, description: template.description, mimeType: 'application/json' },
+      async (uri, variables) => {
+        const siteId = String(variables.siteId ?? '');
+        const out = await template.read(siteId);
+        return { contents: [{ uri: uri.href, text: JSON.stringify(out), mimeType: 'application/json' }] };
+      },
+    );
+  }
+  // One Phase 1 prompt: the thin loop, written so the client reads the same order and the same
+  // evidence rule the hosted specialists follow. It is text only; no command runs when it is read.
+  if (principal.permissions.has('sites:read'))
+    server.registerPrompt(
+      'audit-and-propose',
+      {
+        title: 'Audit this site and propose the top fixes',
+        description:
+          'The Phase 1 loop for one site: read the issues, propose evidence-backed recommendations and draft a change set. Never invents a metric.',
+        argsSchema: z.object({ siteId: z.string().describe('The site id to audit, e.g. from sites.list') }),
+      },
+      ({ siteId }) => ({ messages: [{ role: 'user' as const, content: { type: 'text' as const, text: auditAndProposePrompt(siteId) } }] }),
+    );
   for (const cmd of commands) {
     if (cmd.humansOnly || !cmd.permission) continue;
     const toolName = mcpToolName(cmd.name, style);
@@ -219,31 +331,55 @@ export function mcpEndpoint(deps: {
     );
   }
 
-  /**
-   * API tokens have no scope step-up of their own: their owner edits them. A tool the token no
-   * longer has a scope for (after narrowing) fails on the very next call with a tool error that
-   * says why. It is a JSON-RPC result, not an HTTP error, so clients keep their session.
-   */
-  async function apiTokenDenial(request: Request, principal: Principal) {
+  /** The parsed body of a single JSON-RPC call, or null when this is not one. */
+  async function singleCall(request: Request) {
     if (request.method !== 'POST') return null;
     const body = await request
       .clone()
       .json()
       .catch(() => null);
     if (!body || Array.isArray(body) || body.method !== 'tools/call') return null;
-    const cmd = commandForMcpTool(String(body.params?.name ?? ''), style);
-    if (!cmd) return null;
-    const message = cmd.humansOnly
-      ? `${cmd.name} can only be run by a person, not by an API token.`
-      : cmd.permission && !principal.permissions.has(cmd.permission)
-        ? `This API token does not have the ${cmd.permission} permission. Its owner can add it with apiTokens.update.`
-        : null;
-    if (!message) return null;
-    const error = { code: cmd.humansOnly ? 'forbidden' : 'insufficient_scope', message };
-    return Response.json({
+    return body as { id?: unknown; params?: { name?: unknown } };
+  }
+
+  /** A JSON-RPC tool error: clients keep their session and read the sentence. */
+  const toolError = (id: unknown, error: { code: string; message: string }) =>
+    Response.json({
       jsonrpc: '2.0',
-      id: body.id ?? null,
+      id: id ?? null,
       result: { isError: true, content: [{ type: 'text', text: JSON.stringify(error) }] },
+    });
+
+  /**
+   * A people-only command is never listed to an agent, so a client that names one is answered with
+   * a clear refusal instead of a bare "tool not found": the person can run it in the app, and the
+   * agent should ask rather than retry. A scope challenge is wrong here, because no grant would
+   * ever let an agent run it.
+   */
+  async function peopleOnlyDenial(request: Request) {
+    const body = await singleCall(request);
+    if (!body) return null;
+    const cmd = commandForMcpTool(String(body.params?.name ?? ''), style);
+    if (!cmd?.humansOnly) return null;
+    return toolError(body.id, {
+      code: 'forbidden',
+      message: `${cmd.name} can only be run by a person, not by a connected agent. Ask the person who owns this workspace to do it in the app.`,
+    });
+  }
+
+  /**
+   * API tokens have no scope step-up of their own: their owner edits them. A tool the token no
+   * longer has a scope for (after narrowing) fails on the very next call with a tool error that
+   * says why. It is a JSON-RPC result, not an HTTP error, so clients keep their session.
+   */
+  async function apiTokenDenial(request: Request, principal: Principal) {
+    const body = await singleCall(request);
+    if (!body) return null;
+    const cmd = commandForMcpTool(String(body.params?.name ?? ''), style);
+    if (!cmd?.permission || principal.permissions.has(cmd.permission)) return null;
+    return toolError(body.id, {
+      code: 'insufficient_scope',
+      message: `This API token does not have the ${cmd.permission} permission. Its owner can add it with apiTokens.update.`,
     });
   }
 
@@ -270,7 +406,7 @@ export function mcpEndpoint(deps: {
         resource: new URL(deps.resource),
         extra: { principal, stepUp: true },
       };
-      return (await stepUpChallenge(request, principal)) ?? handler.fetch(request, { authInfo });
+      return (await peopleOnlyDenial(request)) ?? (await stepUpChallenge(request, principal)) ?? handler.fetch(request, { authInfo });
     },
     { resource: deps.resource },
   );
@@ -285,9 +421,42 @@ export function mcpEndpoint(deps: {
     if (conflict) return Response.json({ error: 'workspace_mismatch', message: conflict }, { status: 403 });
     // The server (and its tool list) is built per request from this principal, so a narrowed token
     // loses tools at once rather than keeping a cached server from an earlier request.
-    const denial = await apiTokenDenial(request, principal);
+    const denial = (await peopleOnlyDenial(request)) ?? (await apiTokenDenial(request, principal));
     if (denial) return denial;
     const authInfo: AuthInfo = { token: '', clientId: principal.clientId!, scopes: [...principal.permissions], extra: { principal } };
     return handler.fetch(request, { authInfo });
   };
+}
+
+/** Severity weights for the issues resource's ranking: one severity step outweighs a 10× traffic gap. */
+const SEVERITY_WEIGHT: Record<string, number> = { critical: 10_000, high: 1_000, medium: 100, low: 10, info: 1 };
+/** The most open issues the resource reads before ranking; past this the ranking covers the first pages. */
+const ISSUES_RESOURCE_SCAN = 1_000;
+
+/**
+ * The issues resource: every open issue (up to a scan cap) read through `audits.issues`, ranked by
+ * severity × traffic touched, then the top ten. Ranking after reading, not before limiting, so a
+ * high-traffic issue is never cut by the command's severity-then-pages order.
+ */
+async function readTopIssues(principal: Principal, executor: Executor, siteId: string): Promise<unknown> {
+  const command = commandNamed('audits.issues');
+  type Page = { issues: { severity: string; clicks28d: number | null; affectedPages: number }[]; nextCursor: string | null } & Record<
+    string,
+    unknown
+  >;
+  const all: Page['issues'] = [];
+  let first: Page | null = null;
+  let cursor: string | undefined;
+  while (all.length < ISSUES_RESOURCE_SCAN) {
+    const page = (await executor.execute(command, { siteId, state: 'open', limit: 200, ...(cursor ? { cursor } : {}) }, principal, {
+      surface: 'mcp',
+    })) as Page;
+    first ??= page;
+    all.push(...page.issues);
+    if (!page.nextCursor) break;
+    cursor = page.nextCursor;
+  }
+  const traffic = (issue: Page['issues'][number]) => (issue.clicks28d ?? issue.affectedPages) + 1;
+  const ranked = [...all].sort((a, b) => (SEVERITY_WEIGHT[b.severity] ?? 1) * traffic(b) - (SEVERITY_WEIGHT[a.severity] ?? 1) * traffic(a));
+  return { ...(first ?? {}), issues: ranked.slice(0, 10), nextCursor: null, scanned: all.length };
 }
