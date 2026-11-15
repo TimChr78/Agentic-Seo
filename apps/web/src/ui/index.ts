@@ -10,6 +10,8 @@ export * from './form';
 export * from './layout';
 export * from './menu';
 export * from './overlay';
+export * from './Pager';
+export * from './seo';
 export * from './state';
 export * from './table';
 export * from './tabs';

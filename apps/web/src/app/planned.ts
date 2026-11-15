@@ -12,41 +12,17 @@ export interface PlannedDestination {
 }
 
 export const PLANNED: Record<string, PlannedDestination> = {
-  '/inbox': {
-    title: 'Inbox',
-    description: 'Approvals, holds with veto windows, and recommendations waiting for a decision.',
-    phase: 'Phase 1',
-    body: 'Recommendations from the first audit arrive here with their evidence, expected effect and a decision. The thin loop that produces them is Phase 1.',
-  },
   '/agents': {
     title: 'Agents',
     description: 'The specialist agents, their mandates, holds and activity ledger.',
     phase: 'Phase 6',
     body: 'Each specialist, its mandate and its outcomes appear here once the agent programme ships in Phase 6. Phase 0 only establishes agents as principals.',
   },
-  '/audits': {
-    title: 'Audits',
-    description: 'Audit runs, their coverage and per-category scores.',
-    phase: 'Phase 1',
-    body: 'The first crawl and its checks arrive in Phase 1. Phase 2 adds the full audit detail: rendering, CrUX, drift and crawler access.',
-  },
-  '/issues': {
-    title: 'Issues',
-    description: 'Issues found by audits, with severity, affected pages and traffic at risk.',
-    phase: 'Phase 1',
-    body: 'An audit turns failing checks into issues here, with coverage-aware resolution and a link to the evidence. Phase 1 delivers the list and issue detail.',
-  },
   '/performance': {
     title: 'Performance',
     description: 'Field and lab performance by template, with CrUX and PSI thresholds.',
     phase: 'Phase 2',
     body: 'Core Web Vitals per template, with the source and evaluation thresholds, arrive with the Google data work in Phase 2.',
-  },
-  '/changes': {
-    title: 'Changes',
-    description: 'Change sets from draft to verified outcome, with their verification and rollbacks.',
-    phase: 'Phase 1',
-    body: 'Approved recommendations become change sets with per-page diffs, a connector PR and a verification plan. Phase 1 delivers the pipeline and detail.',
   },
   '/search/performance': {
     title: 'Search performance',
@@ -119,12 +95,6 @@ export const PLANNED: Record<string, PlannedDestination> = {
     description: 'Reports an agent writes, with share links and their measurement window.',
     phase: 'Phase 6',
     body: 'Weekly and monthly reports, their evidence and share links arrive with the agent reporting work in Phase 6.',
-  },
-  '/settings/connections': {
-    title: 'Connections',
-    description: 'Search Console, GitHub and the other connectors a site can use.',
-    phase: 'Phase 1',
-    body: 'The Search Console property and the GitHub pull-request connector are configured here. Phase 1 delivers both ends of the thin loop.',
   },
   '/settings/providers': {
     title: 'Providers and budgets',

@@ -1,4 +1,4 @@
-import { ArrowRight, Check, Plus } from 'lucide-react';
+import { ArrowRight, Check, Play, Plus } from 'lucide-react';
 import { api, type ChecklistFacts } from '../app/api';
 import { ButtonLink } from '../app/links';
 import { canOpenPath } from '../app/nav';
@@ -6,8 +6,7 @@ import { useCrumbs } from '../app/page';
 import { Link } from '../app/router';
 import { useSession, useSite } from '../app/session';
 import { useKeyedApi } from '../app/useApi';
-import { Alert, Card, EmptyState, KpiTile, LineChart, LoadingBlock, PageHeader, StatusPill, Tag } from '../ui';
-import { Button } from '../ui/Button';
+import { Alert, Card, EmptyState, KpiTile, LineChart, LoadingBlock, PageHeader, StatusPill } from '../ui';
 import { cx } from '../ui/cx';
 import { pageWidth } from '../ui/layout';
 import { HealthScore } from '../ui/seo/HealthScore';
@@ -39,12 +38,11 @@ export default function HomePage() {
       }
       description="What needs attention on this site, and how search is performing."
       actions={
-        <>
-          <Tag>Phase 1</Tag>
-          <Button variant="primary" disabled title="Audits arrive in Phase 1." aria-description="Audits arrive in Phase 1.">
+        canOpenPath('/audits', can) ? (
+          <ButtonLink to="/audits" variant="primary" icon={<Play size={14} />}>
             Run audit
-          </Button>
-        </>
+          </ButtonLink>
+        ) : undefined
       }
     />
   );
@@ -80,16 +78,16 @@ export default function HomePage() {
             zero.
           </p>
           <p className="mt-2 text-[13px] leading-5 text-fg-2">
-            {canOpenPath('/settings/connections', can) ? (
+            {canOpenPath('/audits', can) ? (
               <>
                 Next:{' '}
-                <Link to="/settings/connections" className="font-medium text-accent hover:underline">
-                  verify ownership and connect Search Console
+                <Link to="/audits" className="font-medium text-accent hover:underline">
+                  run the first audit
                 </Link>
-                . The first audit follows in Phase 1.
+                {!site.verified && ', once an admin has verified ownership'}.
               </>
             ) : (
-              <>Next: an admin verifies ownership and connects Search Console. The first audit follows in Phase 1.</>
+              <>Next: an editor runs the first audit. It reads the pages, evaluates the checks and turns what fails into issues.</>
             )}
           </p>
         </section>
@@ -159,13 +157,13 @@ export default function HomePage() {
             <EmptyState
               title="No recommendations yet"
               action={
-                <ButtonLink to="/inbox" variant="secondary" icon={<ArrowRight size={14} />}>
-                  Open Inbox
+                <ButtonLink to="/recommendations" variant="secondary" icon={<ArrowRight size={14} />}>
+                  Open recommendations
                 </ButtonLink>
               }
             >
-              Recommendations come from the first audit in Phase 1. They state a hypothesis and how the result will be measured, not a
-              promise.
+              Recommendations come from an audit’s issues, written by a specialist or a person. They state a hypothesis and how the result
+              will be measured, not a promise.
             </EmptyState>
           </Card>
           <Card title="What agents did this week" description="The activity ledger, with traffic at risk for every site change.">

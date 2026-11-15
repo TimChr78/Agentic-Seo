@@ -73,7 +73,7 @@ Wireframes show structure only. The geometry comes from the inherited page templ
 
 ### 4.2 Issues (list) and issue detail
 
-List template: search, a category select, severity and state filters, and an honest count. The columns are:
+List template: search, a category select, severity and state filters, and an honest count. **Decision (Phase 1):** the search box filters by check id (`title.too_long`), because `audits.issues` has no free-text search and a client-side filter over one page would lie about the other pages. A check-scoped search is the honest version of the same intent. The columns are:
 
 - **Issue** (plain-language name, with the check id in technical details);
 - **Severity** (pill);
@@ -81,6 +81,8 @@ List template: search, a category select, severity and state filters, and an hon
 - **Traffic touched** (clicks over 28 days, or "No GSC");
 - **First seen**;
 - **State** (Open / Regressed / Resolved / Ignored).
+
+An issue is "Not re-checked" when a later audit evaluated its pages without recording it either way: the state is then from an earlier audit, never a stale "Open".
 
 Issue detail (Detail template):
 
@@ -111,6 +113,12 @@ Issue detail (Detail template):
 ```
 
 The approval drawer from the sister product shows the same tabs, so reviewers and builders see the same thing.
+
+**Decisions (Phase 1):**
+- The concession summary is built from what the server publishes: pages touched and the stored ReachEstimate. A sponsor is not part of the recommendation artifact in Phase 1, so the header does not name one.
+- The audit overview shows the score, the pages evaluated, every "Not evaluated" category and its reason, the skipped checks and the unchecked-issue count. The server publishes a weight, a penalty and a contribution per category, not a per-category score, so the bars show the value out of 100 and the table carries those numbers as they are; no category score is derived.
+- The Issues tab of an audit is `audits.findings`: the findings this run produced, each linking to the issue that groups it across audits.
+- **Draft change set** asks for the value each proposed change replaces and the value to write, because a change set is not prose: `changes.create` needs both, and a text-only hint would be refused by the repository. A JSON-LD change names the block it replaces by hash, which the form does not read, so it is left out and the form says so; use `changes.create` from an agent for that type.
 
 ### 4.4 Change set detail
 

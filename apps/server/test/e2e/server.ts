@@ -1,7 +1,9 @@
+import { runChangesApplyTask } from '@agentic-seo/change-sets';
 import { setTxtResolver } from '@agentic-seo/sites';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { e2eBase, e2ePort, e2eReadinessPort } from '../../../../e2e/ports';
+import { startFakeGitHub } from '../../../../packages/change-sets/test/support';
 import { PASSWORD, startTestServer } from '../harness';
 
 // A seeded server for Playwright and manual UI work:
@@ -20,6 +22,32 @@ import { PASSWORD, startTestServer } from '../harness';
 const PREFIX = 'verify-';
 
 const t = await startTestServer(process.env.E2E_DB ?? 'e2e', e2ePort, { PUBLIC_URL: e2eBase });
+
+// The thin loop applies through GitHub. This process has no worker and production egress reaches
+// api.github.com, so both are replaced here: a local fake repository through the change-sets
+// client's own seam (the same one packages/change-sets/test/support.ts uses), and one test-only
+// route that runs the apply task the queue would run. Nothing outside this entry can reach either.
+const github = await startFakeGitHub('main', {
+  'index.html': '<!doctype html><html><head><title>MartechSignal</title></head><body><h1>MartechSignal</h1></body></html>',
+  'content/pricing/index.html':
+    '<!doctype html><html><head><title>A pricing page title that is far too long to be shown in full</title></head><body><h1>Pricing</h1></body></html>',
+});
+t.srv.services.github = github.seam;
+
+// Playwright drives the loop through the UI and then runs the approved apply job once; the command
+// queue would do this in a server with a worker. The route is registered on the app instance this
+// test entry serves, so no production server has it.
+t.srv.app.post('/test/changes/apply', async (c) => {
+  const payload = await c.req.json<{ workspaceId: string; artifactId: string; siteId?: string }>();
+  await runChangesApplyTask(t.srv.db, payload, { kp: t.srv.keyProvider, github: github.seam });
+  // The answer names the state the task recorded, so a failed apply is legible in the spec rather
+  // than only in this process's stdout.
+  const { rows } = await t.srv.db.admin.query<{ state: string; last_error: string | null }>(
+    'SELECT state, last_error FROM change_set_runs WHERE workspace_id = $1 AND artifact_id = $2',
+    [payload.workspaceId, payload.artifactId],
+  );
+  return c.json({ ok: true, state: rows[0]?.state ?? null, lastError: rows[0]?.last_error ?? null });
+});
 
 // The DNS seam, reachable only from this test entry: a domain that starts with `verify-` resolves a
 // TXT record carrying its own site's token, so the success path is exercised in a browser. Every
@@ -69,6 +97,7 @@ console.log(`  password ${PASSWORD}\n`);
 
 const stop = async () => {
   readinessHttp.close();
+  await github.close();
   await t.close();
   process.exit(0);
 };
