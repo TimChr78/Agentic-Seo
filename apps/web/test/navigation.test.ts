@@ -104,9 +104,11 @@ describe('navigation', () => {
   });
 
   it('has a real page for every destination: the built ones render, the rest names its phase', () => {
+    // Home and Settings → Site are Phase 0; the thin loop's screens are Phase 1. A planned page
+    // would be a lie for every one of them.
+    const BUILT = new Set(['/', '/inbox', '/audits', '/issues', '/changes', '/settings/site', '/settings/connections']);
     for (const path of [...NAV.flatMap((group) => group.items.map((item) => item.path)), ...SETTINGS_ITEMS.map((item) => item.path)]) {
-      // Home and Settings → Site are built in Phase 0; a planned page would be a lie for them.
-      if (path === '/' || path === '/settings/site') {
+      if (BUILT.has(path)) {
         expect(PLANNED[path], `${path} is built, so it needs no planned page`).toBeUndefined();
         continue;
       }

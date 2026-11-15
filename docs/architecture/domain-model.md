@@ -70,7 +70,7 @@ erDiagram
 | **Local grid** | A geo-grid local rank check for a business and keyword (claude-seo `maps`, OpenSEO local SEO) |
 | **AI visibility tracker** | Prompts × engines × market × schedule, with brand and competitor names to match |
 | **AI answer** | One engine's answer to one prompt on one run: mentions, citations (sources), sentiment, position |
-| **Search facts** | Three separate GSC datasets, because summing detail rows never reproduces totals (anonymised queries, row limits): **property totals** (date, search type), **page aggregates** (date, page, country, device) and **query detail** (date, query, page…). Each row set records aggregation type, search type, completeness and a finality watermark. Plus GA4 organic landing-page facts. Partitioned by month |
+| **Search facts** | Three separate GSC datasets, because summing detail rows never reproduces totals (anonymised queries, row limits): **property totals** (date, search type), **page aggregates** (date, search type, page, country, device) and **query detail** (date, query, page…). Each row set records aggregation type, search type, completeness and a finality watermark. Page rows also store a normalised `page_key` (lower-case host, no trailing slash except the root, query kept), so reach and page reports match on one identity instead of re-deriving it in SQL. Plus GA4 organic landing-page facts. Phase 1 stores the first two as plain tables indexed by `(workspace_id, site_id, date)` rather than monthly partitions: partitioning needs the date in every primary key and a parent-table grant that row-level security does not enforce per partition, so the monthly split is deferred (decision recorded in `0008_connections_gsc.sql`) |
 
 ## 4. The agentic loop
 
@@ -89,11 +89,23 @@ erDiagram
 |---|---|
 | **Opportunity** | Something worth doing that is not a defect: striking-distance keywords (positions 8–20 with impressions), decaying pages, a content gap against competitors, missing AI citations, unclaimed local listings. Produced by detectors over search facts and research data |
 | **Recommendation** | A versioned artifact. It holds: title, rationale, the evidence it rests on (issue/finding/fact ids), **hypothesis**, expected impact (traffic at stake, confidence), effort, dependencies on other recommendations, **verification plan** (what to re-check and when), **falsification check** ("how would we know this failed?") and a **leading indicator**. The last four come from claude-seo's synthesis method, made structural |
-| **Change set** | A versioned artifact: an ordered set of **changes** to one site through one connector, with a diff per URL and a rollback plan. States: draft → in review / held → applying → (for PR connectors: PR open → merged) → deploying → deployed → verified / verification failed → measuring → outcome; or rolled back / superseded. Each state records the commit or CMS revision it refers to. An edit to an open PR after approval sends the change set back to review |
+| **Change set** | A versioned artifact: an ordered set of **changes** to one site through one connector, with a diff per URL and a rollback plan. States: draft → in review / held → applying → (for PR connectors: PR open → merged) → deploying → deployed → verified / verification failed; then, from Phase 2, measuring → outcome; or rolled back / superseded. Phase 1 stores the states up to verification (below); measuring and outcome are not built yet. Each state records the commit or CMS revision it refers to. An edit to an open PR after approval sends the change set back to review |
 | **Change** | One typed edit: `meta.title`, `meta.description`, `canonical`, `robots.meta`, `redirect`, `robots_txt`, `sitemap`, `schema.jsonld`, `hreflang`, `image.alt`, `internal_link`, `content.patch` (Markdown/HTML diff), `content.new_page`, `llms_txt` |
 | **Verification** | The re-fetch and re-check of affected URLs after apply: pass/fail per change, with evidence |
 | **Outcome** | The measured result after the measurement window: GSC clicks, impressions and positions on affected URLs/queries against a pre-registered control cohort, plus rank observations. Verdict: confirmed, refuted, inconclusive or confounded ([agents-and-autonomy.md](agents-and-autonomy.md) §10) |
 | **Learning** | A conclusion with evidence ("For this site, rewriting titles of striking-distance product pages raised CTR 18% ±6% over 28 days, n=24"), in the learnings store that agents read as `learnings://<site>` |
+
+A change set's pipeline is stored, not inferred (Phase 1, ADR-0007): `change_set_runs` holds one row
+per change set with the state, the approved version and the pull-request, merge and deployed commit
+SHAs, `change_set_events` is the append-only transition log with the evidence for each step, and
+`change_set_verifications` records one row per change per verification attempt. The run states are
+the pipeline above plus `approved` (published, not yet applied), `stale` (a source changed after
+drafting), `closed` (the pull request was closed unmerged), `deploy_not_detected` (the merge never
+reached the site inside the deploy window) and `failed` (the pipeline refused to continue — for
+example a pull request merged with commits that were not approved); `superseded` is reserved for a
+change set a later version replaced before it was applied. A rollback is a change set of its own: the
+original stays in its live state, linked through `rollback_change_set_id`, and becomes `rolled_back`
+only when the rollback is verified.
 
 ## 5. Artifacts (versioned, reviewable)
 

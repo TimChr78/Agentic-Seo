@@ -10,6 +10,7 @@ import {
   lockArtifactIds,
   lockArtifacts,
   lockSingleton,
+  refuseServerOwned,
   requestPublish,
   updateDraft,
   validateContent,
@@ -452,6 +453,10 @@ export const importConfig = defineCommand({
         );
       if (ctx.principal.type === 'agent' && def.peopleOnly)
         throw new AppError('forbidden', `${item.id} is a ${item.type}: only people can import it.`);
+      // An import is a third write path onto the artifact tables (it inserts the draft itself for a
+      // new artifact), so it refuses server-owned types with the same message as artifacts.updateDraft
+      // instead of trusting a bundle's copy of a path, base commit, hash or diff.
+      refuseServerOwned(item.type);
       const content = await validateContent(item.type, item.content, 'draft');
       // A workspace has one of each singleton type per site, whatever its id.
       const current = resolve(item);

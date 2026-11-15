@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDemoApi, type Site, setApiClient } from '../src/app/api';
 import { Routes } from '../src/app/routes';
 import { SessionContext, type SessionValue } from '../src/app/session';
+import { ToastProvider } from '../src/ui/toast';
 
 const SITE: Site = {
   id: 'site_martechsignal',
@@ -51,9 +52,11 @@ const VIEWER = ['artifacts:read', 'sites:read'];
 function renderAt(path: string, value: SessionValue = session('owner', ['workspace:admin', 'sites:write'])) {
   window.history.replaceState(null, '', path);
   return render(
-    <SessionContext.Provider value={value}>
-      <Routes />
-    </SessionContext.Provider>,
+    <ToastProvider>
+      <SessionContext.Provider value={value}>
+        <Routes />
+      </SessionContext.Provider>
+    </ToastProvider>,
   );
 }
 
@@ -61,11 +64,27 @@ beforeEach(() => setApiClient(createDemoApi()));
 afterEach(() => setApiClient(null));
 
 describe('route table', () => {
-  it('gives a built destination its own page and phase', () => {
-    renderAt('/inbox');
+  it('gives a built destination its own page: the Inbox renders its empty state', async () => {
+    renderAt('/inbox', session('owner', ['workspace:admin', 'sites:write'], SITE));
     expect(screen.getByRole('heading', { level: 1, name: 'Inbox' })).toBeTruthy();
-    expect(screen.getByText('Inbox arrives in Phase 1')).toBeTruthy();
-    expect(screen.getByText(/Approvals, holds with veto windows/)).toBeTruthy();
+    expect(await screen.findByText('Nothing is waiting for you')).toBeTruthy();
+  });
+
+  it('opens an issue detail deep link and says why it could not read it', async () => {
+    renderAt('/issues/iss_missing', session('owner', ['workspace:admin', 'sites:write'], SITE));
+    // While the read is pending the page keeps the detail geometry with no heading; the error state
+    // then names the object and the server's own reason.
+    expect(await screen.findByText('Couldn’t open this issue')).toBeTruthy();
+    expect(screen.getByRole('heading', { level: 1, name: 'Issue' })).toBeTruthy();
+    expect(screen.getByText(/The demo has no issue/)).toBeTruthy();
+  });
+
+  it('renders Connections inside Settings, with both connections not configured', async () => {
+    renderAt('/settings/connections', session('owner', ['workspace:admin', 'sites:write'], SITE));
+    expect(screen.getByRole('heading', { level: 1, name: 'Connections' })).toBeTruthy();
+    expect(screen.getByRole('navigation', { name: 'Settings' })).toBeTruthy();
+    expect(await screen.findByText('Google Search Console')).toBeTruthy();
+    expect(screen.getAllByText('Not connected').length).toBeGreaterThan(0);
   });
 
   it('renders Settings children inside the secondary navigation', () => {

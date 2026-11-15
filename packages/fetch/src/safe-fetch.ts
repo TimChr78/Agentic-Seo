@@ -134,6 +134,10 @@ export interface SafeFetchOptions {
    * that returned it, then calls this before that hop is resolved or connected to. Return `true`
    * to follow it, or `false` and a string reason to refuse it with a `blocked_redirect` error.
    * The first URL is not passed: callers check it before they call `safeFetch`.
+   *
+   * `maxRedirects: 0` does not follow any hop and returns the `3xx` response itself (with the hop
+   * in `redirects`), so a caller that must police each hop — scope, robots.txt, host limits — can
+   * drive the loop itself.
    */
   allowRedirect?: (url: URL, details: { from: string; status: number }) => boolean | string;
   connectTimeoutMs?: number;
@@ -601,7 +605,7 @@ export async function safeFetch(target: string | URL, options: SafeFetchOptions 
   const startedAt = performance.now();
   const totalTimeoutMs = options.totalTimeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS;
   const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
-  const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
+  const maxRedirects = Math.max(0, options.maxRedirects ?? DEFAULT_MAX_REDIRECTS);
   const resolver = options.resolver ?? systemResolver;
   const allow = options.allow ?? {};
   const credentialList = options.credentials
@@ -682,6 +686,30 @@ export async function safeFetch(target: string | URL, options: SafeFetchOptions 
       const location = hop.headers.location;
       if (location && REDIRECT_STATUS.has(hop.status)) {
         redirects.push({ url: current.href, status: hop.status, location });
+        // `maxRedirects: 0` means the caller follows hops itself (the crawler does, so it can
+        // check each target's scope, robots rules and host limit): return the 3xx answer as-is.
+        if (maxRedirects === 0) {
+          const contentType = hop.headers['content-type'];
+          const { text, charset } = decodeBody(hop.body, contentType);
+          return {
+            requestUrl,
+            url: current.href,
+            status: hop.status,
+            headers: hop.headers,
+            contentType,
+            charset,
+            body: hop.body,
+            text,
+            truncated: hop.truncated,
+            redirects,
+            timings: {
+              dnsMs: Math.round(dnsMs * 1000) / 1000,
+              connectMs: Math.round(hop.connectMs * 1000) / 1000,
+              ttfbMs: Math.round(hop.ttfbMs * 1000) / 1000,
+              totalMs: Math.round((performance.now() - startedAt) * 1000) / 1000,
+            },
+          };
+        }
         if (redirects.length > maxRedirects) {
           throw new SafeFetchError('too_many_redirects', `more than ${maxRedirects} redirects from ${requestUrl}`, { url: current.href });
         }

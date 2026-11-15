@@ -83,7 +83,7 @@ const usageOf = (u: { inputTokens?: number; outputTokens?: number }): Usage => (
   inputTokens: u.inputTokens ?? 0,
   outputTokens: u.outputTokens ?? 0,
 });
-const reported = (u: { inputTokens?: number; outputTokens?: number }): boolean =>
+export const reported = (u: { inputTokens?: number; outputTokens?: number }): boolean =>
   u.inputTokens !== undefined || u.outputTokens !== undefined;
 
 /**

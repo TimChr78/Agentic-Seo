@@ -1,3 +1,5 @@
+import { ChangeSchema } from '@agentic-seo/changes';
+import type { ReachEstimate } from '@agentic-seo/commands';
 import { isoDateTime } from '@agentic-seo/core';
 import { z } from 'zod';
 
@@ -9,9 +11,10 @@ import { z } from 'zod';
 // chg change set, brf content brief, smt schema template, rpt report, rtp report template,
 // rkt rank tracker, ait AI visibility tracker, aud audit profile, hag hosted agent.
 //
-// Phase 0/1 implements content for note, site_context, agent_mandate, skill and prompt. The other
-// SEO types have a placeholder schema that refuses content with the phase it arrives in, so their
-// prefixes and names are reserved now and no caller can mistake a draft for a working type.
+// Phase 0/1 implements content for note, site_context, agent_mandate, skill, prompt, change_set and
+// recommendation. The other SEO types have a placeholder schema that refuses content with the phase
+// it arrives in, so their prefixes and names are reserved now and no caller can mistake a draft for
+// a working type.
 
 const Key = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
 const Clock = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'HH:MM, 24-hour');
@@ -270,6 +273,130 @@ const prompt = z
   });
 export type Prompt = z.output<typeof prompt>;
 
+// A recommendation (ADR-0008, domain-model.md §4, DESIGN.md §4.3): what to do about the evidence,
+// why it should work, and how we will know it did not. The synthesis fields are required for every
+// author — a person writing one by hand has to be as falsifiable as an agent — and the command
+// that creates one validates the evidence ids against the database and computes the traffic at
+// stake itself, so a number in here is never invented (packages/recommendations).
+//
+// The status is not part of the content: it is derived from the artifact's own lifecycle (draft,
+// published, rejected) and the change sets whose content points here, so it cannot disagree with
+// what actually happened.
+const recommendationChangeType = z
+  .enum(['meta.title', 'meta.description', 'schema.jsonld', 'image.alt', 'redirect'])
+  .describe('A Phase 1 change type (packages/changes); the catalogue is the limit of what a change set can apply');
+
+const recommendationEvidence = z.strictObject({
+  kind: z
+    .enum(['issue', 'finding', 'search_fact', 'audit'])
+    .describe(
+      'issue: a site issue id; finding: an audit finding id; search_fact: the absolute URL of a page with Search Console data; audit: an audit id',
+    ),
+  id: z
+    .string()
+    .trim()
+    .min(1)
+    .max(2048)
+    .describe('The evidence id, or the page URL for a search_fact; it must exist for this site in this workspace'),
+  note: z.string().trim().min(1).max(500).describe('What this evidence shows, in one line, for a reviewer'),
+});
+
+/**
+ * The computation date every stored estimate carries: the instant `recommendations.create` or
+ * `recommendations.update` computed it. Publishing checks that the stored estimate is well formed
+ * and dated, not that it still equals what the evidence pages yield — the Search Console data
+ * behind it moves every day, and a recommendation does not become untruthful because it did.
+ */
+const reachComputedAt = z.iso.datetime().describe('When this estimate was computed, ISO 8601 in UTC');
+
+const reachEstimate = z.discriminatedUnion('kind', [
+  z.strictObject({
+    kind: z.literal('unknown'),
+    reason: z.string().trim().min(1).max(1000).describe('What is missing, in a sentence a person can act on'),
+    computedAt: reachComputedAt,
+  }),
+  z.strictObject({
+    kind: z.literal('known'),
+    affectedUrls: z.number().int().min(0).describe('The evidence pages the estimate counted'),
+    clicksAtRisk: z.number().int().nullable().describe('Search Console clicks over 28 days; null when the pages have no history'),
+    impressionsAtRisk: z.number().int().nullable().optional(),
+    clicksAtRiskLastYear: z.number().int().nullable().optional(),
+    impressionsAtRiskLastYear: z.number().int().nullable().optional(),
+    criticalPages: z.array(z.string().max(2000)).max(50).default([]),
+    dataThrough: z.string().max(20).optional().describe('The newest day of page data the estimate used, YYYY-MM-DD'),
+    computedAt: reachComputedAt,
+  }),
+]);
+
+/** The content's traffic-at-stake field is packages/commands' ReachEstimate, not a look-alike. */
+export const recommendationReachSchema = reachEstimate satisfies z.ZodType<ReachEstimate>;
+
+const recommendation = z.strictObject({
+  title: z.string().trim().min(1).max(200).describe('What to do, in one line, e.g. "Rewrite the titles of 12 striking-distance pages"'),
+  rationale: z
+    .string()
+    .trim()
+    .min(1)
+    .max(4000)
+    .describe('Why this, why now, in Markdown; cite the evidence by id, never a metric that is not in it'),
+  evidence: z.array(recommendationEvidence).min(1).max(20).describe('What the recommendation rests on; at least one item'),
+  hypothesis: z.string().trim().min(1).max(2000).describe('The causal claim: if we do this, then that, because …'),
+  expectedImpact: z.strictObject({
+    summary: z
+      .string()
+      .trim()
+      .min(1)
+      .max(1000)
+      .describe('What we expect to change, stated as an estimate: "Expected: CTR +10–20% on 34 queries"'),
+    trafficAtStake: reachEstimate.describe('Computed by recommendations.create from the evidence pages, never supplied by a caller'),
+    confidence: z.enum(['low', 'medium', 'high']).describe('How sure we are, given the evidence'),
+  }),
+  effort: z.enum(['small', 'medium', 'large']).describe('How much work this is for a person or an agent'),
+  dependsOn: z
+    .array(z.string().regex(/^rcm_[0-9a-f]{32}$/, 'A recommendation id, e.g. from recommendations.list'))
+    .max(20)
+    .default([])
+    .describe('Recommendations that should land first; cycles are refused'),
+  verificationPlan: z.strictObject({
+    recheck: z.string().trim().min(1).max(2000).describe('What to re-fetch or re-measure, and what it must show'),
+    when: z.string().trim().min(1).max(500).describe('When, e.g. "28 days after the deploy"'),
+  }),
+  falsificationCheck: z
+    .string()
+    .trim()
+    .min(1)
+    .max(1000)
+    .describe('How we would know this failed, in a sentence that starts "We will know this failed if…"'),
+  leadingIndicator: z
+    .string()
+    .trim()
+    .min(1)
+    .max(500)
+    .describe('The earliest signal that it is working or not, e.g. "impressions-weighted CTR, daily"'),
+  proposedChanges: z
+    .array(
+      z.strictObject({
+        type: recommendationChangeType,
+        url: z.string().url().max(2048).describe('The page the change is about'),
+        summary: z.string().trim().min(1).max(500).describe('The edit, in one line, for a reviewer'),
+      }),
+    )
+    .max(20)
+    .default([])
+    .describe('Change sets to draft from this; a hint for whoever implements it, not a change set'),
+  author: z
+    .strictObject({
+      kind: z.enum(['person', 'agent', 'specialist']),
+      specialist: z.enum(['strategist', 'technical']).optional(),
+    })
+    .superRefine((author, ctx) => {
+      if (author.kind === 'specialist' && !author.specialist)
+        ctx.addIssue({ code: 'custom', path: ['specialist'], message: 'A specialist author names which specialist wrote it.' });
+    })
+    .describe('Who wrote this: a person, an agent (API token or MCP client), or a hosted specialist'),
+});
+export type Recommendation = z.output<typeof recommendation>;
+
 /** A type whose content arrives in a later phase: the schema refuses every value with the reason. */
 function placeholder(phase: number) {
   return z.unknown().superRefine((_value, ctx) => {
@@ -279,6 +406,86 @@ function placeholder(phase: number) {
     });
   });
 }
+
+// A change set (ADR-0007, domain-model.md §4): an ordered set of typed changes to one site through
+// one connector, each already resolved to the source file it edits, with the base commit, the
+// file's hash at drafting time and the rendered diff. The site comes from the artifact row, never
+// from the content, so a change set cannot be re-pointed at another site by editing its JSON.
+//
+// Drafting resolves and applies every change in memory (packages/change-sets), which is why the
+// stored shape carries the resolution: applying the change set later re-reads each file and
+// compares `sourceHash`, so a source that moved on is caught before a branch is created. The diff
+// is stored because the reviewer sees it without the source file being re-read.
+const changeSetSource = z.strictObject({
+  path: z.string().min(1).max(1024).describe('The repository file this change edits, e.g. about/index.html'),
+  editor: z.enum(['html', 'markdown_frontmatter', 'netlify']).describe('The editor that wrote the change'),
+  confidence: z
+    .enum(['exact', 'pattern', 'glob'])
+    .describe('How the mapping found the file: an exact route, a route pattern, or a glob of drafts'),
+  affectedRoutes: z
+    .array(z.string().min(1).max(2048))
+    .min(1)
+    .max(500)
+    .describe('Every route the edit reaches; a layout source lists all routes it renders, which is what reach counts'),
+  fields: z
+    .record(z.string(), z.array(z.string().min(1).max(120)).min(1))
+    .optional()
+    .describe('markdown_frontmatter only: change field -> frontmatter keys, from the mapping rule'),
+  dialect: z
+    .enum(['yaml', 'strip_quotes'])
+    .optional()
+    .describe('markdown_frontmatter only: how the build quotes a written value (the pilot uses strip_quotes)'),
+});
+
+const changeSetFileDiff = z.strictObject({
+  path: z.string().min(1).max(1024),
+  status: z.enum(['added', 'modified', 'deleted']),
+  unified: z.string().max(200_000).describe('A unified diff with a/ and b/ headers; empty when nothing changed'),
+  additions: z.number().int().min(0),
+  deletions: z.number().int().min(0),
+});
+
+const changeSetChange = z.strictObject({
+  change: ChangeSchema.describe('The typed edit (packages/changes); applying it writes source.path'),
+  source: changeSetSource,
+  baseSha: z
+    .string()
+    .regex(/^[0-9a-f]{7,64}$/, 'A commit SHA: 40 hex characters from GitHub')
+    .describe('The base branch head the change was resolved against'),
+  sourceHash: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/, 'The sha256 of the source file, from sourceHashOf()')
+    .describe('The file at baseSha; the apply job refuses a file that hashes differently now'),
+  diff: changeSetFileDiff,
+});
+
+const changeSet = z.strictObject({
+  connector: z.literal('github').describe('The connector that applies this change set; only GitHub pull requests in Phase 1'),
+  title: z.string().trim().min(1).max(200).describe('What this change set does, in one line; the pull request title'),
+  summary: z.string().trim().min(1).max(2000).describe('Why these changes, and what evidence backs them'),
+  recommendationId: z
+    .string()
+    .regex(/^rcm_[0-9a-f]{32}$/, 'A recommendation id, e.g. from recommendations.create')
+    .optional()
+    .describe('The recommendation this change set implements, when there is one'),
+  changes: z.array(changeSetChange).min(1).max(50).describe('The edits in order; several may touch one file, and the diff is the net edit'),
+  verificationPlan: z
+    .string()
+    .trim()
+    .min(1)
+    .max(2000)
+    .describe('What a re-fetch after deployment must show; the verification job checks every affected URL against it'),
+  rollbackPlan: z
+    .string()
+    .trim()
+    .min(1)
+    .max(2000)
+    .describe('How to undo this: a revert pull request while the files still match, or a new proposed change set'),
+});
+export type ChangeSetContent = z.output<typeof changeSet>;
+export type ChangeSetDraftedChange = z.output<typeof changeSetChange>;
+/** The content schema, for packages that build or check a change set (packages/change-sets). */
+export const changeSetContentSchema = changeSet;
 
 export const artifactTypes = {
   note: { prefix: 'not', label: 'Note', description: 'Free-form note, used to exercise the artifact system.', content: note },
@@ -314,14 +521,24 @@ export const artifactTypes = {
   recommendation: {
     prefix: 'rcm',
     label: 'Recommendation',
-    description: 'A versioned, evidence-backed recommendation with a hypothesis, verification plan and falsification check.',
-    content: placeholder(1),
+    description:
+      'A versioned, evidence-backed recommendation with a hypothesis, expected impact, verification plan and falsification check. Create one with recommendations.create, which validates its evidence and computes the traffic at stake.',
+    content: recommendation,
+    // The traffic at stake is computed from the evidence pages with the reach estimate, and the
+    // evidence, dependencies and prose are checked against this workspace and site. A caller that
+    // wrote the content itself could publish an invented estimate; only recommendations.create and
+    // recommendations.update, which resolve the evidence and compute the reach, may write it.
+    serverOwned: true,
   },
   change_set: {
     prefix: 'chg',
     label: 'Change set',
     description: 'An ordered set of changes to one site through one connector, with a diff and a rollback plan.',
-    content: placeholder(1),
+    content: changeSet,
+    // The source path, base commit, source hash and diff are derived from the repository while
+    // drafting, and the apply worker re-derives them. The generic artifact commands would let a
+    // caller write any of them by hand; only changes.create and changes.updateDraft may.
+    serverOwned: true,
   },
   content_brief: {
     prefix: 'brf',

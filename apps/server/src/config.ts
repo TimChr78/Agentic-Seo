@@ -115,6 +115,11 @@ const Env = z.object({
     .optional()
     .describe('A VPC endpoint or a test server instead of kms.<region>.amazonaws.com'),
   TRUSTED_ORIGINS: z.string().optional().describe('Comma-separated extra origins allowed to call auth endpoints'),
+  GOOGLE_OAUTH_CLIENT_ID: z
+    .string()
+    .optional()
+    .describe('Google OAuth client id for Search Console; with GOOGLE_OAUTH_CLIENT_SECRET it enables Google connections'),
+  GOOGLE_OAUTH_CLIENT_SECRET: z.string().optional().describe('Google OAuth client secret; both Google settings are needed together'),
   METRICS_TOKEN: z
     .string()
     .min(16, 'METRICS_TOKEN must be at least 16 characters (e.g. `openssl rand -hex 24`)')
@@ -264,6 +269,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         .map((k) => k.trim())
         .filter(Boolean) ?? [],
     trustedOrigins,
+    // Google Search Console is optional. Both halves are needed; a half-configured install is
+    // reported by `aseo doctor` and by the commands that need it, not by refusing to start.
+    googleOAuth:
+      e.GOOGLE_OAUTH_CLIENT_ID && e.GOOGLE_OAUTH_CLIENT_SECRET
+        ? { clientId: e.GOOGLE_OAUTH_CLIENT_ID, clientSecret: e.GOOGLE_OAUTH_CLIENT_SECRET }
+        : undefined,
     metricsToken: e.METRICS_TOKEN,
     worker: {
       concurrency: e.WORKER_CONCURRENCY,

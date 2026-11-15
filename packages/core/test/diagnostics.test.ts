@@ -456,7 +456,7 @@ describe('safeErrorText (#885 round 5)', () => {
 
 describe('redactedText (#885 round 7)', () => {
   it('redacts before cutting, so a quote past the cut cannot shield a credential', () => {
-    const reason = 'x '.repeat(235) + 'password="probe-secret' + ' '.repeat(60) + '"';
+    const reason = `${'x '.repeat(235)}password="probe-secret${' '.repeat(60)}"`;
     expect(redactedText(reason, 500)).not.toContain('probe-secret');
     expect(redactedText(reason, 500).length).toBeLessThanOrEqual(500);
   });

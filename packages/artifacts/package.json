@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {
+    "@agentic-seo/changes": "workspace:*",
     "@agentic-seo/commands": "workspace:*",
     "@agentic-seo/core": "workspace:*",
     "@agentic-seo/db": "workspace:*",

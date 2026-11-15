@@ -4,6 +4,7 @@ import {
   bigserial,
   boolean,
   customType,
+  date,
   doublePrecision,
   index,
   integer,
@@ -625,6 +626,123 @@ export const aiTokenReservations = pgTable(
 );
 
 /** Every model call, with what it was asked, what it answered, its tokens and latency. */
+// Connections and Search Console facts (Phase 1 task B). See 0008_connections_gsc.sql.
+
+export type ConnectionState = 'pending' | 'active' | 'error' | 'revoked';
+
+/**
+ * A connector installed for one site: settings, sealed OAuth tokens and the authorization in
+ * progress. `oauthPending` is read and written by the OAuth flow only; no command returns it.
+ */
+export const connections = pgTable(
+  'connections',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    connector: text('connector').notNull(),
+    label: text('label').notNull().default(''),
+    settings: jsonb('settings').$type<Record<string, unknown>>().notNull().default({}),
+    /** Sealed JSON (iv + auth tag + ciphertext); opened only by the credential seam and the worker. */
+    secrets: bytea('secrets'),
+    secretsKeyId: text('secrets_key_id'),
+    state: text('state').$type<ConnectionState>().notNull().default('pending'),
+    /** Bumped when the property changes or the connection is revoked; fences an in-flight sync. */
+    generation: integer('generation').notNull().default(0),
+    lastError: text('last_error'),
+    oauthPending: jsonb('oauth_pending').$type<Record<string, unknown>>(),
+    tokenExpiresAt: ts('token_expires_at'),
+    refreshLeaseUntil: ts('refresh_lease_until'),
+    refreshLeaseToken: text('refresh_lease_token'),
+    lastSyncRequestedAt: ts('last_sync_requested_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    uniqueIndex('connections_site_connector_live').on(t.workspaceId, t.siteId, t.connector).where(sql`state <> 'revoked'`),
+    index('connections_site').on(t.workspaceId, t.siteId, t.connector),
+    index('connections_refresh_due').on(t.tokenExpiresAt).where(sql`state = 'active'`),
+  ],
+);
+
+/** One day of a property's totals per search type (aggregationType `byProperty`). */
+export const gscPropertyTotals = pgTable(
+  'gsc_property_totals',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    property: text('property').notNull(),
+    date: date('date', { mode: 'string' }).notNull(),
+    searchType: text('search_type').notNull().default('web'),
+    clicks: doublePrecision('clicks').notNull(),
+    impressions: doublePrecision('impressions').notNull(),
+    ctr: doublePrecision('ctr').notNull(),
+    position: doublePrecision('position').notNull(),
+    isFinal: boolean('is_final').notNull().default(false),
+    fetchedAt: ts('fetched_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.siteId, t.property, t.date, t.searchType] }),
+    index('gsc_property_totals_range').on(t.workspaceId, t.siteId, t.date),
+  ],
+);
+
+/** One day of page-level search data per page, country and device (aggregationType `byPage`). */
+export const gscPageAggregates = pgTable(
+  'gsc_page_aggregates',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    property: text('property').notNull(),
+    date: date('date', { mode: 'string' }).notNull(),
+    /** The search surface ("web" in Phase 1); in the key so Phase 2 adds types without a rewrite. */
+    searchType: text('search_type').notNull().default('web'),
+    page: text('page').notNull(),
+    /** `page` through `normalizePageUrl`: reach and search.pages match on it, never on `page`. */
+    pageKey: text('page_key').notNull(),
+    /** ISO 3166-1 alpha-3, or empty when Google returned no country for the row. */
+    country: text('country').notNull().default(''),
+    device: text('device').notNull().default(''),
+    clicks: doublePrecision('clicks').notNull(),
+    impressions: doublePrecision('impressions').notNull(),
+    ctr: doublePrecision('ctr').notNull(),
+    position: doublePrecision('position').notNull(),
+    isFinal: boolean('is_final').notNull().default(false),
+    fetchedAt: ts('fetched_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.siteId, t.property, t.date, t.searchType, t.page, t.country, t.device] }),
+    index('gsc_page_aggregates_range').on(t.workspaceId, t.siteId, t.date),
+    index('gsc_page_aggregates_page').on(t.workspaceId, t.siteId, t.property, t.pageKey, t.date),
+  ],
+);
+
+export type GscDataset = 'property_totals' | 'page_aggregates';
+
+/** The sync watermark per site, dataset, search type and property. */
+export const gscSyncState = pgTable(
+  'gsc_sync_state',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    dataset: text('dataset').$type<GscDataset>().notNull(),
+    searchType: text('search_type').notNull().default('web'),
+    property: text('property').notNull(),
+    lastFinalDate: date('last_final_date', { mode: 'string' }),
+    lastFetchedAt: ts('last_fetched_at'),
+    backfillComplete: boolean('backfill_complete').notNull().default(false),
+    backfillThrough: date('backfill_through', { mode: 'string' }),
+    /** The newest day every day before which has been fetched; the next incremental run resumes here. */
+    coverageThrough: date('coverage_through', { mode: 'string' }),
+    lastError: text('last_error'),
+    /** A non-fatal warning: a truncated window, or data still incomplete past the finality cap. */
+    lastWarning: text('last_warning'),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.siteId, t.dataset, t.searchType, t.property] })],
+);
+
 export const aiCalls = pgTable(
   'ai_calls',
   {
@@ -662,4 +780,515 @@ export const aiCalls = pgTable(
     index('ai_calls_recent').on(t.workspaceId, t.createdAt),
     index('ai_calls_usage').on(t.workspaceId, t.providerId, sql`coalesce(${t.billedAt}, ${t.createdAt})`),
   ],
+);
+
+// The crawl engine (Phase 1 task A). See 0007_crawl.sql and docs/architecture/crawler-and-audits.md
+// §2. An audit is one crawl; its frontier, snapshots and link edges are per-audit working state,
+// and `pages` is the stable per-site list of URLs that survives across audits.
+
+/** How much of a site one audit covers. */
+export type AuditScope = 'site' | 'section' | 'list' | 'page';
+/** `cancelled` is terminal: finalize still records coverage, site facts and counters for it. */
+export type AuditState = 'queued' | 'running' | 'finalizing' | 'completed' | 'partial' | 'failed' | 'cancelled';
+/** Only `never` is accepted in Phase 1; there is no renderer yet. */
+export type AuditRenderMode = 'never' | 'auto' | 'always';
+/** A frontier row's place in the crawl. */
+export type FrontierState = 'pending' | 'leased' | 'crawled' | 'skipped';
+/** How the crawler came to know a URL (packages/crawl/src/facts.ts `DiscoverySource`). */
+export type CrawlDiscoverySource = 'seed' | 'link' | 'sitemap' | 'redirect' | 'list';
+
+/** The limits an audit runs with, after defaults and hard caps. */
+export interface CrawlLimits {
+  maxPages: number;
+  maxDepth: number;
+  maxDurationMs: number;
+}
+
+/** The defaults packages/crawl applies; duplicated here so the column has a static default. */
+const DEFAULT_CRAWL_LIMITS: CrawlLimits = { maxPages: 500, maxDepth: 10, maxDurationMs: 30 * 60 * 1000 };
+
+export const audits = pgTable(
+  'audits',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    scope: text('scope').$type<AuditScope>().notNull(),
+    /** The path prefix for `section` scope. */
+    section: text('section'),
+    /** The exact URLs for `list`/`page` scope. */
+    urls: text('urls').array().$type<string[]>(),
+    limits: jsonb('limits').$type<CrawlLimits>().notNull().default(DEFAULT_CRAWL_LIMITS),
+    renderMode: text('render_mode').$type<AuditRenderMode>().notNull().default('never'),
+    state: text('state').$type<AuditState>().notNull(),
+    stateReason: text('state_reason'),
+    /** The `Coverage` contract (packages/crawl/src/hooks.ts). */
+    coverage: jsonb('coverage').$type<unknown>(),
+    /** The `SiteFacts` contract (packages/crawl/src/facts.ts). */
+    siteFacts: jsonb('site_facts').$type<unknown>(),
+    pagesCrawled: integer('pages_crawled').notNull().default(0),
+    pagesDiscovered: integer('pages_discovered').notNull().default(0),
+    pagesFailed: integer('pages_failed').notNull().default(0),
+    requestedByType: text('requested_by_type').$type<'user' | 'agent'>().notNull(),
+    requestedById: text('requested_by_id').notNull(),
+    startedAt: ts('started_at'),
+    finishedAt: ts('finished_at'),
+    /** When the current chunk last stored a page or took a lease; the reconciler reads it. */
+    lastProgressAt: ts('last_progress_at').notNull().defaultNow(),
+    /** When the reconciler last re-enqueued a chunk for a stalled audit. */
+    reconciledAt: ts('reconciled_at'),
+    /** When the worker's crawl_seed step read robots.txt, sitemaps and the HTTP probe. */
+    seededAt: ts('seeded_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    index('audits_site').on(t.workspaceId, t.siteId, t.createdAt),
+    // At most one live audit per site; `cancelled` is terminal.
+    uniqueIndex('audits_one_live').on(t.workspaceId, t.siteId).where(sql`state IN ('queued', 'running', 'finalizing')`),
+  ],
+);
+
+export const crawlFrontier = pgTable(
+  'crawl_frontier',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    auditId: text('audit_id').notNull(),
+    /** sha256 of the normalised URL. */
+    urlHash: text('url_hash').notNull(),
+    url: text('url').notNull(),
+    state: text('state').$type<FrontierState>().notNull().default('pending'),
+    skipReason: text('skip_reason'),
+    /** Click depth from the seed; null for sitemap-only and listed URLs. */
+    depth: integer('depth'),
+    discoveredBy: text('discovered_by').$type<CrawlDiscoverySource>().notNull(),
+    discoveredFrom: text('discovered_from'),
+    inSitemap: boolean('in_sitemap').notNull().default(false),
+    /** The first path segment, for the per-section page quota. */
+    section: text('section').notNull().default('/'),
+    leaseChunk: integer('lease_chunk'),
+    leaseExpiresAt: ts('lease_expires_at'),
+    attempts: integer('attempts').notNull().default(0),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.auditId, t.urlHash] }),
+    index('crawl_frontier_pending').on(t.workspaceId, t.auditId, t.state, t.depth, t.inSitemap),
+  ],
+);
+
+export const pageSnapshots = pgTable(
+  'page_snapshots',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    /** `snp_` + the first 32 hex characters of sha256(audit_id + url_hash). */
+    id: text('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    auditId: text('audit_id').notNull(),
+    url: text('url').notNull(),
+    finalUrl: text('final_url').notNull(),
+    status: integer('status').notNull(),
+    /** The full `PageFacts`. */
+    facts: jsonb('facts').$type<Record<string, unknown>>().notNull(),
+    contentHash: text('content_hash'),
+    fetchedAt: ts('fetched_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] }), index('page_snapshots_audit').on(t.workspaceId, t.auditId, t.url)],
+);
+
+export const pages = pgTable(
+  'pages',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    /** `pag_` + the first 32 hex characters of sha256(site_id + url). */
+    id: text('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    url: text('url').notNull(),
+    lastAuditId: text('last_audit_id'),
+    lastStatus: integer('last_status'),
+    firstSeenAt: ts('first_seen_at').notNull().defaultNow(),
+    lastSeenAt: ts('last_seen_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] }), uniqueIndex('pages_site_url').on(t.workspaceId, t.siteId, t.url)],
+);
+
+export const linkEdges = pgTable(
+  'link_edges',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    auditId: text('audit_id').notNull(),
+    fromUrlHash: text('from_url_hash').notNull(),
+    toUrlHash: text('to_url_hash').notNull(),
+    toUrl: text('to_url').notNull(),
+    rel: text('rel').array().$type<string[]>().notNull().default(sql`'{}'::text[]`),
+    anchor: text('anchor').notNull().default(''),
+    internal: boolean('internal').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.auditId, t.fromUrlHash, t.toUrlHash] }),
+    index('link_edges_inlinks').on(t.workspaceId, t.auditId, t.toUrlHash),
+  ],
+);
+
+export const pageLinkStats = pgTable(
+  'page_link_stats',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    auditId: text('audit_id').notNull(),
+    urlHash: text('url_hash').notNull(),
+    inlinks: integer('inlinks').notNull().default(0),
+    outlinks: integer('outlinks').notNull().default(0),
+    internalInlinks: integer('internal_inlinks').notNull().default(0),
+    sampleAnchors: text('sample_anchors').array().$type<string[]>().notNull().default(sql`'{}'::text[]`),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.auditId, t.urlHash] })],
+);
+
+/** Global per-host concurrency: one row per leased slot, shared by every worker replica. */
+export const crawlHostLeases = pgTable(
+  'crawl_host_leases',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    host: text('host').notNull(),
+    owner: text('owner').notNull(),
+    acquiredAt: ts('acquired_at').notNull().defaultNow(),
+    expiresAt: ts('expires_at').notNull(),
+  },
+  (t) => [index('crawl_host_leases_host').on(t.host), index('crawl_host_leases_expiry').on(t.expiresAt)],
+);
+
+/** Global per-host spacing (`next_start_at`) and backoff (`paused_until`). */
+export const crawlHostPacing = pgTable('crawl_host_pacing', {
+  host: text('host').primaryKey(),
+  nextStartAt: ts('next_start_at').notNull().defaultNow(),
+  pausedUntil: ts('paused_until'),
+});
+
+// ---------------------------------------------------------------------------------------------
+// Change sets (Phase 1 task F, ADR-0007). The content is the `change_set` artifact; these tables
+// are its lifecycle: where the change is in the world (drafted, approved, in a pull request,
+// merged, deployed, verified), the append-only evidence for each transition, and the per-change
+// verification rows.
+// ---------------------------------------------------------------------------------------------
+
+/** Every state a change-set run can be in (see 0010_change_sets.sql for the meaning of each). */
+export type ChangeSetState =
+  | 'draft'
+  | 'in_review'
+  | 'approved'
+  | 'applying'
+  | 'pr_open'
+  | 'merged'
+  | 'deploying'
+  | 'deployed'
+  | 'verified'
+  | 'verification_failed'
+  | 'deploy_not_detected'
+  | 'closed'
+  | 'stale'
+  | 'rolled_back'
+  | 'superseded'
+  | 'failed';
+
+export const changeSetRuns = pgTable(
+  'change_set_runs',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    /** The `chg_…` artifact; one run row per change set. */
+    artifactId: text('artifact_id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    state: text('state').$type<ChangeSetState>().notNull(),
+    /** The artifact version approved for application; the apply job refuses a different one. */
+    approvedVersion: integer('approved_version'),
+    /** The pull-request head SHA the approval covers; a later push returns the set to review. */
+    approvedHeadSha: text('approved_head_sha'),
+    approvalId: text('approval_id'),
+    branch: text('branch'),
+    prNumber: integer('pr_number'),
+    prUrl: text('pr_url'),
+    headSha: text('head_sha'),
+    mergeCommitSha: text('merge_commit_sha'),
+    deployedSha: text('deployed_sha'),
+    /** The change set this row rolls back, when it is a rollback. */
+    rollbackOf: text('rollback_of'),
+    /** The latest rollback proposal for this change set; the original changes state only when it is verified. */
+    rollbackChangeSetId: text('rollback_change_set_id'),
+    /** A rollback's changes that could not be inverted, with the reason; empty for everything else. */
+    uncoveredChanges: jsonb('uncovered_changes').$type<{ index: number; reason: string }[]>().notNull().default([]),
+    /** Verification attempts that ended in a fetch failure; the third gives up with evidence. */
+    verificationAttempts: integer('verification_attempts').notNull().default(0),
+    lastError: text('last_error'),
+    stateChangedAt: ts('state_changed_at').notNull().defaultNow(),
+    draftedAt: ts('drafted_at').notNull().defaultNow(),
+    submittedAt: ts('submitted_at'),
+    approvedAt: ts('approved_at'),
+    appliedAt: ts('applied_at'),
+    mergedAt: ts('merged_at'),
+    deployedAt: ts('deployed_at'),
+    verifiedAt: ts('verified_at'),
+    closedAt: ts('closed_at'),
+    failedAt: ts('failed_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.artifactId] }),
+    index('change_set_runs_site').on(t.workspaceId, t.siteId, t.state),
+    index('change_set_runs_pr').on(t.workspaceId, t.artifactId),
+  ],
+);
+
+/** Who caused a transition: a person, an agent, or the worker itself. */
+export type ChangeSetActor = 'person' | 'agent' | 'system';
+
+/** One transition, appended and never rewritten. */
+export const changeSetEvents = pgTable(
+  'change_set_events',
+  {
+    seq: bigserial('seq', { mode: 'number' }).primaryKey(),
+    workspaceId: uuid('workspace_id').notNull(),
+    artifactId: text('artifact_id').notNull(),
+    fromState: text('from_state'),
+    toState: text('to_state').notNull(),
+    actorType: text('actor_type').$type<ChangeSetActor>().notNull(),
+    actorId: text('actor_id'),
+    reason: text('reason').notNull(),
+    evidence: jsonb('evidence').$type<Record<string, unknown>>().notNull().default({}),
+    at: ts('at').notNull().defaultNow(),
+  },
+  (t) => [index('change_set_events_one').on(t.workspaceId, t.artifactId, t.seq)],
+);
+
+/** One change's verification result in one attempt against the deployed commit. */
+export const changeSetVerifications = pgTable(
+  'change_set_verifications',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    artifactId: text('artifact_id').notNull(),
+    attempt: integer('attempt').notNull(),
+    changeIndex: integer('change_index').notNull(),
+    url: text('url').notNull(),
+    changeType: text('change_type').notNull(),
+    result: text('result').$type<'pass' | 'fail' | 'unknown'>().notNull(),
+    detail: text('detail').notNull(),
+    evidence: jsonb('evidence').$type<Record<string, unknown>>().notNull().default({}),
+    deployedSha: text('deployed_sha').notNull(),
+    fetchedAt: ts('fetched_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.artifactId, t.attempt, t.changeIndex] })],
+);
+
+// Findings, issues and the health score (Phase 1 task E). See 0009_issues.sql, ADR-0008,
+// crawler-and-audits.md §5–§6 and design/DESIGN.md §4.2.
+
+/** A long-lived, site-level grouping of findings that people triage. */
+export type IssueState = 'open' | 'resolved' | 'ignored';
+/** The catalogue's severities, copied onto a finding and an issue. */
+export type FindingSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
+/** The eight categories the Phase 1 catalogue evaluates (packages/checks/src/check.ts). */
+export type FindingCategory =
+  | 'crawlability'
+  | 'indexability'
+  | 'status_links'
+  | 'on_page'
+  | 'structured_data'
+  | 'images'
+  | 'security'
+  | 'international';
+
+/** The capped evidence of one finding: the catalogue's items plus the true total. */
+export interface FindingEvidence {
+  items: unknown[];
+  total: number;
+  truncated: boolean;
+  /** Pages the finding covers; kept for older rows, the columns are authoritative now. */
+  affectedPages?: number;
+}
+
+/** One category's part of an audit's health score. */
+export interface AuditScoreCategory {
+  category: FindingCategory;
+  weight: number;
+  penalty: number;
+  contribution: number;
+  issues: number;
+  affectedPages: number;
+}
+
+export const issues = pgTable(
+  'issues',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    /** `iss_` + the first 32 hex characters of sha256(site_id + check_id + subject_key). */
+    id: text('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    checkId: text('check_id').notNull(),
+    /** The page URL for page and cross-page checks; the origin for site checks. */
+    subjectKey: text('subject_key').notNull(),
+    subject: text('subject').notNull(),
+    state: text('state').$type<IssueState>().notNull().default('open'),
+    severity: text('severity').$type<FindingSeverity>().notNull(),
+    category: text('category').$type<FindingCategory>().notNull(),
+    regressed: integer('regressed').notNull().default(0),
+    lastRegressedAt: ts('last_regressed_at'),
+    firstSeenAuditId: text('first_seen_audit_id').notNull(),
+    lastSeenAuditId: text('last_seen_audit_id').notNull(),
+    /** The last audit that evaluated the subject at all; unchanged when a later audit did not. */
+    lastCheckedAuditId: text('last_checked_audit_id').notNull(),
+    resolvedAuditId: text('resolved_audit_id'),
+    ignoredBy: text('ignored_by'),
+    ignoredReason: text('ignored_reason'),
+    ignoredAt: ts('ignored_at'),
+    evidence: jsonb('evidence').$type<FindingEvidence>().notNull().default({ items: [], total: 0, truncated: false }),
+    /** The issue's own subject pages (normalised URLs); the health score's page identity. */
+    affectedUrls: text('affected_urls').array().notNull().default([]),
+    affectedPages: integer('affected_pages').notNull().default(1),
+    evaluatedPages: integer('evaluated_pages').notNull().default(1),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    uniqueIndex('issues_subject_unique').on(t.workspaceId, t.siteId, t.checkId, t.subjectKey),
+    index('issues_site_state').on(t.workspaceId, t.siteId, t.state, t.severity),
+    index('issues_site_check').on(t.workspaceId, t.siteId, t.checkId),
+  ],
+);
+
+/** One check failing on one subject in one audit: the evidence an issue groups. */
+export const findings = pgTable(
+  'findings',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    /** `fnd_` + the first 32 hex characters of sha256(audit_id + check_id + source_key). */
+    id: text('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    auditId: text('audit_id').notNull(),
+    checkId: text('check_id').notNull(),
+    /** The snapshot (requested URL) that produced the finding; the replacement key. */
+    sourceKey: text('source_key').notNull(),
+    subjectKey: text('subject_key').notNull(),
+    /** The URL, or `url#selector` when the check points at a fragment of a page. */
+    subject: text('subject').notNull(),
+    severity: text('severity').$type<FindingSeverity>().notNull(),
+    category: text('category').$type<FindingCategory>().notNull(),
+    evidence: jsonb('evidence').$type<FindingEvidence>().notNull().default({ items: [], total: 0, truncated: false }),
+    /** The issue's own subject pages (normalised URLs); never derived from the evidence cap. */
+    affectedUrls: text('affected_urls').array().notNull().default([]),
+    affectedPages: integer('affected_pages').notNull().default(1),
+    issueId: text('issue_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    index('findings_audit_check').on(t.workspaceId, t.auditId, t.checkId),
+    index('findings_subject').on(t.workspaceId, t.siteId, t.checkId, t.subjectKey),
+    index('findings_source').on(t.workspaceId, t.auditId, t.sourceKey),
+    index('findings_issue').on(t.workspaceId, t.issueId).where(sql`issue_id IS NOT NULL`),
+  ],
+);
+
+/** One audit's health score with its per-category detail and what it could not evaluate. */
+export const auditScores = pgTable(
+  'audit_scores',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    auditId: text('audit_id').notNull(),
+    score: integer('score'),
+    reason: text('reason'),
+    categories: jsonb('categories').$type<AuditScoreCategory[]>().notNull().default([]),
+    notEvaluated: jsonb('not_evaluated').$type<{ category: string; reason: string }[]>().notNull().default([]),
+    skippedChecks: jsonb('skipped_checks').$type<{ checkId: string; reason: string }[]>().notNull().default([]),
+    pagesEvaluated: integer('pages_evaluated').notNull().default(0),
+    pagesCrawled: integer('pages_crawled').notNull().default(0),
+    /** Open issues the audit could not judge; excluded from the score and reported as coverage. */
+    uncheckedIssues: integer('unchecked_issues').notNull().default(0),
+    gscWeighted: boolean('gsc_weighted').notNull().default(false),
+    computedAt: ts('computed_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.auditId] }), index('audit_scores_site').on(t.workspaceId, t.siteId, t.computedAt)],
+);
+
+// Recommendations and the runs that produce them (Phase 1 task G). See 0011_recommendations.sql.
+// The recommendation itself is an artifact (`rcm_…`); these two tables hold what an artifact
+// cannot: the record of one synthesis run, and a person's order over a site's recommendations.
+
+export type RecommendationRunState = 'queued' | 'running' | 'completed' | 'failed';
+
+/** One `recommendations.generate` run: what it read, what it created, what it dropped and why. */
+export const recommendationRuns = pgTable(
+  'recommendation_runs',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    /** `rrun_` + 32 hex characters. */
+    id: text('id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    /** The audit whose issues the run read; null when the site has no completed audit. */
+    auditId: text('audit_id'),
+    state: text('state').$type<RecommendationRunState>().notNull().default('queued'),
+    maxRecommendations: integer('max_recommendations').notNull().default(10),
+    requestedByType: text('requested_by_type').$type<'user' | 'agent' | 'system'>().notNull(),
+    requestedById: text('requested_by_id').notNull(),
+    /** Candidates the technical specialist proposed, and recommendations the strategist wrote. */
+    candidates: integer('candidates').notNull().default(0),
+    derived: integer('derived').notNull().default(0),
+    createdCount: integer('created_count').notNull().default(0),
+    droppedCount: integer('dropped_count').notNull().default(0),
+    /** `[{ title, reason }]` per item that still failed validation after its retry. */
+    dropped: jsonb('dropped').$type<{ title: string; reason: string }[]>().notNull().default([]),
+    /** The `rcm_…` artifacts this run created, in order. */
+    createdIds: text('created_ids').array().notNull().default([]),
+    inputTokens: integer('input_tokens').notNull().default(0),
+    outputTokens: integer('output_tokens').notNull().default(0),
+    error: text('error'),
+    /** A crashed worker's run is reclaimed once the lease expires. */
+    leaseUntil: ts('lease_until'),
+    attempts: integer('attempts').notNull().default(0),
+    /**
+     * The fencing token, bumped on every claim. A worker passes its claim's token on every write, so
+     * one whose lease expired after another took the run over writes nothing.
+     */
+    attemptToken: bigint('attempt_token', { mode: 'number' }).notNull().default(0),
+    startedAt: ts('started_at'),
+    finishedAt: ts('finished_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    index('recommendation_runs_site').on(t.workspaceId, t.siteId, t.createdAt),
+    index('recommendation_runs_open').on(t.state, t.createdAt),
+  ],
+);
+
+/** A person's order over a site's recommendations; lower sorts first. Never part of the content. */
+export const recommendationPriorities = pgTable(
+  'recommendation_priorities',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    /** The `rcm_…` artifact this order is about. */
+    artifactId: text('artifact_id').notNull(),
+    siteId: uuid('site_id').notNull(),
+    priority: integer('priority').notNull(),
+    updatedBy: text('updated_by').notNull(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.artifactId] }),
+    index('recommendation_priorities_site').on(t.workspaceId, t.siteId, t.priority),
+  ],
+);
+
+/** Which artifact is the platform's playbook for a specialist; the identity, never a title. */
+export const recommendationSpecialists = pgTable(
+  'recommendation_specialists',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    specialist: text('specialist').$type<'technical' | 'strategist'>().notNull(),
+    /** The `skl_…` artifact the specialist's playbook lives in. */
+    artifactId: text('artifact_id').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.specialist] })],
 );

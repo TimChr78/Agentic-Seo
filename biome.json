@@ -12,6 +12,7 @@
       "!**/node_modules",
       "!**/dist",
       "!**/*.sql",
+      "!packages/changes/test/fixtures/pilot/python-expectations.json",
       "!test-results",
       "!playwright-report"
     ]

@@ -31,22 +31,24 @@ export function CodeView({
   className?: string;
 }) {
   return (
-    <div className={cx('relative min-w-0 rounded-lg border border-line bg-surface-2', className)}>
+    // The name sits on a section: a bare <pre> may not carry aria-label (axe aria-prohibited-attr).
+    <section
+      aria-label={label ? `${label} code` : 'Code'}
+      className={cx('relative min-w-0 rounded-lg border border-line bg-surface-2', className)}
+    >
       {label && <div className="border-b border-line px-3 py-2 text-[12px] leading-[18px] font-medium text-muted">{label}</div>}
       <div className="absolute top-1 right-1">
         <CopyButton value={value} />
       </div>
-      {/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: pre has no role that accepts a name; the label names a scrollable code block */}
       <pre
         // biome-ignore lint/a11y/noNoninteractiveTabindex: a scrollable code block must be reachable with the keyboard to scroll it
         tabIndex={0}
-        aria-label={label ?? 'Code'}
         className="overflow-auto px-3 py-2 pr-10 font-mono text-[12px] leading-[18px] whitespace-pre text-fg"
         style={{ maxHeight }}
       >
         {value}
       </pre>
-    </div>
+    </section>
   );
 }
 

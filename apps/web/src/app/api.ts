@@ -11,6 +11,7 @@
 
 import { ApiError, type CommandInput, type CommandOutput, createClient } from '@agentic-seo/client';
 import type { Commands } from '@agentic-seo/server/src/registry';
+import { DEMO_RESTRICTION_REASON } from './capabilities';
 
 export { ApiError };
 
@@ -33,6 +34,36 @@ export type SiteVerification = Out<'sites.verification'>;
 /** What a check found: verified with its method, or the server's reason it is not. */
 export type VerifyResult = Out<'sites.verify'>;
 
+// The Phase 1 screens read the commands' own views rather than a look-alike: a schema change breaks
+// this file at compile time. The names below are the few the pages share.
+
+export type Audit = Out<'audits.list'>['audits'][number];
+export type AuditProgress = Out<'audits.status'>;
+export type AuditPageRow = Out<'audits.pages'>['pages'][number];
+export type Finding = Out<'audits.findings'>['findings'][number];
+export type AuditScore = Out<'audits.score'>;
+export type Issue = Out<'audits.issues'>['issues'][number];
+export type IssueDetail = Out<'audits.issue'>;
+export type RecommendationSummary = Out<'recommendations.list'>['recommendations'][number];
+export type RecommendationDetail = Out<'recommendations.get'>;
+export type RecommendationRun = Out<'recommendations.runs'>['runs'][number];
+export type ChangeSetRun = Out<'changes.list'>['changes'][number];
+export type ChangeSetDetail = Out<'changes.get'>;
+export type ChangeSetStatus = Out<'changes.status'>;
+export type ChangeSetDiff = Out<'changes.diff'>;
+export type Approval = Out<'approvals.list'>['approvals'][number];
+export type ApprovalDetail = Out<'approvals.get'>;
+export type SearchConsoleStatus = Out<'search.gsc.status'>;
+export type SearchConsoleProperties = Out<'search.gsc.properties'>;
+export type GithubStatus = Out<'connectors.github.status'>;
+export type VersionSummary = Out<'artifacts.history'>['versions'][number];
+
+/** A page of one cursored list: the rows and the cursor for the next page. */
+export interface CursorPage<T> {
+  rows: T[];
+  nextCursor: string | null;
+}
+
 export interface Site {
   id: string;
   name: string;
@@ -54,6 +85,8 @@ export interface Workspace {
   timeZone: string;
   role: string;
   permissions: string[];
+  /** Which changes need a person's approval; the server owns the policy. */
+  approvalPolicy?: 'none' | 'agent_changes' | 'all_publishes';
 }
 
 /** The setup checklist's facts, read from current configuration rather than stored on the server. */
@@ -127,6 +160,62 @@ export interface Api {
   getVerification(siteId: string): Promise<SiteVerification>;
   /** Check ownership now: DNS first, then the home page's meta tag. */
   verifySite(siteId: string): Promise<VerifyResult>;
+
+  // Audits (`audits.*`). A run costs the site's bandwidth; everything else is free.
+  listAudits(input: In<'audits.list'>): Promise<CursorPage<Audit>>;
+  getAuditProgress(auditId: string): Promise<AuditProgress>;
+  listAuditPages(input: In<'audits.pages'>): Promise<CursorPage<AuditPageRow>>;
+  listAuditFindings(input: In<'audits.findings'>): Promise<CursorPage<Finding>>;
+  /** One page's facts, read-only: the row in Audits → Pages opens it. */
+  getAuditPage(auditId: string, snapshotId: string): Promise<Record<string, unknown>>;
+  getAuditScore(siteId: string, auditId?: string): Promise<AuditScore>;
+  runAudit(siteId: string): Promise<Out<'audits.run'>>;
+  cancelAudit(auditId: string): Promise<Out<'audits.cancel'>>;
+
+  // Issues (`audits.issues`, `audits.issue`, `checks.ignore`).
+  listIssues(input: In<'audits.issues'>): Promise<Out<'audits.issues'>>;
+  getIssue(issueId: string): Promise<IssueDetail>;
+  ignoreIssue(issueId: string, reason: string): Promise<Out<'checks.ignore'>>;
+  unignoreIssue(issueId: string): Promise<Out<'checks.unignore'>>;
+
+  // Recommendations (`recommendations.*`). Generating a run costs tokens; the rest is free.
+  listRecommendations(input: In<'recommendations.list'>): Promise<Out<'recommendations.list'>>;
+  getRecommendation(recommendationId: string): Promise<RecommendationDetail>;
+  createRecommendation(input: In<'recommendations.create'>): Promise<Out<'recommendations.create'>>;
+  listRecommendationRuns(siteId: string): Promise<Out<'recommendations.runs'>>;
+  getRecommendationRun(runId: string): Promise<RecommendationRun>;
+  generateRecommendations(siteId: string): Promise<Out<'recommendations.generate'>>;
+
+  // Change sets (`changes.*`). Drafting is free; applying needs a person's approval.
+  listChangeSets(input: In<'changes.list'>): Promise<Out<'changes.list'>>;
+  getChangeSet(changeSetId: string): Promise<ChangeSetDetail>;
+  getChangeSetStatus(changeSetId: string): Promise<ChangeSetStatus>;
+  getChangeSetDiff(changeSetId: string): Promise<ChangeSetDiff>;
+  createChangeSet(input: In<'changes.create'>): Promise<Out<'changes.create'>>;
+  requestApply(changeSetId: string, note: string): Promise<Out<'changes.requestApply'>>;
+  rollbackChangeSet(changeSetId: string, note: string): Promise<Out<'changes.rollback'>>;
+  redraftChangeSet(changeSetId: string): Promise<Out<'changes.updateDraft'>>;
+
+  // Approvals (`approvals.*`): the Inbox and every sticky bar read the same requests.
+  listApprovals(input?: In<'approvals.list'>): Promise<Out<'approvals.list'>>;
+  getApproval(approvalId: string): Promise<ApprovalDetail>;
+  approve(approvalId: string, note?: string): Promise<Out<'approvals.approve'>>;
+  reject(approvalId: string, note: string): Promise<Out<'approvals.reject'>>;
+
+  /** An artifact's versions, newest first: the Activity tab of a recommendation. */
+  getArtifactHistory(artifactId: string): Promise<VersionSummary[]>;
+
+  // Connections (Settings → Connections).
+  getSearchConsoleStatus(siteId: string): Promise<SearchConsoleStatus>;
+  getSearchConsoleProperties(siteId: string): Promise<SearchConsoleProperties>;
+  connectSearchConsole(siteId: string): Promise<Out<'search.gsc.connect'>>;
+  selectSearchConsoleProperty(siteId: string, property: string): Promise<Out<'search.gsc.select'>>;
+  disconnectSearchConsole(siteId: string): Promise<Out<'search.gsc.disconnect'>>;
+  syncSearchConsole(siteId: string): Promise<Out<'search.gsc.sync'>>;
+  getGithubStatus(siteId: string): Promise<GithubStatus>;
+  connectGithub(input: In<'connectors.github.connect'>): Promise<Out<'connectors.github.connect'>>;
+  updateGithub(input: In<'connectors.github.update'>): Promise<Out<'connectors.github.update'>>;
+  disconnectGithub(siteId: string): Promise<Out<'connectors.github.disconnect'>>;
 }
 
 const DEMO_USER: User = { id: 'usr_demo', name: 'Alex Rivera', email: 'alex@martechsignal.com' };
@@ -136,6 +225,7 @@ const DEMO_WORKSPACE: Workspace = {
   name: 'Agentic SEO demo',
   timeZone: 'UTC',
   role: 'owner',
+  approvalPolicy: 'none',
   // The canonical owner set (packages/commands/src/principal.ts: owners hold every permission).
   permissions: [
     'workspace:admin',
@@ -235,6 +325,175 @@ export function emptyHome(site: { id: string }, checklist: ChecklistFacts): Home
     checklist,
     recommendations: [],
     agentActivity: [],
+  };
+}
+
+/**
+ * The Phase 1 methods in demo mode. Sample data carries no audit, recommendation or connection, so
+ * every list answers empty and every detail says the object is not there; a write is refused with
+ * the same sentence the disabled controls show. Nothing here invents a number.
+ */
+function demoPhaseOne(): Pick<
+  Api,
+  | 'listAudits'
+  | 'getAuditProgress'
+  | 'listAuditPages'
+  | 'listAuditFindings'
+  | 'getAuditPage'
+  | 'getAuditScore'
+  | 'runAudit'
+  | 'cancelAudit'
+  | 'listIssues'
+  | 'getIssue'
+  | 'ignoreIssue'
+  | 'unignoreIssue'
+  | 'listRecommendations'
+  | 'getRecommendation'
+  | 'createRecommendation'
+  | 'listRecommendationRuns'
+  | 'getRecommendationRun'
+  | 'generateRecommendations'
+  | 'listChangeSets'
+  | 'getChangeSet'
+  | 'getChangeSetStatus'
+  | 'getChangeSetDiff'
+  | 'createChangeSet'
+  | 'requestApply'
+  | 'rollbackChangeSet'
+  | 'redraftChangeSet'
+  | 'listApprovals'
+  | 'getApproval'
+  | 'approve'
+  | 'reject'
+  | 'getArtifactHistory'
+  | 'getSearchConsoleStatus'
+  | 'getSearchConsoleProperties'
+  | 'connectSearchConsole'
+  | 'selectSearchConsoleProperty'
+  | 'disconnectSearchConsole'
+  | 'syncSearchConsole'
+  | 'getGithubStatus'
+  | 'connectGithub'
+  | 'updateGithub'
+  | 'disconnectGithub'
+> {
+  const missing = (what: string) => new ApiError(404, 'not_found', `The demo has no ${what}. Switch to a live workspace to open one.`);
+  const demoOnly = (what: string) => new ApiError(403, 'demo', `${DEMO_RESTRICTION_REASON} ${what} needs a live workspace.`);
+  return {
+    listAudits: async () => ({ rows: [], nextCursor: null }),
+    getAuditProgress: async () => {
+      throw missing('audit');
+    },
+    listAuditPages: async () => ({ rows: [], nextCursor: null }),
+    listAuditFindings: async () => ({ rows: [], nextCursor: null }),
+    getAuditPage: async () => {
+      throw missing('page snapshot');
+    },
+    getAuditScore: async () => {
+      throw missing('audit score');
+    },
+    runAudit: async () => {
+      throw demoOnly('Running an audit');
+    },
+    cancelAudit: async () => {
+      throw demoOnly('Cancelling an audit');
+    },
+    listIssues: async () => ({
+      issues: [],
+      nextCursor: null,
+      summary: { open: 0, resolved: 0, ignored: 0, total: 0 },
+      hasGsc: false,
+    }),
+    getIssue: async () => {
+      throw missing('issue');
+    },
+    ignoreIssue: async () => {
+      throw demoOnly('Ignoring an issue');
+    },
+    unignoreIssue: async () => {
+      throw demoOnly('Unignoring an issue');
+    },
+    listRecommendations: async () => ({ recommendations: [], total: 0, nextCursor: null }),
+    getRecommendation: async () => {
+      throw missing('recommendation');
+    },
+    createRecommendation: async () => {
+      throw demoOnly('Creating a recommendation');
+    },
+    listRecommendationRuns: async () => ({ runs: [], total: 0 }),
+    getRecommendationRun: async () => {
+      throw missing('recommendation run');
+    },
+    generateRecommendations: async () => {
+      throw demoOnly('Generating recommendations');
+    },
+    listChangeSets: async () => ({ changes: [], total: 0, nextCursor: null }),
+    getChangeSet: async () => {
+      throw missing('change set');
+    },
+    getChangeSetStatus: async () => {
+      throw missing('change set');
+    },
+    getChangeSetDiff: async () => {
+      throw missing('change set');
+    },
+    createChangeSet: async () => {
+      throw demoOnly('Drafting a change set');
+    },
+    requestApply: async () => {
+      throw demoOnly('Submitting a change set');
+    },
+    rollbackChangeSet: async () => {
+      throw demoOnly('Rolling back a change set');
+    },
+    redraftChangeSet: async () => {
+      throw demoOnly('Redrafting a change set');
+    },
+    listApprovals: async () => ({ approvals: [], total: 0, nextCursor: null }),
+    getApproval: async () => {
+      throw missing('approval request');
+    },
+    approve: async () => {
+      throw demoOnly('Approving');
+    },
+    reject: async () => {
+      throw demoOnly('Rejecting');
+    },
+    getArtifactHistory: async () => [],
+    getSearchConsoleStatus: async () => ({ connection: null, property: null, datasets: [] }),
+    getSearchConsoleProperties: async () => {
+      throw demoOnly('Listing Search Console properties');
+    },
+    connectSearchConsole: async () => {
+      throw demoOnly('Connecting Search Console');
+    },
+    selectSearchConsoleProperty: async () => {
+      throw demoOnly('Choosing a property');
+    },
+    disconnectSearchConsole: async () => {
+      throw demoOnly('Disconnecting Search Console');
+    },
+    syncSearchConsole: async () => {
+      throw demoOnly('Syncing Search Console');
+    },
+    getGithubStatus: async () => ({
+      connection: null,
+      repository: null,
+      baseBranch: null,
+      deploy: null,
+      deployTimeoutHours: null,
+      hasToken: false,
+      sourceRules: 0,
+    }),
+    connectGithub: async () => {
+      throw demoOnly('Connecting GitHub');
+    },
+    updateGithub: async () => {
+      throw demoOnly('Changing the GitHub connection');
+    },
+    disconnectGithub: async () => {
+      throw demoOnly('Disconnecting GitHub');
+    },
   };
 }
 
@@ -341,6 +600,7 @@ export function createDemoApi(): Api {
           : 'Sample data cannot check DNS or the home page. On a real server this reads the TXT record, then the meta tag.',
       };
     },
+    ...demoPhaseOne(),
   };
 }
 
@@ -414,14 +674,10 @@ async function rpc<N extends CommandName>(name: N, input: In<N>, call: CommandCa
 
 /**
  * The mapping from command outputs to the UI's own shapes. It takes the command transport, so the
- * mapping is testable without a server: the tests pass a fake that answers the commands.
+ * mapping is testable without a server: the tests pass a fake that answers the commands. Everything
+ * except the auth surface (Better Auth's own endpoints) comes from commands.
  */
-export function createCommandApi(
-  call: CommandCall,
-): Pick<
-  Api,
-  'getIdentity' | 'getMemberships' | 'getWorkspace' | 'listSites' | 'createSite' | 'getHome' | 'getVerification' | 'verifySite'
-> {
+export function createCommandApi(call: CommandCall): Omit<Api, 'getSession' | 'signIn' | 'signOut'> {
   const siteView = (site: Out<'sites.list'>['sites'][number]): Site => ({
     id: site.id,
     name: site.name,
@@ -449,6 +705,7 @@ export function createCommandApi(
         timeZone: workspace.timeZone,
         role: workspace.role,
         permissions: workspace.permissions,
+        approvalPolicy: workspace.approvalPolicy,
       };
     },
     listSites: async () => (await call('sites.list', { includeArchived: false })).sites.map(siteView),
@@ -461,6 +718,71 @@ export function createCommandApi(
     },
     getVerification: (siteId) => call('sites.verification', { siteId }),
     verifySite: (siteId) => call('sites.verify', { siteId }),
+
+    // Audits.
+    listAudits: async (input) => {
+      const page = await call('audits.list', input);
+      return { rows: page.audits, nextCursor: page.nextCursor };
+    },
+    getAuditProgress: (auditId) => call('audits.status', { auditId }),
+    listAuditPages: async (input) => {
+      const page = await call('audits.pages', input);
+      return { rows: page.pages, nextCursor: page.nextCursor };
+    },
+    listAuditFindings: async (input) => {
+      const page = await call('audits.findings', input);
+      return { rows: page.findings, nextCursor: page.nextCursor };
+    },
+    getAuditPage: async (auditId, snapshotId) =>
+      (await call('audits.page', { auditId, snapshotId })).page as unknown as Record<string, unknown>,
+    // The site's latest scored audit when no id is given: a list row without a score still shows one.
+    getAuditScore: (siteId, auditId) => call('audits.score', auditId ? { siteId, auditId } : { siteId }),
+    runAudit: (siteId) => call('audits.run', { siteId }),
+    cancelAudit: (auditId) => call('audits.cancel', { auditId }),
+
+    // Issues.
+    listIssues: (input) => call('audits.issues', input),
+    getIssue: (issueId) => call('audits.issue', { issueId }),
+    ignoreIssue: (issueId, reason) => call('checks.ignore', { issueId, reason }),
+    unignoreIssue: (issueId) => call('checks.unignore', { issueId }),
+
+    // Recommendations.
+    listRecommendations: (input) => call('recommendations.list', input),
+    getRecommendation: (recommendationId) => call('recommendations.get', { recommendationId }),
+    createRecommendation: (input) => call('recommendations.create', input),
+    listRecommendationRuns: (siteId) => call('recommendations.runs', { siteId }),
+    getRecommendationRun: (runId) => call('recommendations.run', { runId }),
+    generateRecommendations: (siteId) => call('recommendations.generate', { siteId }),
+
+    // Change sets.
+    listChangeSets: (input) => call('changes.list', input),
+    getChangeSet: (changeSetId) => call('changes.get', { changeSetId }),
+    getChangeSetStatus: (changeSetId) => call('changes.status', { changeSetId }),
+    getChangeSetDiff: (changeSetId) => call('changes.diff', { changeSetId }),
+    createChangeSet: (input) => call('changes.create', input),
+    requestApply: (changeSetId, note) => call('changes.requestApply', { changeSetId, note }),
+    rollbackChangeSet: (changeSetId, note) => call('changes.rollback', { changeSetId, note }),
+    redraftChangeSet: (changeSetId) => call('changes.updateDraft', { changeSetId }),
+
+    // Approvals.
+    listApprovals: (input) => call('approvals.list', input ?? {}),
+    getApproval: (approvalId) => call('approvals.get', { approvalId }),
+    approve: (approvalId, note) => call('approvals.approve', note ? { approvalId, note } : { approvalId }),
+    reject: (approvalId, note) => call('approvals.reject', { approvalId, note }),
+
+    getArtifactHistory: async (artifactId) => (await call('artifacts.history', { artifactId })).versions,
+
+    // Connections.
+    getSearchConsoleStatus: (siteId) => call('search.gsc.status', { siteId }),
+    getSearchConsoleProperties: (siteId) => call('search.gsc.properties', { siteId }),
+    connectSearchConsole: (siteId) => call('search.gsc.connect', { siteId }),
+    selectSearchConsoleProperty: (siteId, property) => call('search.gsc.select', { siteId, property }),
+    disconnectSearchConsole: (siteId) => call('search.gsc.disconnect', { siteId }),
+    syncSearchConsole: (siteId) => call('search.gsc.sync', { siteId }),
+    getGithubStatus: (siteId) => call('connectors.github.status', { siteId }),
+    connectGithub: (input) => call('connectors.github.connect', input),
+    updateGithub: (input) => call('connectors.github.update', input),
+    disconnectGithub: (siteId) => call('connectors.github.disconnect', { siteId }),
   };
 }
 
@@ -575,20 +897,27 @@ export async function apiIsDemo(): Promise<boolean> {
   return (await resolveApi()) === demoApi;
 }
 
-/** The single entry point pages use; every method waits for the selected client. */
-export const api: Api = {
-  getSession: async () => (await resolveApi()).getSession(),
-  signIn: async (input) => (await resolveApi()).signIn(input),
-  signOut: async () => (await resolveApi()).signOut(),
-  getIdentity: async () => (await resolveApi()).getIdentity(),
-  getMemberships: async () => (await resolveApi()).getMemberships(),
-  getWorkspace: async () => (await resolveApi()).getWorkspace(),
-  listSites: async () => (await resolveApi()).listSites(),
-  createSite: async (input) => (await resolveApi()).createSite(input),
-  getHome: async (siteId) => (await resolveApi()).getHome(siteId),
-  getVerification: async (siteId) => (await resolveApi()).getVerification(siteId),
-  verifySite: async (siteId) => (await resolveApi()).verifySite(siteId),
-};
+/**
+ * The single entry point pages use; every call waits for the selected client. The surface is large
+ * and entirely mechanical, so it is forwarded by name instead of being restated: the `Api` type
+ * below is the contract, and a method added to it is reachable here at once. Properties that are
+ * not methods (`then`, symbols) answer undefined, so the proxy can never be mistaken for a promise.
+ */
+const forwarded = new Map<PropertyKey, unknown>();
+export const api: Api = new Proxy({} as Api, {
+  get(_target, property) {
+    if (typeof property !== 'string' || property === 'then') return undefined;
+    let fn = forwarded.get(property);
+    if (!fn) {
+      fn = async (...args: unknown[]) => {
+        const client = await resolveApi();
+        return (client as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)[property](...args);
+      };
+      forwarded.set(property, fn);
+    }
+    return fn;
+  },
+});
 
 /** The message to show for a failed call: the server's own reason. */
 export const errText = (e: unknown) => (e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e));

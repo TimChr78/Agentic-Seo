@@ -88,3 +88,23 @@ function validCalendarFields(value: string): boolean {
   const daysInMonth = new Date(Date.UTC(y, mo, 0)).getUTCDate();
   return d <= daysInMonth;
 }
+
+/**
+ * Search Console's own calendar. Search Analytics dates are "in PT time (UTC - 7:00/8:00)", so the
+ * day Google is willing to answer for is the one in America/Los_Angeles, not UTC: at 18:00 Pacific
+ * (02:00 UTC the next day) UTC is already tomorrow while Google still calls it today.
+ */
+export const SEARCH_CONSOLE_TIME_ZONE = 'America/Los_Angeles';
+
+const pad2 = (value: number): string => String(value).padStart(2, '0');
+
+/** The YYYY-MM-DD day in a time zone at one instant (DST-safe: Intl knows the offset then). */
+export function dayInZone(at: Date, timeZone: string): string {
+  const parts = zonedParts(at, timeZone);
+  return `${parts.y}-${pad2(parts.m)}-${pad2(parts.d)}`;
+}
+
+/** Today's date as Search Console counts it, in America/Los_Angeles. */
+export function searchConsoleDay(at: Date = new Date()): string {
+  return dayInZone(at, SEARCH_CONSOLE_TIME_ZONE);
+}

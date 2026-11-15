@@ -120,6 +120,33 @@ export function offlineChecks(env: NodeJS.ProcessEnv): Check[] {
           hint: 'List the proxy and loopback ranges, e.g. 127.0.0.1/32,::1/128,10.0.0.0/8.',
         },
   );
+  // Google Search Console is optional, but half a configuration is a mistake worth naming before a
+  // person tries to connect a site and reads a 412 from the command.
+  const googleId = env.GOOGLE_OAUTH_CLIENT_ID?.trim() ?? '';
+  const googleSecret = env.GOOGLE_OAUTH_CLIENT_SECRET?.trim() ?? '';
+  const setupHint =
+    'Create an OAuth client of type "Web application" in the Google Cloud console ' +
+    '(https://console.cloud.google.com/apis/credentials), add <PUBLIC_URL>/oauth/callback as a redirect URI, ' +
+    'and enable the Search Console API. See docs/setup/google-search-console.md.';
+  checks.push(
+    googleId && googleSecret
+      ? { id: 'google.oauth', status: 'ok', message: 'Google Search Console is configured' }
+      : googleId || googleSecret
+        ? {
+            id: 'google.oauth',
+            status: 'fail',
+            message: googleId
+              ? 'GOOGLE_OAUTH_CLIENT_ID is set but GOOGLE_OAUTH_CLIENT_SECRET is missing'
+              : 'GOOGLE_OAUTH_CLIENT_SECRET is set but GOOGLE_OAUTH_CLIENT_ID is missing',
+            hint: setupHint,
+          }
+        : {
+            id: 'google.oauth',
+            status: 'info',
+            message: 'Google Search Console is not set up; connecting a site is unavailable',
+            hint: setupHint,
+          },
+  );
   return checks;
 }
 

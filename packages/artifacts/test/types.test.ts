@@ -67,10 +67,47 @@ describe('SEO artifact content', () => {
   });
 
   it('refuses a placeholder type with the phase it arrives in', () => {
-    const parsed = artifactTypes.change_set.content.safeParse({ any: 'thing' });
+    const parsed = artifactTypes.schema_template.content.safeParse({ any: 'thing' });
     expect(parsed.success).toBe(false);
     if (parsed.success) return;
     expect(parsed.error.issues[0]?.message).toBe('This artifact type arrives in Phase 1.');
+  });
+
+  it('validates a change set with resolved changes and their diffs', () => {
+    const parsed = artifactTypes.change_set.content.safeParse({
+      connector: 'github',
+      title: 'Rewrite the about page title',
+      summary: 'The title does not match the page.',
+      changes: [
+        {
+          change: { type: 'meta.title', url: 'https://example.com/about/', before: 'Old', after: 'New' },
+          source: { path: 'about/index.html', editor: 'html', confidence: 'exact', affectedRoutes: ['/about/'] },
+          baseSha: 'a'.repeat(40),
+          sourceHash: 'b'.repeat(64),
+          diff: {
+            path: 'about/index.html',
+            status: 'modified',
+            unified: '--- a/about/index.html\n+++ b/about/index.html\n',
+            additions: 1,
+            deletions: 1,
+          },
+        },
+      ],
+      verificationPlan: 'Re-fetch /about/ and check the title.',
+      rollbackPlan: 'Revert the merge commit.',
+    });
+    expect(parsed.success).toBe(true);
+    // A change set applies through one connector; anything else is refused, not stored.
+    expect(
+      artifactTypes.change_set.content.safeParse({
+        connector: 'wordpress',
+        title: 'x',
+        summary: 'y',
+        changes: [],
+        verificationPlan: 'z',
+        rollbackPlan: 'w',
+      }).success,
+    ).toBe(false);
   });
 
   it('keeps the mandate’s SEO action classes and limits', () => {

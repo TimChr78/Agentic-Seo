@@ -166,8 +166,119 @@ const SEED: Record<string, { insert: string; appendOnly: boolean }> = {
             VALUES ($1, gen_random_uuid(), '00000000-0000-4000-8000-000000000001', 'rival.example')`,
     appendOnly: false,
   },
+  connections: {
+    insert: `INSERT INTO connections (workspace_id, id, site_id, connector, label, settings, state)
+            VALUES ($1, 'con_00000000000000000000000000000001', '00000000-0000-4000-8000-000000000001',
+              'google-search-console', 'Search Console', '{"property":"sc-domain:seed-site.example"}'::jsonb, 'active')`,
+    appendOnly: false,
+  },
+  gsc_property_totals: {
+    insert: `INSERT INTO gsc_property_totals (workspace_id, site_id, property, date, clicks, impressions, ctr, position)
+            VALUES ($1, '00000000-0000-4000-8000-000000000001', 'sc-domain:seed-site.example', '2026-11-01', 10, 100, 0.1, 3)`,
+    appendOnly: false,
+  },
+  gsc_page_aggregates: {
+    insert: `INSERT INTO gsc_page_aggregates (workspace_id, site_id, property, date, page, page_key, clicks, impressions, ctr, position)
+            VALUES ($1, '00000000-0000-4000-8000-000000000001', 'sc-domain:seed-site.example', '2026-11-01',
+              'https://seed-site.example/', 'https://seed-site.example/', 10, 100, 0.1, 3)`,
+    appendOnly: false,
+  },
+  gsc_sync_state: {
+    insert: `INSERT INTO gsc_sync_state (workspace_id, site_id, dataset, search_type, property, last_final_date, backfill_through)
+            VALUES ($1, '00000000-0000-4000-8000-000000000001', 'property_totals', 'web', 'sc-domain:seed-site.example', '2026-11-01', '2026-11-01')`,
+    appendOnly: false,
+  },
   workspace_members: {
     insert: `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, 'seed-user', 'viewer')`,
+    appendOnly: false,
+  },
+  // The crawl engine's working state (0007_crawl.sql). Inserted last because these rows point at
+  // the seeded site and audit; `crawl_host_leases` and `crawl_host_pacing` carry no workspace_id,
+  // so they are not tenant tables.
+  audits: {
+    insert: `INSERT INTO audits (workspace_id, id, site_id, scope, state, requested_by_type, requested_by_id)
+            VALUES ($1, 'adt_seed', '00000000-0000-4000-8000-000000000001', 'site', 'queued', 'user', 'seed-user')`,
+    appendOnly: false,
+  },
+  crawl_frontier: {
+    insert: `INSERT INTO crawl_frontier (workspace_id, audit_id, url_hash, url, discovered_by, section)
+            VALUES ($1, 'adt_seed', 'hash-seed', 'https://seed-site.example/', 'seed', '/')`,
+    appendOnly: false,
+  },
+  page_snapshots: {
+    insert: `INSERT INTO page_snapshots (workspace_id, id, site_id, audit_id, url, final_url, status, facts)
+            VALUES ($1, 'snp_seed', '00000000-0000-4000-8000-000000000001', 'adt_seed', 'https://seed-site.example/', 'https://seed-site.example/', 200, '{}'::jsonb)`,
+    appendOnly: false,
+  },
+  pages: {
+    insert: `INSERT INTO pages (workspace_id, id, site_id, url, last_audit_id, last_status)
+            VALUES ($1, 'pag_seed', '00000000-0000-4000-8000-000000000001', 'https://seed-site.example/', 'adt_seed', 200)`,
+    appendOnly: false,
+  },
+  link_edges: {
+    insert: `INSERT INTO link_edges (workspace_id, audit_id, from_url_hash, to_url_hash, to_url, internal)
+            VALUES ($1, 'adt_seed', 'hash-seed', 'hash-two', 'https://seed-site.example/two', true)`,
+    appendOnly: false,
+  },
+  page_link_stats: {
+    insert: `INSERT INTO page_link_stats (workspace_id, audit_id, url_hash) VALUES ($1, 'adt_seed', 'hash-seed')`,
+    appendOnly: false,
+  },
+  // The change-set lifecycle (Phase 1 task F). The run row points at the seeded site and artifact;
+  // the transition log and the verification evidence are append-only by grant.
+  change_set_runs: {
+    insert: `INSERT INTO change_set_runs (workspace_id, artifact_id, site_id, state)
+            VALUES ($1, 'not_seed', '00000000-0000-4000-8000-000000000001', 'draft')`,
+    appendOnly: false,
+  },
+  change_set_events: {
+    insert: `INSERT INTO change_set_events (workspace_id, artifact_id, from_state, to_state, actor_type, reason)
+            VALUES ($1, 'not_seed', 'draft', 'in_review', 'system', 'Seed transition')`,
+    appendOnly: true,
+  },
+  change_set_verifications: {
+    insert: `INSERT INTO change_set_verifications (workspace_id, artifact_id, attempt, change_index, url, change_type, result, detail, deployed_sha)
+            VALUES ($1, 'not_seed', 1, 0, 'https://seed-site.example/', 'meta.title', 'pass', 'Seed verification', 'commit-seed')`,
+    appendOnly: true,
+  },
+  // Findings, issues and the score (0009_issues.sql). Inserted last: they point at the seeded site
+  // and audit. Findings and issues are history, so the app role gets no DELETE on them.
+  issues: {
+    insert: `INSERT INTO issues (workspace_id, id, site_id, check_id, subject_key, subject, state, severity, category,
+              first_seen_audit_id, last_seen_audit_id, last_checked_audit_id)
+            VALUES ($1, 'iss_00000000000000000000000000000001', '00000000-0000-4000-8000-000000000001',
+              'title.missing', 'https://seed-site.example/', 'https://seed-site.example/', 'open', 'high', 'on_page',
+              'adt_seed', 'adt_seed', 'adt_seed')`,
+    appendOnly: false,
+  },
+  findings: {
+    insert: `INSERT INTO findings (workspace_id, id, site_id, audit_id, check_id, source_key, subject_key, subject, severity, category, evidence)
+            VALUES ($1, 'fnd_00000000000000000000000000000001', '00000000-0000-4000-8000-000000000001', 'adt_seed',
+              'title.missing', 'https://seed-site.example/', 'https://seed-site.example/', 'https://seed-site.example/', 'high', 'on_page',
+              '{"items":[],"total":1,"truncated":false}'::jsonb)`,
+    appendOnly: false,
+  },
+  audit_scores: {
+    insert: `INSERT INTO audit_scores (workspace_id, site_id, audit_id, score, pages_evaluated, pages_crawled)
+            VALUES ($1, '00000000-0000-4000-8000-000000000001', 'adt_seed', 82, 10, 10)`,
+    appendOnly: false,
+  },
+  // Recommendations (0011_recommendations.sql). The run row points at the seeded site, audit and
+  // requester; the priority is a person's order over the seeded artifact. A run is history, so the
+  // app role has no DELETE on it.
+  recommendation_runs: {
+    insert: `INSERT INTO recommendation_runs (workspace_id, id, site_id, audit_id, requested_by_type, requested_by_id)
+            VALUES ($1, 'rrun_00000000000000000000000000000001', '00000000-0000-4000-8000-000000000001', 'adt_seed', 'system', 'seed-user')`,
+    appendOnly: false,
+  },
+  recommendation_priorities: {
+    insert: `INSERT INTO recommendation_priorities (workspace_id, artifact_id, site_id, priority, updated_by)
+            VALUES ($1, 'not_seed', '00000000-0000-4000-8000-000000000001', 0, 'seed-user')`,
+    appendOnly: false,
+  },
+  recommendation_specialists: {
+    insert: `INSERT INTO recommendation_specialists (workspace_id, specialist, artifact_id)
+            VALUES ($1, 'technical', 'not_seed')`,
     appendOnly: false,
   },
 };

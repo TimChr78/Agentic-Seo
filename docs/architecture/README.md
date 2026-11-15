@@ -1,6 +1,6 @@
 # Architecture: Agentic SEO
 
-> Status: **design, before code** (2026-11-12). Nothing on these pages is built yet. They describe what we will build and why, and the order we will build it in. Decisions are recorded as ADRs in [`adr/`](adr/). A later ADR can overturn an earlier one; ADRs keep their original text.
+> Status: design, **Phases 0–1 built** (2026-11-15). These pages describe what we are building and why, and the order we build it in. Phase 0 (foundations) is on `main`; Phase 1 (the thin loop: crawl, checks, issues, score, Search Console, recommendations, change sets through GitHub, the Phase 1 screens and MCP) is built and in its pilot. Where a page describes later phases it says so; where Phase 1 differs from the original design, the page records the change. Decisions are recorded as ADRs in [`adr/`](adr/). A later ADR can overturn an earlier one; ADRs keep their original text.
 
 ## What we are building
 

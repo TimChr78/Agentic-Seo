@@ -30,6 +30,12 @@ export interface HostLimiter {
   noteResponse(host: string, response: HostResponse): Promise<void>;
   /** Pause a host for a given time (an operator action, or a backoff the caller decided on). */
   pause?(host: string, durationMs: number): Promise<void>;
+  /**
+   * The epoch millisecond before which this limiter will not start a request to `host`, if it
+   * knows (the Postgres limiter reads its shared pacing table). A chunk that stops while waiting
+   * for a host uses it to postpone its successor past a backoff another replica imposed.
+   */
+  nextEligibleAt?(host: string): Promise<number | null>;
 }
 
 /**

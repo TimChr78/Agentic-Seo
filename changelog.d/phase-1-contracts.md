@@ -1,0 +1,1 @@
+- Add the `crawl` package contract: `PageFacts` and `SiteFacts` (what the crawler extracts and checks read) and the audit hooks (`onPage`, `onFinalize`) with coverage, so the crawler and the check catalogue can be built in parallel.
