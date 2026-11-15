@@ -276,6 +276,11 @@ const SEED: Record<string, { insert: string; appendOnly: boolean }> = {
             VALUES ($1, 'not_seed', '00000000-0000-4000-8000-000000000001', 0, 'seed-user')`,
     appendOnly: false,
   },
+  recommendation_specialists: {
+    insert: `INSERT INTO recommendation_specialists (workspace_id, specialist, artifact_id)
+            VALUES ($1, 'technical', 'not_seed')`,
+    appendOnly: false,
+  },
 };
 
 describe.skipIf(!hasTestDatabase())('foundation tables', () => {

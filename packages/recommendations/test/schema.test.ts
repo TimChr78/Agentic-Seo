@@ -6,7 +6,14 @@ import { describe, expect, it } from 'vitest';
 // hand as much as a specialist — must supply the synthesis fields, and the traffic at stake is a
 // reach estimate, not a number someone typed.
 
-const reach = { kind: 'known' as const, affectedUrls: 2, clicksAtRisk: 120, criticalPages: [], dataThrough: '2026-11-14' };
+const reach = {
+  kind: 'known' as const,
+  affectedUrls: 2,
+  clicksAtRisk: 120,
+  criticalPages: [],
+  dataThrough: '2026-11-14',
+  computedAt: '2026-11-15T09:00:00.000Z',
+};
 
 const valid = () => ({
   title: 'Rewrite the titles of 12 pages',
@@ -71,9 +78,24 @@ describe('the recommendation content schema', () => {
     expect(
       parse({
         ...valid(),
-        expectedImpact: { ...valid().expectedImpact, trafficAtStake: { kind: 'unknown', reason: 'Search Console is not connected' } },
+        expectedImpact: {
+          ...valid().expectedImpact,
+          trafficAtStake: { kind: 'unknown', reason: 'Search Console is not connected', computedAt: '2026-11-15T09:00:00.000Z' },
+        },
       }).success,
     ).toBe(true);
+  });
+
+  it('requires the traffic at stake to carry the date it was computed', () => {
+    const undated: Record<string, unknown> = { ...reach };
+    delete undated.computedAt;
+    expect(parse({ ...valid(), expectedImpact: { ...valid().expectedImpact, trafficAtStake: undated } }).success).toBe(false);
+    expect(
+      parse({
+        ...valid(),
+        expectedImpact: { ...valid().expectedImpact, trafficAtStake: { kind: 'unknown', reason: 'Not connected' } },
+      }).success,
+    ).toBe(false);
   });
 
   it('makes a specialist author name which specialist it is', () => {

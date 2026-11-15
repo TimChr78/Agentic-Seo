@@ -1,7 +1,7 @@
 import { artifactTypes, type Skill } from '@agentic-seo/artifacts';
 import { hashValue, newId } from '@agentic-seo/core';
 import { schema, type Tx } from '@agentic-seo/db';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 // The two specialists of task G (agents-and-autonomy.md §5) are `skill` artifacts, not code: a
 // playbook is Markdown written for a model, versioned and reviewed like any other artifact, so a
@@ -155,85 +155,153 @@ async function publishedSkill(tx: Tx, artifactId: string, version: number): Prom
  * workspace with an advisory lock, so two runs starting together cannot create two pairs; the second
  * one reads what the first wrote.
  *
- * A skill a person already published under the specialist's title is adopted, never overwritten. A
- * skill under that title with no published version is a person's unpublished draft: the run leaves
- * it alone and uses the platform's own seeded playbook (a separate artifact, titled "… (built in)")
- * instead, so nobody's draft is rewritten and the run still has instructions it is allowed to read.
- * Publishing the person's draft later makes the next run adopt it; the built-in one then stays as
- * an unused skill rather than being deleted under someone.
+ * Which artifact is the platform's is recorded in `recommendation_specialists`, never inferred from
+ * a name: a person may title their own skill exactly like the built-in one, and that draft must stay
+ * theirs. The mapping is also what makes reseeding safe — only the mapped artifact is ever written.
+ *
+ * A skill a person already published under the specialist's title is adopted (mapped) rather than
+ * replaced, so their playbook is what runs; after that it is the specialist's artifact and they can
+ * keep editing it. A skill under that title with no published version is their draft: the run leaves
+ * it alone and creates the platform's own artifact instead. Publishing their draft later makes the
+ * next run adopt it only if the mapping does not already name an artifact; a mapped specialist keeps
+ * its own.
  */
 export async function ensureSpecialists(tx: Tx, workspaceId: string, sponsorUserId: string): Promise<InstalledSpecialist[]> {
   // One lock for the pair, not one per skill: both are created in the same transaction.
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`recommendation-specialists:${workspaceId}`}, 0))`);
   const installed: InstalledSpecialist[] = [];
-  for (const definition of specialistDefinitions) {
-    const content = contentOf(definition);
-    const builtInTitle = builtInTitleOf(definition);
-    // RLS scopes this to the workspace; the type and titles identify the pair we seed and the
-    // artifact a person may have written in its place.
-    const rows = await tx
-      .select({
-        id: schema.artifacts.id,
-        name: schema.artifacts.name,
-        latestVersion: schema.artifacts.latestVersion,
-        publishedVersion: schema.artifacts.publishedVersion,
-      })
-      .from(schema.artifacts)
-      .where(
-        and(
-          eq(schema.artifacts.type, 'skill'),
-          eq(schema.artifacts.archived, false),
-          inArray(schema.artifacts.name, [definition.title, builtInTitle]),
-        ),
-      );
-    // The person's own published playbook wins over the built-in one.
-    const own = rows.find((row) => row.name === definition.title && row.publishedVersion);
-    const builtIn = rows.find((row) => row.name === builtInTitle);
-    const adoptable = own ?? (builtIn?.publishedVersion ? builtIn : undefined);
-    if (adoptable?.publishedVersion) {
-      const published = await publishedSkill(tx, adoptable.id, adoptable.publishedVersion);
-      if (published) {
-        installed.push({ name: definition.name, artifactId: adoptable.id, version: adoptable.publishedVersion, skill: published });
-        continue;
-      }
-    }
-    // No readable published playbook: seed one on the built-in artifact (never on a person's draft).
-    if (builtIn) {
-      const number = builtIn.latestVersion + 1;
-      await tx.insert(schema.artifactVersions).values({
-        workspaceId,
-        artifactId: builtIn.id,
-        number,
-        state: 'published',
-        content,
-        contentHash: hashValue(content),
-        authorType: 'user',
-        authorId: sponsorUserId,
-        note: 'Seeded specialist playbook',
-      });
-      await tx
-        .update(schema.artifacts)
-        .set({ latestVersion: number, publishedVersion: number, updatedAt: new Date() })
-        .where(eq(schema.artifacts.id, builtIn.id));
-      installed.push({ name: definition.name, artifactId: builtIn.id, version: number, skill: content });
-      continue;
-    }
-    const id = newId('skl');
-    await tx.insert(schema.artifacts).values({ workspaceId, id, type: 'skill', name: builtInTitle, latestVersion: 1, publishedVersion: 1 });
-    await tx.insert(schema.artifactVersions).values({
-      workspaceId,
-      artifactId: id,
-      number: 1,
-      state: 'published',
-      content,
-      contentHash: hashValue(content),
-      authorType: 'user',
-      authorId: sponsorUserId,
-      note: 'Seeded specialist playbook',
-    });
-    installed.push({ name: definition.name, artifactId: id, version: 1, skill: content });
-  }
+  for (const definition of specialistDefinitions) installed.push(await installSpecialist(tx, workspaceId, sponsorUserId, definition));
   return installed;
+}
+
+/** Points the mapping at an artifact, whatever it pointed at before. */
+async function mapSpecialist(tx: Tx, workspaceId: string, name: SpecialistName, artifactId: string): Promise<void> {
+  await tx
+    .insert(schema.recommendationSpecialists)
+    .values({ workspaceId, specialist: name, artifactId })
+    .onConflictDoUpdate({
+      target: [schema.recommendationSpecialists.workspaceId, schema.recommendationSpecialists.specialist],
+      set: { artifactId, updatedAt: new Date() },
+    });
+}
+
+/** The skill artifact a mapping names, locked, or null when it is gone or no longer a skill. */
+async function mappedArtifact(tx: Tx, workspaceId: string, artifactId: string) {
+  const [artifact] = await tx
+    .select({
+      id: schema.artifacts.id,
+      name: schema.artifacts.name,
+      type: schema.artifacts.type,
+      latestVersion: schema.artifacts.latestVersion,
+      publishedVersion: schema.artifacts.publishedVersion,
+      archived: schema.artifacts.archived,
+    })
+    .from(schema.artifacts)
+    .where(and(eq(schema.artifacts.workspaceId, workspaceId), eq(schema.artifacts.id, artifactId)))
+    .for('update');
+  return artifact?.type === 'skill' ? artifact : null;
+}
+
+/** One new published version on an artifact this workspace's mapping already owns. */
+async function seedVersion(
+  tx: Tx,
+  workspaceId: string,
+  sponsorUserId: string,
+  artifact: { id: string; latestVersion: number },
+  definition: SpecialistDefinition,
+): Promise<InstalledSpecialist> {
+  const content = contentOf(definition);
+  const number = artifact.latestVersion + 1;
+  await tx.insert(schema.artifactVersions).values({
+    workspaceId,
+    artifactId: artifact.id,
+    number,
+    state: 'published',
+    content,
+    contentHash: hashValue(content),
+    authorType: 'user',
+    authorId: sponsorUserId,
+    note: 'Seeded specialist playbook',
+  });
+  await tx
+    .update(schema.artifacts)
+    .set({ latestVersion: number, publishedVersion: number, updatedAt: new Date() })
+    .where(and(eq(schema.artifacts.workspaceId, workspaceId), eq(schema.artifacts.id, artifact.id)));
+  return { name: definition.name, artifactId: artifact.id, version: number, skill: content };
+}
+
+async function installSpecialist(
+  tx: Tx,
+  workspaceId: string,
+  sponsorUserId: string,
+  definition: SpecialistDefinition,
+): Promise<InstalledSpecialist> {
+  const [mapping] = await tx
+    .select({ artifactId: schema.recommendationSpecialists.artifactId })
+    .from(schema.recommendationSpecialists)
+    .where(
+      and(eq(schema.recommendationSpecialists.workspaceId, workspaceId), eq(schema.recommendationSpecialists.specialist, definition.name)),
+    );
+  const mapped = mapping ? await mappedArtifact(tx, workspaceId, mapping.artifactId) : null;
+  if (mapped) {
+    if (mapped.publishedVersion) {
+      const published = await publishedSkill(tx, mapped.id, mapped.publishedVersion);
+      if (published) return { name: definition.name, artifactId: mapped.id, version: mapped.publishedVersion, skill: published };
+      // Published but unreadable: never rewrite the platform's own artifact in place; a fresh one
+      // below is honest about what happened.
+    } else if (!mapped.archived) {
+      return seedVersion(tx, workspaceId, sponsorUserId, mapped, definition);
+    }
+  }
+
+  // No usable mapped artifact. Adopt a playbook a person has already published under the plain
+  // title — only a published one, so their draft is never taken over.
+  const [own] = await tx
+    .select({ id: schema.artifacts.id, publishedVersion: schema.artifacts.publishedVersion })
+    .from(schema.artifacts)
+    .where(
+      and(
+        eq(schema.artifacts.workspaceId, workspaceId),
+        eq(schema.artifacts.type, 'skill'),
+        eq(schema.artifacts.archived, false),
+        eq(schema.artifacts.name, definition.title),
+      ),
+    )
+    .orderBy(sql`${schema.artifacts.updatedAt} DESC`)
+    .limit(1);
+  if (own?.publishedVersion) {
+    const published = await publishedSkill(tx, own.id, own.publishedVersion);
+    if (published) {
+      await mapSpecialist(tx, workspaceId, definition.name, own.id);
+      return { name: definition.name, artifactId: own.id, version: own.publishedVersion, skill: published };
+    }
+  }
+
+  // The platform's own artifact, created under its own name. A person may hold a skill with the same
+  // title; the mapping, not the title, is what makes this one the specialist's.
+  const content = contentOf(definition);
+  const id = newId('skl');
+  await tx.insert(schema.artifacts).values({
+    workspaceId,
+    id,
+    type: 'skill',
+    name: builtInTitleOf(definition),
+    latestVersion: 1,
+    publishedVersion: 1,
+  });
+  await tx.insert(schema.artifactVersions).values({
+    workspaceId,
+    artifactId: id,
+    number: 1,
+    state: 'published',
+    content,
+    contentHash: hashValue(content),
+    authorType: 'user',
+    authorId: sponsorUserId,
+    note: 'Seeded specialist playbook',
+  });
+  await mapSpecialist(tx, workspaceId, definition.name, id);
+  return { name: definition.name, artifactId: id, version: 1, skill: content };
 }
 
 /** The platform's own playbook artifact when a person's draft holds the plain title. */

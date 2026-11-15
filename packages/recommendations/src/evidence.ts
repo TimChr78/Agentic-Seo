@@ -63,6 +63,11 @@ export interface EvidenceProblem {
   index: number;
   id: string;
   problem: string;
+  /**
+   * The same rule without the id it is about. A retry prompt feeds these back to the model, and an
+   * id the model wrote is data, never an instruction: the id travels in the untrusted retry block.
+   */
+  retry: string;
 }
 
 export type EvidenceResolution = { ok: true; items: ResolvedEvidence[] } | { ok: false; problems: EvidenceProblem[] };
@@ -131,6 +136,8 @@ export async function resolveEvidence(
           index,
           id: item.id,
           problem: `issue ${item.id} does not exist for this site. An issue id comes from audits.issues; an id from another site or workspace cannot be evidence here`,
+          retry:
+            'the issue id does not exist for this site. An issue id comes from audits.issues; an id from another site or workspace cannot be evidence here',
         });
         continue;
       }
@@ -168,6 +175,7 @@ export async function resolveEvidence(
           index,
           id: item.id,
           problem: `finding ${item.id} does not exist for this site. A finding id comes from audits.findings`,
+          retry: 'the finding id does not exist for this site. A finding id comes from audits.findings',
         });
         continue;
       }
@@ -197,7 +205,12 @@ export async function resolveEvidence(
           and(eq(schema.audits.workspaceId, input.workspaceId), eq(schema.audits.siteId, input.siteId), eq(schema.audits.id, item.id)),
         );
       if (!row) {
-        problems.push({ index, id: item.id, problem: `audit ${item.id} does not exist for this site. An audit id comes from audits.list` });
+        problems.push({
+          index,
+          id: item.id,
+          problem: `audit ${item.id} does not exist for this site. An audit id comes from audits.list`,
+          retry: 'the audit id does not exist for this site. An audit id comes from audits.list',
+        });
         continue;
       }
       const [score] = await tx
@@ -222,6 +235,7 @@ export async function resolveEvidence(
         index,
         id: item.id,
         problem: 'a search_fact evidence id must be the absolute URL of a page, e.g. https://example.com/pricing/',
+        retry: 'a search_fact evidence id must be the absolute URL of a page, e.g. https://example.com/pricing/',
       });
       continue;
     }
@@ -231,6 +245,7 @@ export async function resolveEvidence(
         index,
         id: item.id,
         problem: `page ${item.id} has no Search Console data for this site in the last ${WINDOW_DAYS} days, so it cannot be search_fact evidence`,
+        retry: `the page has no Search Console data for this site in the last ${WINDOW_DAYS} days, so it cannot be search_fact evidence`,
       });
       continue;
     }

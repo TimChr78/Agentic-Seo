@@ -71,12 +71,12 @@ export function proseProblems(item: RecommendationDraft, facts: FactsPayload): s
   const allowed = metricNumbers(facts);
   for (const field of CLAIM_FIELDS) {
     const text = field.text(item);
-    for (const token of tokensOf(text)) {
-      if (allowed.has(token)) continue;
+    if (tokensOf(text).some((token) => !allowed.has(token)))
+      // The offending number is deliberately not quoted: this sentence is fed back to the model on
+      // its retry, and model-written text must not travel inside the instruction block.
       problems.push(
-        `${field.path} states "${token}", which is not in the facts this run supplied. Use only the counts, page totals and clicks the facts carry, or drop the number`,
+        `${field.path} states a number the facts this run supplied do not carry. Use only the counts, page totals and clicks the facts carry, or drop the number`,
       );
-    }
   }
   const prose = (item: RecommendationDraft): { path: string; text: string }[] =>
     PROSE_FIELDS.map((field) => ({ path: field.path, text: field.text(item) }));

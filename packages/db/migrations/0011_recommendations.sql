@@ -86,11 +86,29 @@ CREATE TABLE recommendation_priorities (
 );
 CREATE INDEX recommendation_priorities_site ON recommendation_priorities (workspace_id, site_id, priority);
 
+-- Which artifact is the platform's playbook for each specialist.
+--
+-- The run must find the playbook it seeded, and must never mistake a person's skill for it: titles
+-- are not identities, and a person may name their own skill exactly like the built-in one. This
+-- mapping is that identity — one row per workspace and specialist, pointing at the artifact the
+-- platform created or adopted. Only a mapped artifact is ever seeded with a new version, so a
+-- person's draft (however it is titled) stays theirs.
+CREATE TABLE recommendation_specialists (
+  workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+  specialist text NOT NULL CHECK (specialist IN ('technical', 'strategist')),
+  -- The `skl_…` artifact this specialist's playbook lives in.
+  artifact_id text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (workspace_id, specialist),
+  FOREIGN KEY (workspace_id, artifact_id) REFERENCES artifacts (workspace_id, id) ON DELETE CASCADE
+);
+
 -- Row-level security on every tenant table, in the style of 0001–0010.
 DO $$
 DECLARE t text;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['recommendation_runs', 'recommendation_priorities'] LOOP
+  FOREACH t IN ARRAY ARRAY['recommendation_runs', 'recommendation_priorities', 'recommendation_specialists'] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
     EXECUTE format($p$CREATE POLICY tenant_isolation ON %I
@@ -105,6 +123,9 @@ END $$;
 -- which the command does in the same transaction).
 GRANT SELECT, INSERT, UPDATE ON recommendation_runs TO aseo_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON recommendation_priorities TO aseo_app;
+-- A mapping is the platform's own pointer: it is created and repointed, and removed when the
+-- artifact it named is gone (the row cascades with the artifact, so the grant is for the seeder).
+GRANT SELECT, INSERT, UPDATE, DELETE ON recommendation_specialists TO aseo_app;
 
 -- Enqueueing a generation run inside the transaction that creates it.
 --

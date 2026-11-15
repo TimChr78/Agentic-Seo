@@ -160,11 +160,19 @@ The run holds no special authority: each draft is created by `recommendations.cr
 own agents row (created on first use, with the person who asked for the run as its sponsor), so the workspace
 autonomy switch, mandates and the action ledger decide for a synthesis exactly as for an MCP client, and the
 `recommendation` type is server-owned: the generic artifact commands and `config.import` refuse it because
-they cannot compute the reach. The model's answer is parsed leniently into items and each item judged alone,
-so one missing field costs that item a retry (then a drop with its reason), not the whole run. Facts and
-candidates reach the model as escaped, delimited data with a system instruction that says they are data; the
-facts cap measures the exact string sent. A run row carries a fencing token bumped on every claim, so a worker
-whose lease lapsed cannot write a draft or a terminal state after another worker took the run over.
+they cannot compute the reach. The requester's authority is resolved when the job runs, not when it was
+queued: a run whose requester left the workspace, or whose role no longer includes `artifacts:write`, creates
+nothing and records why, and the specialist writes as its own minimal grant intersected with the requester's
+current role. The model's answer is parsed leniently into items and each item judged alone, so one missing
+field costs that item a retry (then a drop with its reason), not the whole run. Facts and candidates reach the
+model as escaped, delimited data with a system instruction that says they are data; the facts cap measures the
+exact string sent, and a retry's error instructions name items by position, with the model's own earlier
+answer carried in a separate untrusted block. A run row carries a fencing token bumped on every claim; the
+token is checked under a row lock inside the transaction that creates each draft, and the lease is renewed
+from the clock around every model call and write, so a worker whose lease lapsed can neither write a draft nor
+a terminal state after another worker took the run over. Which artifact is the platform's playbook is recorded
+in `recommendation_specialists` (workspace + specialist → artifact id), never inferred from a title, so a
+person's skill — even one titled like the built-in playbook — is never seeded over or used.
 
 ## 6. Opportunity detectors (deterministic, before the LLM)
 

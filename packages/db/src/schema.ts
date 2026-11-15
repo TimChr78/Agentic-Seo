@@ -1278,3 +1278,17 @@ export const recommendationPriorities = pgTable(
     index('recommendation_priorities_site').on(t.workspaceId, t.siteId, t.priority),
   ],
 );
+
+/** Which artifact is the platform's playbook for a specialist; the identity, never a title. */
+export const recommendationSpecialists = pgTable(
+  'recommendation_specialists',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    specialist: text('specialist').$type<'technical' | 'strategist'>().notNull(),
+    /** The `skl_…` artifact the specialist's playbook lives in. */
+    artifactId: text('artifact_id').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.specialist] })],
+);

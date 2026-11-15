@@ -13,7 +13,8 @@ import { addSite, createRecommendationTestContext, type RecommendationTestContex
 // resolves inside this workspace and site. The generic artifact commands would let a caller write a
 // number nobody computed, so the type is server-owned: artifacts.create, artifacts.updateDraft and
 // config.import refuse it, and only recommendations.create/update write it. As defence in depth the
-// publish validator re-checks the evidence, the reach and the dependency graph of the stored content.
+// publish validator re-checks the evidence and the dependency graph, and requires the stored estimate
+// to be well formed and dated.
 //
 // Finding (review round 1): "P1 Generic artifact writes publish invented traffic estimates."
 
@@ -115,24 +116,56 @@ describe.skipIf(!hasTestDatabase())('the recommendation artifact is server-owned
     });
   }, 60_000);
 
-  it('refuses a stored recommendation whose traffic at stake no longer matches its evidence pages', async () => {
-    const created = await create({ title: 'Recommendation with an invented estimate' });
+  it('publishes a recommendation whose estimate is dated, even after Search Console data moved', async () => {
+    // The estimate is server-owned and computed at create/update, so publishing does not recompute
+    // it: GSC data changes daily and an unchanged recommendation must not become unpublishable.
+    const created = await create({ title: 'Recommendation with an estimate from last week' });
+    const detail = await call(getRecommendation, { recommendationId: created.recommendationId });
+    expect(detail.trafficAtStakeComputedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
     const [row] = await ctx.db.admin
-      .query<{ content: { expectedImpact: { trafficAtStake: unknown } } }>(
+      .query<{ content: { expectedImpact: { trafficAtStake: Record<string, unknown> } } }>(
         'SELECT content FROM artifact_versions WHERE workspace_id = $1 AND artifact_id = $2 AND number = 1',
         [ws, created.recommendationId],
       )
       .then((result) => result.rows);
-    const tampered = row?.content ?? { expectedImpact: { trafficAtStake: {} } };
-    // A plausible but invented estimate: the validator re-derives it from the evidence pages.
-    tampered.expectedImpact.trafficAtStake = { kind: 'known', affectedUrls: 1, clicksAtRisk: 999_999, criticalPages: [] };
+    const stored = row?.content;
+    expect(stored).toBeDefined();
+    // Stand in for a week of Search Console movement: a different but well-formed, dated estimate.
+    stored!.expectedImpact.trafficAtStake = {
+      kind: 'known',
+      affectedUrls: 3,
+      clicksAtRisk: 42,
+      impressionsAtRisk: 420,
+      criticalPages: [],
+      dataThrough: '2026-11-20',
+      computedAt: '2026-11-01T08:00:00.000Z',
+    };
+    await ctx.db.admin.query(
+      'UPDATE artifact_versions SET content = $3::jsonb WHERE workspace_id = $1 AND artifact_id = $2 AND number = 1',
+      [ws, created.recommendationId, JSON.stringify(stored)],
+    );
+    await expect(call(requestPublish, { artifactId: created.recommendationId, note: 'Ready.' })).resolves.toMatchObject({
+      status: 'published',
+    });
+  }, 60_000);
+
+  it('refuses a stored recommendation whose estimate has no computation date', async () => {
+    const created = await create({ title: 'Recommendation with an undated estimate' });
+    const [row] = await ctx.db.admin
+      .query<{ content: { expectedImpact: { trafficAtStake: Record<string, unknown> } } }>(
+        'SELECT content FROM artifact_versions WHERE workspace_id = $1 AND artifact_id = $2 AND number = 1',
+        [ws, created.recommendationId],
+      )
+      .then((result) => result.rows);
+    const tampered = row?.content;
+    expect(tampered).toBeDefined();
+    delete (tampered!.expectedImpact.trafficAtStake as Record<string, unknown>).computedAt;
     await ctx.db.admin.query(
       'UPDATE artifact_versions SET content = $3::jsonb WHERE workspace_id = $1 AND artifact_id = $2 AND number = 1',
       [ws, created.recommendationId, JSON.stringify(tampered)],
     );
-    await expect(call(requestPublish, { artifactId: created.recommendationId, note: 'Ready.' })).rejects.toThrow(
-      /traffic at stake no longer matches/,
-    );
+    await expect(call(requestPublish, { artifactId: created.recommendationId, note: 'Ready.' })).rejects.toThrow(/computedAt/);
   }, 60_000);
 
   it('refuses a stored recommendation whose dependency no longer resolves', async () => {

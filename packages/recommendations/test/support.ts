@@ -67,6 +67,11 @@ export interface RecommendationTestContext {
 export async function createRecommendationTestContext(prefix: string): Promise<RecommendationTestContext> {
   const disposable = await createDisposableDb(prefix);
   const db = createDb({ adminUrl: disposable.url.toString(), appUrl: appUrl(disposable.url), poolSize: 4 });
+  // The person the tests act as is a real member: a run reads the requester's current membership and
+  // role when it executes, so a queued run has someone whose authority it can be measured against.
+  await db.admin.query(`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, 'user_owner', 'owner')`, [
+    disposable.workspace,
+  ]);
   return { disposable, db, executor: createExecutor(db, services) };
 }
 

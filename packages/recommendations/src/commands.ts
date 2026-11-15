@@ -127,7 +127,7 @@ async function checkDependencies(
 
 interface BuiltDraft {
   content: Recommendation;
-  reach: Awaited<ReturnType<typeof estimateReach>>;
+  reach: Recommendation['expectedImpact']['trafficAtStake'];
   resolved: ResolvedEvidence[];
 }
 
@@ -151,7 +151,12 @@ async function buildDraft(
       `The evidence is not valid for this site: ${problemsText(resolution.problems)}. Evidence ids come from audits.issues, audits.findings, audits.list or Search Console page data.`,
       { problems: resolution.problems },
     );
-  const reach = await estimateReach(ctx.tx, { workspaceId, siteId: input.siteId, urls: pagesOf(resolution.items) });
+  // The estimate is stamped with the moment it was computed: publishing checks the stamp, not
+  // whether today's Search Console data would produce the same number.
+  const reach = recommendationReachSchema.parse({
+    ...(await estimateReach(ctx.tx, { workspaceId, siteId: input.siteId, urls: pagesOf(resolution.items) })),
+    computedAt: new Date().toISOString(),
+  });
   const content = {
     title: input.title,
     rationale: input.rationale,
@@ -411,6 +416,9 @@ export const getRecommendation = defineCommand({
     priority: z.number().int().nullable(),
     ownerAgentId: z.string().nullable(),
     content: z.unknown().describe('The recommendation content; its schema is artifacts.types type=recommendation'),
+    trafficAtStakeComputedAt: z
+      .string()
+      .describe('When the traffic at stake was computed (ISO 8601, UTC); Search Console data behind it moves every day'),
     evidence: z.array(EvidenceView),
     changeSets: z.array(
       z.object({ id: z.string(), name: z.string(), state: z.string(), prUrl: z.string().nullable(), updatedAt: z.string() }),
@@ -501,6 +509,7 @@ export const getRecommendation = defineCommand({
       priority: row.priority,
       ownerAgentId: row.ownerAgentId,
       content,
+      trafficAtStakeComputedAt: content.expectedImpact.trafficAtStake.computedAt,
       evidence,
       changeSets,
       updatedAt: row.updatedAt,

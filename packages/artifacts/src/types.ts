@@ -301,10 +301,19 @@ const recommendationEvidence = z.strictObject({
   note: z.string().trim().min(1).max(500).describe('What this evidence shows, in one line, for a reviewer'),
 });
 
+/**
+ * The computation date every stored estimate carries: the instant `recommendations.create` or
+ * `recommendations.update` computed it. Publishing checks that the stored estimate is well formed
+ * and dated, not that it still equals what the evidence pages yield — the Search Console data
+ * behind it moves every day, and a recommendation does not become untruthful because it did.
+ */
+const reachComputedAt = z.iso.datetime().describe('When this estimate was computed, ISO 8601 in UTC');
+
 const reachEstimate = z.discriminatedUnion('kind', [
   z.strictObject({
     kind: z.literal('unknown'),
     reason: z.string().trim().min(1).max(1000).describe('What is missing, in a sentence a person can act on'),
+    computedAt: reachComputedAt,
   }),
   z.strictObject({
     kind: z.literal('known'),
@@ -315,6 +324,7 @@ const reachEstimate = z.discriminatedUnion('kind', [
     impressionsAtRiskLastYear: z.number().int().nullable().optional(),
     criticalPages: z.array(z.string().max(2000)).max(50).default([]),
     dataThrough: z.string().max(20).optional().describe('The newest day of page data the estimate used, YYYY-MM-DD'),
+    computedAt: reachComputedAt,
   }),
 ]);
 

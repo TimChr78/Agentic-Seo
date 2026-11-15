@@ -89,6 +89,8 @@ describe.skipIf(!hasTestDatabase())('recommendation commands', () => {
       clicksAtRisk: 150,
     });
     expect(stored.status).toBe('proposed');
+    // The estimate says when it was computed, so a reviewer can judge how fresh it is.
+    expect(stored.trafficAtStakeComputedAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/);
     expect(stored.evidence[0]).toMatchObject({ kind: 'issue', issue: { severity: 'high', affectedPages: 12, fixChange: 'meta.title' } });
   });
 
