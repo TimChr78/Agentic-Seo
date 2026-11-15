@@ -47,6 +47,13 @@ describe('deeply nested JSON-LD (review round 2)', () => {
     const results = runPageChecks(page);
     expect(results.find((r) => r.checkId === 'schema.missing_required')?.outcome).toBe('fail');
   });
+
+  it('reaches a node after 20,000 sibling values in a block within the 64 KiB cap (review round 3)', () => {
+    const raw = `[${'[],'.repeat(20000)}{"@type":"Product"}]`;
+    expect(raw.length).toBeLessThan(64 * 1024);
+    const page = pageFacts({ html: { jsonLd: [{ raw, parsed: JSON.parse(raw), error: null, types: ['Product'] }] } });
+    expect(runPageChecks(page).find((r) => r.checkId === 'schema.missing_required')?.outcome).toBe('fail');
+  });
 });
 
 describe('robots_txt.blocks_all (review round 2)', () => {

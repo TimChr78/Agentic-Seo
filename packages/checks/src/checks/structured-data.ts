@@ -23,21 +23,17 @@ interface JsonLdNode {
   value: Record<string, unknown>;
 }
 
-/** The most values one block's traversal visits; JSON-LD is page input, so its shape is unbounded. */
-const MAX_JSONLD_VALUES = 20_000;
-
 /**
  * Every object with an `@type` in a block, including nodes inside `@graph` and nested values. The
- * walk is iterative (a 12 KB block of nested arrays would overflow a recursive one) and stops after
- * `MAX_JSONLD_VALUES` values, keeping document order.
+ * walk is iterative (a 12 KB block of nested arrays would overflow a recursive one) and visits every
+ * value, keeping document order. It is not capped: a cap would turn a large block into a false pass,
+ * and the contract caps the raw block at 64 KiB, which bounds the parsed value count.
  */
 function nodesOf(block: JsonLdBlock, blockIndex: number): JsonLdNode[] {
   const nodes: JsonLdNode[] = [];
   const stack: unknown[] = [block.parsed];
-  let visited = 0;
-  while (stack.length && visited < MAX_JSONLD_VALUES) {
+  while (stack.length) {
     const value = stack.pop();
-    visited++;
     if (Array.isArray(value)) {
       for (let i = value.length - 1; i >= 0; i--) if (value[i] !== null && typeof value[i] === 'object') stack.push(value[i]);
       continue;
