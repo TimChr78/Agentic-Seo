@@ -7,14 +7,20 @@ import { useApi } from './useApi';
 
 const FINISHED = new Set(['completed', 'partial']);
 
-/** The newest audit that finished (completed or partial), among the newest reads. */
+/**
+ * The newest audit that finished (completed or partial). Read by state, one row each, so any number
+ * of later failed, cancelled or running audits cannot push the finished one out of a page.
+ */
 export function useLatestFinishedAudit(siteId: string) {
-  const read = useApi(() => api.listAudits({ siteId, limit: 20 }), [siteId]);
-  return {
-    latest: read.data?.rows.find((audit) => FINISHED.has(audit.state)),
-    error: read.error,
-    reload: read.reload,
-  };
+  const read = useApi(async () => {
+    const [completed, partial] = await Promise.all(
+      [...FINISHED].map((state) => api.listAudits({ siteId, state: state as 'completed' | 'partial', limit: 1 })),
+    );
+    return [...(completed?.rows ?? []), ...(partial?.rows ?? [])]
+      .filter((audit) => FINISHED.has(audit.state))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  }, [siteId]);
+  return { latest: read.data ?? undefined, error: read.error, reload: read.reload };
 }
 
 /** True when an open issue's last check predates the site's newest finished audit. */

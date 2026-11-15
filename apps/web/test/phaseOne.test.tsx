@@ -455,6 +455,31 @@ describe('the issues list', () => {
     await screen.findAllByText('Page title is too long');
     expect(screen.queryByText('Not re-checked')).toBeNull();
   });
+
+  it('still finds the newest finished audit behind twenty later failed runs (review round 2)', async () => {
+    const newer: Audit = { ...AUDIT, id: 'adt_newer', createdAt: '2026-11-14T09:00:00.000Z', finishedAt: '2026-11-14T09:05:00.000Z' };
+    const failed: Audit[] = Array.from({ length: 20 }, (_, index) => ({
+      ...AUDIT,
+      id: `adt_failed_${index}`,
+      state: 'failed' as Audit['state'],
+      createdAt: `2026-11-15T${String(index).padStart(2, '0')}:00:00.000Z`,
+    }));
+    const all = [...failed.reverse(), newer];
+    // A server that honours the state filter and the limit, newest first.
+    const listAudits = async (input: { state?: string; limit?: number }) => ({
+      rows: all.filter((audit) => !input.state || audit.state === input.state).slice(0, input.limit ?? 20),
+      nextCursor: null,
+    });
+    const listIssues = async () => ({
+      issues: [ISSUE],
+      nextCursor: null,
+      summary: { open: 1, resolved: 0, ignored: 0, total: 1 },
+      hasGsc: false,
+    });
+    setApiClient(apiWith({ listIssues, listAudits }));
+    renderPage(<IssuesPage />);
+    expect((await screen.findAllByText('Not re-checked')).length).toBeGreaterThan(0);
+  });
 });
 
 describe('the issue detail', () => {
