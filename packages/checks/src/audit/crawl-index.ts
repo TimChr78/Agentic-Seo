@@ -250,36 +250,13 @@ export async function countEvaluatedPages(tx: Tx): Promise<number> {
 }
 
 /**
- * The evaluated page keys, in the normalised form the score weighs. Only the score's click weighting
- * needs them; without Search Console the count is enough.
- */
-export async function evaluatedPageKeys(tx: Tx): Promise<string[]> {
-  const { rows } = await tx.execute<{ url: string }>(sql`SELECT url FROM fz_eval_pages ORDER BY url`);
-  return rows.map((row) => row.url);
-}
-
-/** Records that a check judged a subject, for the lifecycle's pass-versus-not-re-checked rule. */
-export async function markEvaluated(tx: Tx, checkId: string, subjects: Iterable<string>): Promise<void> {
-  const values = [...new Set(subjects)];
-  for (let index = 0; index < values.length; index += FINALIZE_BATCH) {
-    const chunk = values.slice(index, index + FINALIZE_BATCH);
-    await tx.execute(sql`
-      INSERT INTO fz_eval (check_id, subject_key)
-      SELECT ${checkId}::text, unnest(ARRAY[${sql.join(
-        chunk.map((subject) => sql`${subject}`),
-        sql`, `,
-      )}]::text[])
-      ON CONFLICT DO NOTHING`);
-  }
-}
-
-/**
  * The gate a page check's `appliesTo` corresponds to, and the subject a finding of that check is
  * grouped by. The mapping is explicit so a check added to the catalogue without an entry fails the
  * `page check gates` test instead of silently never resolving its issues. `subject` is the
  * requested URL for checks about the request (status, redirects, the scheme) and the final URL for
- * checks about the document. The lifecycle resolves a page-check issue directly from this map and
- * the page table, so it never materialises a row per (page, check).
+ * checks about the document. The lifecycle and the score read the pairs this map implies from
+ * `fz_judged` (store.ts), which folds the map into one set of SQL inserts, so the mapping has a
+ * single definition and no Node loop visits a page per check.
  */
 export type PageGate =
   | 'none'

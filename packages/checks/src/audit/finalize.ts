@@ -20,10 +20,13 @@ import type { FindingDraft } from './types';
 // not the crawl: a 10,000-page audit costs the same as a 1,000-page one.
 //
 // Evaluation is recorded per check and subject in `fz_eval` (crawl-index.ts). A check records a
-// subject only when it could actually judge it: a canonical or hreflang target check needs the
-// target's snapshot in this audit, a sitemap check needs the URL fetched (and robots-allowed), and
-// graph checks record nothing when coverage truncated the graph. That is what lets the lifecycle
-// resolve a fixed issue and keep an unchecked one open.
+// subject only when it could actually judge it, against the fact that check reads: a canonical
+// target check needs the target's outcome, redirect chain or readable noindex directives as its
+// definition requires; an hreflang check needs every relationship the source declares, not one; a
+// sitemap check needs the URL fetched (and robots-allowed); a graph check records nothing when
+// coverage truncated the graph. A source that declares itself canonical, or no cross-site hreflang,
+// is a confirmed pass. That is what lets the lifecycle resolve a fixed issue and keep an unchecked
+// one open, and the score counts the issues neither judged as unchecked coverage.
 //
 // Subject identity is deliberate: a redirect or status check's subject is the requested URL (the URL
 // people link to); every other check's subject is the page's final URL. The evidence cap never
@@ -316,21 +319,45 @@ export async function runFinalizeChecks(tx: Tx, context: FinalizeContext): Promi
   }
 
   // canonical.to_non_200, canonical.to_redirect, canonical.to_noindex -------------------------
-  // Each subject is evaluated only when the canonical target's snapshot exists in this audit: an
-  // uncrawled target cannot say whether the canonical is broken (see the canonical definitions).
+  // Each subject is evaluated per check, against the fact that check reads about the target:
+  //
+  // - to_non_200 reads the target's *outcome*: a completed request, whether it returned a status or
+  //   recorded a fetch failure (status 0). Its definition names both.
+  // - to_redirect reads the target's *redirect chain*: a completed request that recorded it. A fetch
+  //   that failed before the chain ended proves nothing about the redirect.
+  // - to_noindex reads the target's *noindex directives*: only a readable 2xx HTML document carries
+  //   them, so a target that timed out or returned 404 leaves this check not re-checked.
+  //
+  // A source that now declares itself canonical, or declares none, is a confirmed pass for all
+  // three: there is no target to judge, and the issue opened against the old target resolves. An
+  // off-site canonical is neither: the definitions scope these checks to on-site targets, so there
+  // is nothing this audit can read about it and the issue stays "Not re-checked".
   {
-    const checks = ['canonical.to_non_200', 'canonical.to_redirect', 'canonical.to_noindex'].map(eachCheck);
+    const toNon200 = eachCheck('canonical.to_non_200');
+    const toRedirect = eachCheck('canonical.to_redirect');
+    const toNoindex = eachCheck('canonical.to_noindex');
 
-    const evaluated = (check: FinalizeCheck) =>
-      tx.execute(sql`
-      INSERT INTO fz_eval (check_id, subject_key)
-      SELECT ${check.id}::text, c.source
-      FROM fz_canonical c
-      JOIN fz_pages t ON t.url = c.target
-      ON CONFLICT DO NOTHING`);
-    for (const check of checks) await evaluated(check);
+    const gates: [FinalizeCheck, ReturnType<typeof sql>][] = [
+      [toNon200, sql`(t.status > 0 OR t.fetch_error IS NOT NULL)`],
+      [toRedirect, sql`t.status > 0 AND t.fetch_error IS NULL`],
+      [toNoindex, sql`t.status BETWEEN 200 AND 299 AND t.is_html`],
+    ];
+    for (const [check, readable] of gates) {
+      await tx.execute(sql`
+        INSERT INTO fz_eval (check_id, subject_key)
+        SELECT ${check.id}::text, c.source
+        FROM fz_canonical c
+        JOIN fz_pages t ON t.url = c.target
+        WHERE ${readable}
+        ON CONFLICT DO NOTHING`);
+      await tx.execute(sql`
+        INSERT INTO fz_eval (check_id, subject_key)
+        SELECT ${check.id}::text, p.final_url
+        FROM fz_pages p
+        WHERE p.authoritative AND (p.canonical IS NULL OR p.canonical = p.final_url)
+        ON CONFLICT DO NOTHING`);
+    }
 
-    const toNon200 = checks[0] as FinalizeCheck;
     findings += await emit(
       tx,
       ref,
@@ -359,7 +386,6 @@ export async function runFinalizeChecks(tx: Tx, context: FinalizeContext): Promi
       LIMIT ${FINALIZE_BATCH}`,
     );
 
-    const toRedirect = checks[1] as FinalizeCheck;
     findings += await emit(
       tx,
       ref,
@@ -388,7 +414,6 @@ export async function runFinalizeChecks(tx: Tx, context: FinalizeContext): Promi
       LIMIT ${FINALIZE_BATCH}`,
     );
 
-    const toNoindex = checks[2] as FinalizeCheck;
     findings += await emit(
       tx,
       ref,
@@ -753,11 +778,24 @@ export async function runFinalizeChecks(tx: Tx, context: FinalizeContext): Promi
       ORDER BY source_key
       LIMIT ${FINALIZE_BATCH}`,
     );
+    // The source-level issue is evaluated only when **every** relationship it declares was judged.
+    // One target that was read and one that was skipped is not a pass: the skipped target could
+    // still be missing its return link. A page with no cross-site entries has nothing to judge and
+    // is a confirmed pass.
     await tx.execute(sql`
       INSERT INTO fz_eval (check_id, subject_key)
       SELECT ${missingReturn.id}::text, en.source_key
       FROM (${resolvedEntries}) en
-      WHERE en.target_final_url IS NOT NULL AND en.target_indexable
+      GROUP BY en.source_key
+      HAVING bool_and(en.target_final_url IS NOT NULL AND en.target_status BETWEEN 200 AND 299 AND en.target_is_html)
+      ON CONFLICT DO NOTHING`);
+    await tx.execute(sql`
+      INSERT INTO fz_eval (check_id, subject_key)
+      SELECT ${missingReturn.id}::text, p.final_url
+      FROM fz_pages p
+      WHERE p.authoritative
+        AND NOT EXISTS (
+          SELECT 1 FROM jsonb_array_elements(p.hreflang) AS e(entry) WHERE e.entry ->> 'href' <> p.final_url)
       ON CONFLICT DO NOTHING`);
 
     const toNonCanonical = eachCheck('hreflang.to_non_canonical');
@@ -806,7 +844,16 @@ export async function runFinalizeChecks(tx: Tx, context: FinalizeContext): Promi
       INSERT INTO fz_eval (check_id, subject_key)
       SELECT ${toNonCanonical.id}::text, en.source_key
       FROM (${resolvedEntries}) en
-      WHERE en.target_final_url IS NOT NULL
+      GROUP BY en.source_key
+      HAVING bool_and(en.target_final_url IS NOT NULL)
+      ON CONFLICT DO NOTHING`);
+    await tx.execute(sql`
+      INSERT INTO fz_eval (check_id, subject_key)
+      SELECT ${toNonCanonical.id}::text, p.final_url
+      FROM fz_pages p
+      WHERE p.authoritative
+        AND NOT EXISTS (
+          SELECT 1 FROM jsonb_array_elements(p.hreflang) AS e(entry) WHERE e.entry ->> 'href' <> p.final_url)
       ON CONFLICT DO NOTHING`);
   }
 

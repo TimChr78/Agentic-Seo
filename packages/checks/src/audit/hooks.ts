@@ -1,11 +1,11 @@
 import { type AuditHooks, registerAuditHooks, siteHostsOf } from '@agentic-seo/crawl';
 import { schema, type Tx } from '@agentic-seo/db';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { checks, failedResults, runPageChecks, runSiteChecks } from '../catalogue';
 import type { CheckResult, SiteCheck } from '../check';
-import { evaluatedPageKeys, PAGE_CHECK_GATES, recordSiteCheckEvaluations } from './crawl-index';
+import { PAGE_CHECK_GATES, recordSiteCheckEvaluations } from './crawl-index';
 import { runFinalizeChecks } from './finalize';
-import { computeScore, loadPageClicks, NOT_EVALUATED_CATEGORIES, type ScoreIssue, scorePageKey } from './score';
+import { NOT_EVALUATED_CATEGORIES, prepareScoreTables, type ScoreResult, scoreOpenIssues } from './score';
 import { insertFindings, replacePageFindings, syncIssues } from './store';
 import type { FindingDraft } from './types';
 
@@ -82,7 +82,7 @@ function siteDrafts(origin: string, results: readonly CheckResult[]): FindingDra
 async function storeScore(
   tx: Tx,
   ref: { workspaceId: string; siteId: string; auditId: string; pagesCrawled: number },
-  value: ReturnType<typeof computeScore>,
+  value: ScoreResult,
   skipped: readonly { checkId: string; reason: string }[],
   uncheckedIssues: number,
 ): Promise<void> {
@@ -119,54 +119,6 @@ async function storeScore(
         computedAt: row.computedAt,
       },
     });
-}
-
-/**
- * The open issues the score may count, and how many it must report as unchecked coverage.
- *
- * An issue is in this audit's scope when the audit judged it: it failed in this audit (there is a
- * finding), or its own subject pages were evaluated and it passed, or - for a site-level issue with
- * no page identity - the audit evaluated the site check. An open issue on a page this audit never
- * looked at is excluded and counted: a clean one-page audit with an old issue elsewhere scores 100,
- * not a penalty for a page it did not read.
- */
-async function scoreIssues(
-  tx: Tx,
-  ref: { workspaceId: string; siteId: string; auditId: string },
-): Promise<{ issues: ScoreIssue[]; unchecked: number }> {
-  const { rows } = await tx.execute<{
-    category: ScoreIssue['category'];
-    severity: ScoreIssue['severity'];
-    affected_pages: number;
-    affected_urls: string[] | null;
-    last_seen_audit_id: string;
-    last_checked_audit_id: string;
-    evaluated_affected: number;
-  }>(sql`
-    SELECT i.category, i.severity, i.affected_pages, i.affected_urls,
-           i.last_seen_audit_id, i.last_checked_audit_id,
-           (SELECT count(*)::int FROM fz_eval_pages p WHERE p.url = ANY(i.affected_urls)) AS evaluated_affected
-    FROM issues i
-    WHERE i.workspace_id = ${ref.workspaceId} AND i.site_id = ${ref.siteId} AND i.state = 'open'`);
-  const issues: ScoreIssue[] = [];
-  let unchecked = 0;
-  for (const row of rows) {
-    const urls = row.affected_urls ?? [];
-    const seen = row.last_seen_audit_id === ref.auditId;
-    const evaluated = urls.length > 0 ? Number(row.evaluated_affected) > 0 : row.last_checked_audit_id === ref.auditId;
-    if (!seen && !evaluated) {
-      unchecked += 1;
-      continue;
-    }
-    issues.push({
-      category: row.category,
-      severity: row.severity,
-      affectedUrls: urls,
-      affectedPages: Math.max(1, Number(row.affected_pages)),
-      siteLevel: urls.length === 0,
-    });
-  }
-  return { issues, unchecked };
 }
 
 export function checkAuditHooks(): AuditHooks {
@@ -232,14 +184,13 @@ export function checkAuditHooks(): AuditHooks {
         section: auditRow.section,
         urls: auditRow.urls,
         sitemapComplete,
-        siteCheckIds,
       });
 
-      const clicks = await loadPageClicks(tx, audit);
-      const pages = await evaluatedPageKeys(tx);
-      const { issues, unchecked } = await scoreIssues(tx, audit);
-      const value = computeScore({ issues, pages: pages.map(scorePageKey), clicks });
-      await storeScore(tx, { ...audit, pagesCrawled: auditRow.pagesCrawled }, value, finalize.skipped, unchecked);
+      // The score reads the lifecycle's judged table (`fz_judged`) and its findings (`fz_latest`),
+      // both built above, so it counts exactly the issues this audit judged.
+      const window = await prepareScoreTables(tx, audit);
+      const { result, unchecked } = await scoreOpenIssues(tx, audit, window);
+      await storeScore(tx, { ...audit, pagesCrawled: auditRow.pagesCrawled }, result, finalize.skipped, unchecked);
     },
   };
 }

@@ -16,9 +16,12 @@ import type { FindingDraft } from './types';
 // the latest audit. Ignored issues stay ignored and still record the sighting.
 //
 // Evaluation lives in the finalize transaction's `fz_eval` table (crawl-index.ts), one row per
-// (check, subject) the audit judged, so resolution is one UPDATE ... FROM rather than a loop over
-// every issue. Findings are only ever read in keyset batches of BATCH while the issues of an audit
-// are opened; nothing here loads a whole audit into memory.
+// (check, subject) the finalize checks judged, plus the page and site checks' `appliesTo` gates.
+// `buildJudgedSubjects` folds both into `fz_judged`, one row per (check, subject) this audit judged:
+// the lifecycle resolves from it and the health score counts its unchecked coverage from the same
+// table, so the two can never disagree about whether a subject was evaluated. Resolution is one
+// UPDATE ... FROM rather than a loop over every issue. Findings are only ever read in keyset batches
+// of BATCH while the issues of an audit are opened; nothing here loads a whole audit into memory.
 
 const BATCH = 500;
 
@@ -104,8 +107,6 @@ export async function syncIssues(
     urls: readonly string[] | null;
     /** Whether every sitemap document was read completely (a removed URL is then confirmed). */
     sitemapComplete: boolean;
-    /** The site checks whose `appliesTo` held on this audit's site facts. */
-    siteCheckIds: readonly string[];
   },
 ): Promise<IssueSyncResult> {
   // One row per (check, subject) for this audit, materialised once. Both tables are RLS-protected:
@@ -132,6 +133,7 @@ export async function syncIssues(
     WHERE workspace_id = ${args.workspaceId} AND audit_id = ${args.auditId}
     ORDER BY check_id, subject_key, created_at DESC`);
   await tx.execute(sql`ANALYZE fz_latest`);
+  await buildJudgedSubjects(tx, args);
   const opened = await openMissingIssues(tx, args);
   await updateSeenIssues(tx, args);
   await attachFindings(tx, args.workspaceId, args.siteId, args.auditId);
@@ -294,18 +296,58 @@ function pageGateGroups(): { subject: 'url' | 'final_url'; gate: PageGate; check
 }
 
 /**
+ * Materialises the (check, subject) pairs this audit judged *among the site's open issues* into
+ * `fz_judged`: the one source of truth the lifecycle resolves from and the score counts from.
+ * Both readers only ever ask about open issues, so the table stays as small as the issue list
+ * rather than as large as the crawl times the catalogue.
+ *
+ * - A finalize or site check recorded the subjects it judged in `fz_eval` (crawl-index.ts), which
+ *   already excludes a canonical or hreflang whose target was not readable, an unfetched sitemap
+ *   URL, and graph checks on a truncated graph.
+ * - A page check judged a subject when the page is in this audit and its `appliesTo` gate still
+ *   holds, which is the same gate map the resolution used before: one row group per (subject
+ *   column, gate), so the insertion is a handful of set operations whatever the crawl size.
+ */
+async function buildJudgedSubjects(tx: Tx, args: { workspaceId: string; siteId: string }): Promise<void> {
+  await tx.execute(sql`
+    CREATE TEMP TABLE IF NOT EXISTS fz_judged (
+      check_id text NOT NULL,
+      subject_key text NOT NULL,
+      PRIMARY KEY (check_id, subject_key)
+    ) ON COMMIT DROP`);
+  await tx.execute(sql`TRUNCATE fz_judged`);
+  await tx.execute(sql`
+    INSERT INTO fz_judged (check_id, subject_key)
+    SELECT e.check_id, e.subject_key
+    FROM fz_eval e
+    JOIN issues i ON i.check_id = e.check_id AND i.subject_key = e.subject_key
+    WHERE i.workspace_id = ${args.workspaceId} AND i.site_id = ${args.siteId} AND i.state = 'open'
+    ON CONFLICT DO NOTHING`);
+  for (const group of pageGateGroups()) {
+    const subjectColumn = group.subject === 'url' ? sql`p.url` : sql`p.final_url`;
+    await tx.execute(sql`
+      INSERT INTO fz_judged (check_id, subject_key)
+      SELECT i.check_id, i.subject_key
+      FROM issues i
+      JOIN fz_pages p ON ${subjectColumn} = i.subject_key
+      WHERE i.workspace_id = ${args.workspaceId} AND i.site_id = ${args.siteId} AND i.state = 'open'
+        AND i.check_id = ANY(ARRAY[${sql.join(
+          group.checkIds.map((id) => sql`${id}`),
+          sql`, `,
+        )}]::text[])
+        AND (${GATE_PREDICATES[group.gate]})
+      ON CONFLICT DO NOTHING`);
+  }
+  await tx.execute(sql`ANALYZE fz_judged`);
+}
+
+/**
  * Resolves the open issues whose subject this audit evaluated and that did not fail.
  *
- * Evaluation is per check and subject:
- *
- * - a page check judged a subject when the page was in this audit and its `appliesTo` gate still
- *   held (the gate map above), so the lifecycle never claims a page-check pass for a page a check
- *   could not run on;
- * - a site check judged the origin only when the audit is a full site audit and `appliesTo` held
- *   (the hook passes exactly those check ids);
- * - a finalize check recorded its subjects in `fz_eval`, which already excludes a canonical or
- *   hreflang whose target was not crawled, an unfetched sitemap URL, and graph checks on a
- *   truncated graph.
+ * Evaluation is per check and subject, and `fz_judged` is its single definition (built above): the
+ * finalize checks recorded the subjects they could actually judge, and page and site checks appear
+ * through their `appliesTo` gate, so the lifecycle never claims a pass for a subject a check could
+ * not run on. The health score reads the same table for its unchecked coverage.
  *
  * A sitemap-membership issue additionally resolves on confirmed removal: the audit read every
  * sitemap completely and the URL is no longer listed. A URL that is still listed but was not
@@ -324,8 +366,6 @@ async function resolveEvaluatedIssues(
     section: string | null;
     urls: readonly string[] | null;
     sitemapComplete: boolean;
-    /** The site checks whose `appliesTo` held on this audit's site facts. */
-    siteCheckIds: readonly string[];
   },
 ): Promise<number> {
   let resolved = 0;
@@ -344,7 +384,7 @@ async function resolveEvaluatedIssues(
     resolved += rowCount ?? 0;
   };
 
-  await resolve(sql`EXISTS (SELECT 1 FROM fz_eval e WHERE e.check_id = i.check_id AND e.subject_key = i.subject_key)`);
+  await resolve(sql`EXISTS (SELECT 1 FROM fz_judged j WHERE j.check_id = i.check_id AND j.subject_key = i.subject_key)`);
 
   // Confirmed removal: the audit read every sitemap completely and the URL is no longer listed.
   if (args.sitemapComplete) {
@@ -354,26 +394,6 @@ async function resolveEvaluatedIssues(
     );
     await resolve(sql`i.check_id IN (${sitemapChecks})
         AND NOT EXISTS (SELECT 1 FROM fz_sitemap_urls s WHERE s.url = i.subject_key)`);
-  }
-
-  if (args.siteCheckIds.length) {
-    await resolve(
-      sql`i.check_id = ANY(ARRAY[${sql.join(
-        args.siteCheckIds.map((id) => sql`${id}`),
-        sql`, `,
-      )}]::text[])`,
-    );
-  }
-
-  for (const group of pageGateGroups()) {
-    const subjectColumn = group.subject === 'url' ? sql`p.url` : sql`p.final_url`;
-    await resolve(sql`i.check_id = ANY(ARRAY[${sql.join(
-      group.checkIds.map((id) => sql`${id}`),
-      sql`, `,
-    )}]::text[])
-      AND EXISTS (
-        SELECT 1 FROM fz_pages p WHERE ${subjectColumn} = i.subject_key AND (${GATE_PREDICATES[group.gate]})
-      )`);
   }
 
   return resolved;
