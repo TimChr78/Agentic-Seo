@@ -124,9 +124,9 @@ test('the GitHub connection carries a drafted change set to an approved pull req
   await ownerPage.getByRole('button', { name: 'Draft change set' }).click();
   const draft = ownerPage.getByRole('dialog', { name: 'Draft a change set' });
   await expect(draft).toBeVisible();
-  await draft.getByLabel('Page URL').fill(`https://${domain}/pricing`);
-  await draft.getByLabel('Value now').fill('A pricing page title that is far too long to be shown in full');
-  await draft.getByLabel('Value to write').fill('Pricing plans and prices');
+  await draft.getByLabel(/Page URL/).fill(`https://${domain}/pricing`);
+  await draft.getByLabel(/Value now/).fill('A pricing page title that is far too long to be shown in full');
+  await draft.getByLabel(/Value to write/).fill('Pricing plans and prices');
   await draft.getByRole('button', { name: 'Draft change set' }).click();
 
   // The change-set screen the draft produced, at its draft state.
@@ -170,7 +170,9 @@ test('the GitHub connection carries a drafted change set to an approved pull req
   // Applying is the job the queue would run; this server has no worker, so the spec runs that task
   // once through its test-only route, with the same fake GitHub the commands used.
   const applied = await ownerPage.request.post('/test/changes/apply', { data: { workspaceId, siteId, artifactId: changeSetId } });
-  expect(applied.ok(), `apply job: ${applied.status()} ${await applied.text()}`).toBeTruthy();
+  const appliedBody = (await applied.json().catch(() => ({}))) as { state?: string; lastError?: string | null };
+  expect(applied.ok(), `apply job: ${applied.status()}`).toBeTruthy();
+  expect(appliedBody.state, `apply job recorded ${appliedBody.state}: ${appliedBody.lastError ?? 'no error'}`).toBe('pr_open');
   const run = await db.admin.query<{ state: string; pr_number: number; pr_url: string }>(
     'SELECT state, pr_number, pr_url FROM change_set_runs WHERE workspace_id = $1 AND artifact_id = $2',
     [workspaceId, changeSetId],

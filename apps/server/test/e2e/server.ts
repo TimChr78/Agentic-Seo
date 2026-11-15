@@ -40,7 +40,13 @@ t.srv.services.github = github.seam;
 t.srv.app.post('/test/changes/apply', async (c) => {
   const payload = await c.req.json<{ workspaceId: string; artifactId: string; siteId?: string }>();
   await runChangesApplyTask(t.srv.db, payload, { kp: t.srv.keyProvider, github: github.seam });
-  return c.json({ ok: true });
+  // The answer names the state the task recorded, so a failed apply is legible in the spec rather
+  // than only in this process's stdout.
+  const { rows } = await t.srv.db.admin.query<{ state: string; last_error: string | null }>(
+    'SELECT state, last_error FROM change_set_runs WHERE workspace_id = $1 AND artifact_id = $2',
+    [payload.workspaceId, payload.artifactId],
+  );
+  return c.json({ ok: true, state: rows[0]?.state ?? null, lastError: rows[0]?.last_error ?? null });
 });
 
 // The DNS seam, reachable only from this test entry: a domain that starts with `verify-` resolves a
