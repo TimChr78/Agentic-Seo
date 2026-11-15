@@ -16,6 +16,14 @@ export interface RecommendationPrefill {
   evidence: { kind: 'issue' | 'finding' | 'search_fact' | 'audit'; id: string; note: string };
 }
 
+/** A proposed change is a hint for the change-set form: which edit, on which page, and why. */
+type ChangeType = 'meta.title' | 'meta.description' | 'image.alt' | 'schema.jsonld' | 'redirect';
+type ProposedChange = { type: ChangeType; url: string; summary: string };
+
+const CHANGE_TYPES: readonly ChangeType[] = ['meta.title', 'meta.description', 'image.alt', 'schema.jsonld', 'redirect'];
+
+const BLANK_CHANGE: ProposedChange = { type: 'meta.title', url: '', summary: '' };
+
 export function CreateRecommendationDialog({
   open,
   onClose,
@@ -40,6 +48,7 @@ export function CreateRecommendationDialog({
   const [falsification, setFalsification] = useState('We will know this failed if ');
   const [indicator, setIndicator] = useState('');
   const [evidenceNote, setEvidenceNote] = useState(prefill.evidence.note);
+  const [changes, setChanges] = useState<ProposedChange[]>([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -58,7 +67,11 @@ export function CreateRecommendationDialog({
         expectedImpact: { summary: summary.trim(), confidence },
         effort,
         dependsOn: [],
-        proposedChanges: [],
+        // Optional: a recommendation written from an issue names no page yet. When the person does
+        // name one, the change-set form starts from it instead of an empty list.
+        proposedChanges: changes
+          .filter((change) => change.url.trim() && change.summary.trim())
+          .map((change) => ({ type: change.type, url: change.url.trim(), summary: change.summary.trim() })),
         verificationPlan: { recheck: recheck.trim(), when: when.trim() },
         falsificationCheck: falsification.trim(),
         leadingIndicator: indicator.trim(),
@@ -177,6 +190,56 @@ export function CreateRecommendationDialog({
         >
           <Input value={indicator} onChange={(event) => setIndicator(event.target.value)} required maxLength={500} />
         </Field>
+
+        <fieldset className="space-y-3 rounded-lg border border-line p-3">
+          <legend className="px-1 text-[12px] font-medium text-fg-2">Proposed changes</legend>
+          <p className="text-[12px] leading-[18px] text-muted">
+            Optional. Name a page and the edit if the recommendation already knows them; Draft change set starts from these. Leave it empty
+            when the work is a direction, and describe each change when drafting.
+          </p>
+          {changes.map((change, index) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: these rows have no identity of their own; the index is their position in an ordered list that never reorders
+            <div key={index} className="grid gap-2 sm:grid-cols-[150px_minmax(0,1fr)]">
+              <Select
+                aria-label={`Change ${index + 1} type`}
+                value={change.type}
+                onChange={(event) =>
+                  setChanges((current) =>
+                    current.map((row, position) => (position === index ? { ...row, type: event.target.value as ChangeType } : row)),
+                  )
+                }
+              >
+                {CHANGE_TYPES.map((type) => (
+                  <option key={type} value={type}>
+                    {type}
+                  </option>
+                ))}
+              </Select>
+              <Input
+                aria-label={`Change ${index + 1} page URL`}
+                placeholder="https://example.com/page"
+                value={change.url}
+                onChange={(event) =>
+                  setChanges((current) => current.map((row, position) => (position === index ? { ...row, url: event.target.value } : row)))
+                }
+              />
+              <Input
+                aria-label={`Change ${index + 1} summary`}
+                placeholder="What to change on that page"
+                className="sm:col-span-2"
+                value={change.summary}
+                onChange={(event) =>
+                  setChanges((current) =>
+                    current.map((row, position) => (position === index ? { ...row, summary: event.target.value } : row)),
+                  )
+                }
+              />
+            </div>
+          ))}
+          <Button size="sm" variant="secondary" onClick={() => setChanges((current) => [...current, { ...BLANK_CHANGE }])}>
+            Add a proposed change
+          </Button>
+        </fieldset>
 
         <fieldset className="space-y-3 rounded-lg border border-line p-3">
           <legend className="px-1 text-[12px] font-medium text-fg-2">Evidence</legend>

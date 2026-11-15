@@ -83,15 +83,16 @@ export default function RecommendationPage({ recommendationId }: { recommendatio
   const authorName = author?.kind === 'specialist' ? specialistName(author.specialist) : author?.kind === 'agent' ? 'Agent' : 'A person';
   const canWrite = can('artifacts:write') && !agent;
   const canDraft = canWrite && detail.status !== 'rejected';
-  const draftable = (content.proposedChanges ?? []).length > 0;
 
   const consequence = (
     <div className="rounded-lg bg-surface-2 p-4 md:p-5">
       <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[14px] leading-[22px] font-medium text-fg">
         <span>
-          Touches {reach?.kind === 'known' ? reach.affectedUrls : (content.evidence?.length ?? 0)}{' '}
-          {reach?.kind === 'known' && reach.affectedUrls === 1 ? 'page' : 'pages'}
+          {reach?.kind === 'known'
+            ? `Touches ${reach.affectedUrls} ${reach.affectedUrls === 1 ? 'page' : 'pages'}`
+            : 'Pages touched: Unknown'}
         </span>
+        {reach?.kind !== 'known' && reach?.reason && <span className="font-normal text-fg-2">{reach.reason}</span>}
         <span className="font-normal text-fg-2">·</span>
         <TrafficAtRisk reach={reach ?? { kind: 'unknown', reason: 'The recommendation has no reach estimate.' }} />
         <span className="font-normal text-fg-2">·</span>
@@ -106,9 +107,9 @@ export default function RecommendationPage({ recommendationId }: { recommendatio
           ? 'a person decides the approval request below; approving publishes the version that opens the pull request.'
           : detail.changeSets.length
             ? `the change set is ${detail.changeSets[0]!.state.replace('_', ' ')}; follow it in Changes.`
-            : draftable
+            : (content.proposedChanges?.length ?? 0) > 0
               ? 'draft a change set from the proposed changes, then submit it for approval.'
-              : 'this is a direction rather than an edit: describe the work and attach the change set when it exists.'}
+              : 'draft a change set and name each edit, then submit it for approval.'}
       </p>
     </div>
   );
@@ -133,7 +134,7 @@ export default function RecommendationPage({ recommendationId }: { recommendatio
           </>
         }
         primaryAction={
-          draftable && !detail.changeSets.length ? (
+          !detail.changeSets.length ? (
             <Button
               variant="primary"
               icon={<FileDiff size={14} />}
@@ -150,7 +151,7 @@ export default function RecommendationPage({ recommendationId }: { recommendatio
           ) : undefined
         }
         secondaryActions={
-          detail.changeSets.length > 0 && draftable ? (
+          detail.changeSets.length > 0 ? (
             <Button disabled={!canDraft} onClick={() => setDrafting(true)}>
               Draft another
             </Button>

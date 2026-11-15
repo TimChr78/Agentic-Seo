@@ -4,6 +4,9 @@
 // The signed-in paths are read from `apps/web/src/app/nav.ts` (the information architecture is the
 // source), so a new destination is scanned without editing this file. The signed-out screen and the
 // first-run screen are the two states no navigation entry reaches.
+//
+// The detail routes take the ids the seed writes (`THIN_LOOP_IDS` in e2e/seed.ts), so the scan sees
+// populated screens rather than "couldn't open this" states.
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -22,40 +25,41 @@ export function nameOf(path) {
 }
 
 /**
- * The detail screens a navigation entry does not reach. The ids are the shapes the commands accept,
- * so the screen renders its own "couldn’t open this" state rather than a crash; the seeded thin loop
- * (e2e/seed.ts) uses these same ids, so a run after it scans the populated screens too.
+ * The detail screens a navigation entry does not reach. The ids come from the seed, so a run after
+ * it scans the populated screens — including the recommendation's pending approval drawer.
  */
-const DETAILS = [
-  { name: 'recommendations', path: '/recommendations' },
-  { name: 'audit-detail', path: '/audits/adt_0000000000000000000000000000thin' },
-  { name: 'issue-detail', path: '/issues/iss_0000000000000000000000000000thin' },
-  { name: 'recommendation-detail', path: '/recommendations/rcm_00000000000000000000000000000000' },
-  { name: 'change-detail', path: '/changes/chg_00000000000000000000000000000000' },
-];
+export function detailRoutes(ids) {
+  return [
+    { name: 'recommendations', path: '/recommendations' },
+    { name: 'audit-detail', path: `/audits/${ids.auditId}` },
+    { name: 'issue-detail', path: `/issues/${ids.issueId}` },
+    { name: 'recommendation-detail', path: `/recommendations/${ids.recommendationId}` },
+    { name: 'change-detail', path: `/changes/${ids.changeSetId}` },
+  ];
+}
 
 /**
  * Every screen the app has: the sign-in screen (signed out), the first-run screens (a workspace with
  * no site, an account with no workspace), every destination in the navigation, and the detail and
  * list screens no navigation entry names, signed in as the owner.
  */
-export function allRoutes() {
+export function allRoutes(ids) {
   return [
     { name: 'signin', path: '/', signedOut: true },
     { name: 'no-site', path: '/', person: 'noSites' },
     { name: 'no-workspace', path: '/', person: 'noWorkspace' },
     ...navPaths().map((path) => ({ name: nameOf(path), path, person: 'owner' })),
-    ...DETAILS.map((route) => ({ ...route, person: 'owner' })),
+    ...detailRoutes(ids).map((route) => ({ ...route, person: 'owner' })),
   ];
 }
 
 /** The same list, deduplicated by route name: `/` appears as three states. */
-export function buildMatrix() {
+export function buildMatrix(ids) {
   const seen = new Set();
-  return allRoutes().filter((route) => !seen.has(route.name) && seen.add(route.name));
+  return allRoutes(ids).filter((route) => !seen.has(route.name) && seen.add(route.name));
 }
 
 /** The route names, so the spec can declare one test per route before anything is loaded. */
-export function matrixNames() {
-  return buildMatrix().map((route) => route.name);
+export function matrixNames(ids) {
+  return buildMatrix(ids).map((route) => route.name);
 }

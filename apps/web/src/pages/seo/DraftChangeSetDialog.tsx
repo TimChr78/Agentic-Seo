@@ -21,9 +21,23 @@ type Row = {
   /** redirect only */
   to: string;
   status: '301' | '302' | '307' | '308';
+  /** Entered here rather than proposed by the recommendation: its type and page are editable. */
+  manual: boolean;
 };
 
 const DRAFTABLE = new Set(['meta.title', 'meta.description', 'image.alt', 'redirect']);
+
+const blankRow = (): Row => ({
+  type: 'meta.title',
+  url: '',
+  summary: '',
+  before: '',
+  after: '',
+  src: '',
+  to: '',
+  status: '301',
+  manual: true,
+});
 
 export function DraftChangeSetDialog({
   open,
@@ -53,17 +67,22 @@ export function DraftChangeSetDialog({
       .join(' '),
   );
   const [rollback, setRollback] = useState('Revert the pull request: every change records the value it replaced, so the revert is exact.');
+  // An issue-created recommendation names no page yet: start with one empty row to fill in. A
+  // recommendation with proposed changes starts with those, and more can still be added.
   const [rows, setRows] = useState<Row[]>(
-    proposed.map((change) => ({
-      type: change.type,
-      url: change.url,
-      summary: change.summary,
-      before: '',
-      after: '',
-      src: '',
-      to: '',
-      status: '301',
-    })),
+    proposed.length
+      ? proposed.map((change) => ({
+          type: change.type,
+          url: change.url,
+          summary: change.summary,
+          before: '',
+          after: '',
+          src: '',
+          to: '',
+          status: '301',
+          manual: false,
+        }))
+      : [blankRow()],
   );
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -163,19 +182,38 @@ export function DraftChangeSetDialog({
           </h3>
           {proposed.length === 0 && (
             <p className="mt-1 text-[12px] leading-[18px] text-muted">
-              This recommendation does not name proposed changes, so there is nothing to draft from. It was written as a direction rather
-              than an edit.
+              This recommendation does not name proposed changes, so name each edit here. The server resolves every row through the site’s
+              source mapping and refuses anything the repository disagrees with.
             </p>
           )}
           <ul className="mt-2 space-y-3">
             {rows.map((row, index) => (
-              // biome-ignore lint/suspicious/noArrayIndexKey: these rows have no identity of their own; the index is their position in an ordered list that never reorders
-              <li key={`${row.url}:${index}`} className="rounded-lg border border-line p-3">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <UrlCell url={row.url} />
-                  <span className="text-[12px] leading-[18px] text-muted">{row.type}</span>
-                </div>
-                <p className="mt-1 text-[12px] leading-[18px] text-fg-2">{row.summary}</p>
+              // biome-ignore lint/suspicious/noArrayIndexKey: these rows have no identity of their own; the index is their position in an ordered list that never reorders (a key built from the URL would remount the input on every keystroke)
+              <li key={index} className="rounded-lg border border-line p-3">
+                {row.manual ? (
+                  <div className="grid gap-2 sm:grid-cols-[170px_minmax(0,1fr)]">
+                    <Field label="Change type" required>
+                      <Select value={row.type} onChange={(event) => update(index, { type: event.target.value })}>
+                        {[...DRAFTABLE].map((type) => (
+                          <option key={type} value={type}>
+                            {type}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                    <Field label="Page URL" required hint="The page this edit changes.">
+                      <Input type="url" value={row.url} onChange={(event) => update(index, { url: event.target.value })} required />
+                    </Field>
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex flex-wrap items-baseline justify-between gap-2">
+                      <UrlCell url={row.url} />
+                      <span className="text-[12px] leading-[18px] text-muted">{row.type}</span>
+                    </div>
+                    <p className="mt-1 text-[12px] leading-[18px] text-fg-2">{row.summary}</p>
+                  </>
+                )}
                 {!DRAFTABLE.has(row.type) && (
                   <p className="mt-2 text-[12px] leading-[18px] text-warn">
                     A {row.type} change names the block it replaces by its hash, which this form does not read. Draft it with the{' '}
@@ -226,6 +264,9 @@ export function DraftChangeSetDialog({
               </li>
             ))}
           </ul>
+          <Button size="sm" variant="secondary" className="mt-2" onClick={() => setRows((current) => [...current, blankRow()])}>
+            Add another change
+          </Button>
         </section>
 
         <Field label="Verification plan" required hint="What a re-fetch after deployment must show.">

@@ -27,7 +27,7 @@ type Tab = (typeof TABS)[number];
 
 const PAGE_STATUSES = ['all', 'ok', 'redirect', 'client_error', 'server_error', 'failed', 'robots'] as const;
 
-export default function AuditPage({ auditId }: { auditId: string }) {
+export default function AuditPage({ auditId, pollMs = 5000 }: { auditId: string; pollMs?: number }) {
   const { site } = useSite();
   const [tab, setTab] = useTab<Tab>('tab', TABS, 'overview');
   const read = useApi(() => api.getAuditProgress(auditId), [auditId]);
@@ -38,9 +38,9 @@ export default function AuditPage({ auditId }: { auditId: string }) {
   // A live crawl changes its counters: poll while it runs, and stop when it has finished.
   useEffect(() => {
     if (!live) return;
-    const timer = setInterval(() => void read.reload(), 5000);
+    const timer = setInterval(() => void read.reload(), pollMs);
     return () => clearInterval(timer);
-  }, [live, read.reload]);
+  }, [live, read.reload, pollMs]);
 
   if (!read.data) {
     return (
@@ -82,7 +82,7 @@ export default function AuditPage({ auditId }: { auditId: string }) {
       onTabChange={setTab}
       tabs={[
         { key: 'overview', label: 'Overview', panel: <OverviewTab audit={audit!} siteId={site.id} /> },
-        { key: 'issues', label: 'Issues', panel: <IssuesTab auditId={audit!.id} /> },
+        { key: 'issues', label: 'Issues', panel: <IssuesTab audit={audit!} /> },
         {
           key: 'pages',
           label: `Pages (${audit!.pagesCrawled.toLocaleString()})`,
@@ -207,10 +207,12 @@ const coverageReasons = (audit: Audit) =>
 
 function OverviewTab({ audit, siteId }: { audit: Audit; siteId: string }) {
   // The score is its own read: a run that has not finalized has none, and the command says why.
-  const score = useApi(() => api.getAuditScore(siteId, audit.id), [siteId, audit.id]);
+  // The state is a dependency, so the poll that moves a run to completed (or failed) refetches the
+  // score instead of leaving the pre-completion answer on screen.
+  const score = useApi(() => api.getAuditScore(siteId, audit.id), [siteId, audit.id, audit.state]);
   if (score.error && !score.data)
     return (
-      <Alert tone="warn" title="No score yet">
+      <Alert tone="warn" title="No score yet" onRetry={() => void score.reload()}>
         {score.error}
       </Alert>
     );
@@ -336,8 +338,16 @@ function ScoreOverview({ score }: { score: AuditScore }) {
   );
 }
 
-function IssuesTab({ auditId }: { auditId: string }) {
-  const read = useApi(() => api.listAuditFindings({ auditId, limit: 200 }), [auditId]);
+const RUNNING_STATES = new Set(['queued', 'running', 'finalizing']);
+const UNFINISHED_REASON: Record<string, string> = {
+  failed: 'the run failed',
+  partial: 'the run is partial',
+  cancelled: 'the run was cancelled',
+};
+
+function IssuesTab({ audit }: { audit: Audit }) {
+  // The state is a dependency: when the poll finishes the crawl, the findings are read again.
+  const read = useApi(() => api.listAuditFindings({ auditId: audit.id, limit: 200 }), [audit.id, audit.state]);
   if (read.error && !read.data)
     return (
       <Alert tone="bad" title="Couldn’t load this run’s findings" onRetry={() => void read.reload()}>
@@ -346,12 +356,32 @@ function IssuesTab({ auditId }: { auditId: string }) {
     );
   if (!read.data) return <p className="text-[13px] text-muted">Loading the findings…</p>;
   const findings: Finding[] = read.data.rows;
-  if (!findings.length)
+  if (!findings.length) {
+    // An empty list only means "nothing to fix" for a run that actually evaluated pages. Anything
+    // else is pending or unavailable, and saying otherwise would read as a clean bill of health.
+    if (RUNNING_STATES.has(audit.state))
+      return (
+        <EmptyState title="No findings yet">
+          This run is still {audit.state === 'finalizing' ? 'finalizing' : 'crawling'}. Findings appear when it finishes.
+        </EmptyState>
+      );
+    if (audit.state === 'completed' && audit.pagesCrawled > 0)
+      return (
+        <EmptyState title="This run found nothing to fix">
+          Every check it evaluated passed on the pages it read. Pages outside the run are not covered by that statement.
+        </EmptyState>
+      );
     return (
-      <EmptyState title="This run found nothing to fix">
-        Every check it evaluated passed on the pages it read. Pages outside the run are not covered by that statement.
+      <EmptyState title="Findings are unavailable">
+        {audit.state === 'completed'
+          ? 'This run read no page, so no check could evaluate anything.'
+          : `This run ${UNFINISHED_REASON[audit.state] ?? 'did not complete'}, so its findings cannot be read${
+              audit.state === 'partial' ? ' as a complete result' : ''
+            }.`}
+        {audit.stateReason ? ` ${audit.stateReason}` : ''} A later completed run replaces it.
       </EmptyState>
     );
+  }
   return (
     <div className="space-y-3">
       <p className="text-[13px] leading-5 text-fg-2">

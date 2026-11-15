@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { type ApprovalDetail, api, errText } from '../../app/api';
 import { useSession } from '../../app/session';
-import { useApi } from '../../app/useApi';
+import { useApi, useKeyedApi } from '../../app/useApi';
 import { Actor, Alert, Button, Field, Meta, StatusPill, Textarea } from '../../ui';
 import { DiffView } from '../../ui/diff';
 import { Drawer } from '../../ui/overlay';
@@ -101,13 +101,16 @@ export function ApprovalDrawer({
 }) {
   const { can, agent } = useSession();
   const toast = useToast();
-  const read = useApi(() => (approvalId ? api.getApproval(approvalId) : Promise.resolve(null)), [approvalId], { skip: !approvalId });
+  // Keyed by the request: switching from A to B withholds A's detail until B's own read answers, so
+  // a decision button can never send B's id with the diff of A on screen.
+  const read = useKeyedApi<ApprovalDetail | null>(approvalId ?? '', () => api.getApproval(approvalId as string), { skip: !approvalId });
   const [note, setNote] = useState('');
   const [rejecting, setRejecting] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const detail: ApprovalDetail | null = read.data ?? null;
-  const canDecide = can('artifacts:approve') && !agent;
+  // The id is checked as well as the key: a read that answered for another request is never shown.
+  const detail: ApprovalDetail | null = approvalId !== null && read.data?.id === approvalId ? read.data : null;
+  const canDecide = can('artifacts:approve') && !agent && detail !== null;
 
   const decide = async (approve: boolean) => {
     if (!approvalId) return;
@@ -189,7 +192,7 @@ export function ApprovalDrawer({
         )}
         {!detail && !read.error && <p className="text-[13px] text-muted">Loading the request…</p>}
         {read.error && (
-          <Alert tone="bad" title="Couldn’t open this request">
+          <Alert tone="bad" title="Couldn’t open this request" onRetry={() => void read.reload()}>
             {read.error}
           </Alert>
         )}

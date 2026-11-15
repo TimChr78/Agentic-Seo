@@ -1,6 +1,7 @@
 import { Search } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { api, type Issue } from '../app/api';
+import { isNotRechecked, useLatestFinishedAudit } from '../app/auditFreshness';
 import { useCursor } from '../app/cursor';
 import { useCrumbs } from '../app/page';
 import { Link } from '../app/router';
@@ -45,6 +46,7 @@ export default function IssuesPage() {
   );
 
   const filtered = useMemo(() => Object.values(filters).some(Boolean), [filters]);
+  const latestAudit = useLatestFinishedAudit(site.id).latest;
   const data = read.data;
   const rows = data?.issues ?? [];
   const state: PageReadState = read.data === undefined ? (read.error ? 'error' : 'loading') : rows.length ? 'ready' : 'empty';
@@ -136,7 +138,19 @@ export default function IssuesPage() {
       state={state}
       notice={
         state === 'error'
-          ? { title: 'Couldn’t load the issues', body: read.error ?? undefined }
+          ? {
+              title: 'Couldn’t load the issues',
+              body: read.error ?? undefined,
+              action: (
+                <button
+                  type="button"
+                  className="inline-flex h-10 items-center px-3 text-[13px] font-medium text-accent hover:underline md:h-8"
+                  onClick={() => void read.reload()}
+                >
+                  Retry
+                </button>
+              ),
+            }
           : state === 'empty'
             ? {
                 title: filtered ? 'No issue matches these filters' : 'No issue has been found yet',
@@ -173,7 +187,7 @@ export default function IssuesPage() {
           </THead>
           <tbody>
             {rows.map((issue) => (
-              <IssueRow key={issue.id} issue={issue} hasGsc={data?.hasGsc ?? false} />
+              <IssueRow key={issue.id} issue={issue} hasGsc={data?.hasGsc ?? false} unchecked={isNotRechecked(issue, latestAudit)} />
             ))}
           </tbody>
         </table>
@@ -188,7 +202,7 @@ export default function IssuesPage() {
                     {issue.title}
                     <span className="ml-1 font-mono text-[12px] font-normal text-muted">{issue.checkId}</span>
                   </p>
-                  <IssueStatePill state={issue.state} regressed={issue.regressed} />
+                  <IssueStatePill state={issue.state} regressed={issue.regressed} unchecked={isNotRechecked(issue, latestAudit)} />
                 </div>
                 <p className="mt-1 flex flex-wrap items-center gap-2 text-[12px] leading-[18px] text-muted">
                   <SeverityPill severity={issue.severity} />
@@ -223,7 +237,7 @@ export default function IssuesPage() {
 const trafficText = (issue: Issue, hasGsc: boolean) =>
   !hasGsc || issue.clicks28d === null ? 'No GSC' : `${issue.clicks28d.toLocaleString()} clicks/28d`;
 
-function IssueRow({ issue, hasGsc }: { issue: Issue; hasGsc: boolean }) {
+function IssueRow({ issue, hasGsc, unchecked }: { issue: Issue; hasGsc: boolean; unchecked: boolean }) {
   return (
     <tr className="border-t border-line align-top hover:bg-surface-2">
       <Td className="max-w-[420px]">
@@ -243,7 +257,7 @@ function IssueRow({ issue, hasGsc }: { issue: Issue; hasGsc: boolean }) {
       </Td>
       <Td>{formatDate(issue.createdAt)}</Td>
       <Td>
-        <IssueStatePill state={issue.state} regressed={issue.regressed} unchecked={issue.lastCheckedAuditId !== issue.lastSeenAuditId} />
+        <IssueStatePill state={issue.state} regressed={issue.regressed} unchecked={unchecked} />
       </Td>
     </tr>
   );

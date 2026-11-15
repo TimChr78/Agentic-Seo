@@ -333,7 +333,12 @@ function GithubCard({ siteId, allowed, reason }: { siteId: string; allowed: bool
   const [busy, setBusy] = useState<string | null>(null);
   const [mappingError, setMappingError] = useState<string | null>(null);
   const [dialog, ask] = useConfirm();
-  const connected = status.data?.repository ?? null;
+  // A connection is usable only when the server says it is active *and* a token is still stored:
+  // a disconnect keeps the stored settings (repository, mapping) but revokes the credential, and
+  // connectors.github.update refuses a revoked row. The settings string alone is not proof.
+  const connection = status.data?.connection ?? null;
+  const active = connection?.state === 'active' && status.data?.hasToken === true && Boolean(status.data?.repository);
+  const revoked = connection?.state === 'revoked';
 
   // The stored mapping is not readable back (it may carry internal paths), so editing the settings
   // asks for it again rather than silently keeping a value the person cannot see.
@@ -406,6 +411,9 @@ function GithubCard({ siteId, allowed, reason }: { siteId: string; allowed: bool
     } catch (caught) {
       setError(errText(caught));
     } finally {
+      // The credential leaves React's state whichever way the request ended: a refused connect must
+      // not leave a token in the form (or in a later screenshot, DOM node or devtools snapshot).
+      setForm((current) => (current ? { ...current, token: '' } : current));
       setBusy(null);
     }
   };
@@ -415,7 +423,7 @@ function GithubCard({ siteId, allowed, reason }: { siteId: string; allowed: bool
       title="GitHub"
       description="One repository and the route-to-source mapping that turns a change set into a pull request."
       action={
-        status.data && connected && !form ? (
+        status.data && active && !form ? (
           <>
             <Button size="sm" disabled={!allowed} title={!allowed ? reason : undefined} onClick={start}>
               Change settings
@@ -428,7 +436,7 @@ function GithubCard({ siteId, allowed, reason }: { siteId: string; allowed: bool
               title={!allowed ? reason : undefined}
               onClick={async () => {
                 const confirmed = await ask({
-                  title: `Disconnect ${connected}?`,
+                  title: `Disconnect ${status.data?.repository ?? 'GitHub'}?`,
                   body: 'The stored token is removed. Change sets already open stay readable and their pull requests are untouched, but nothing new can be applied until the site is connected again.',
                   confirmLabel: 'Disconnect GitHub',
                   destructive: true,
@@ -506,11 +514,15 @@ function GithubCard({ siteId, allowed, reason }: { siteId: string; allowed: bool
                 ['Route rules', `${status.data.sourceRules} ${status.data.sourceRules === 1 ? 'rule' : 'rules'}`],
               ]}
             />
-            {!connected && (
+            {!active && (
               <div className="space-y-2">
                 <p className="text-[13px] leading-5 text-fg-2">
-                  Give a fine-grained personal access token with Contents read/write and Pull requests read/write for this repository only.
-                  It is validated by reading the base branch, then sealed; it is never returned or logged.
+                  {revoked
+                    ? 'This connection was disconnected: its token is gone, and stored settings alone cannot be used again.'
+                    : 'Give a fine-grained personal access token with Contents read/write and Pull requests read/write for this repository only.'}{' '}
+                  {status.data.hasToken
+                    ? 'The token is validated by reading the base branch, then sealed; it is never returned or logged.'
+                    : 'Connecting stores the settings and a sealed token in one step.'}
                 </p>
                 <Button
                   variant="primary"
@@ -524,7 +536,7 @@ function GithubCard({ siteId, allowed, reason }: { siteId: string; allowed: bool
                 {!allowed && <p className="text-[12px] leading-[18px] text-muted">{reason}</p>}
               </div>
             )}
-            {connected && !allowed && <p className="text-[12px] leading-[18px] text-muted">{reason}</p>}
+            {active && !allowed && <p className="text-[12px] leading-[18px] text-muted">{reason}</p>}
           </>
         )}
 
@@ -533,7 +545,7 @@ function GithubCard({ siteId, allowed, reason }: { siteId: string; allowed: bool
             className="space-y-4"
             onSubmit={(event) => {
               event.preventDefault();
-              void save(connected ? 'update' : 'connect');
+              void save(active ? 'update' : 'connect');
             }}
           >
             <div className="grid gap-4 sm:grid-cols-2">
@@ -546,8 +558,12 @@ function GithubCard({ siteId, allowed, reason }: { siteId: string; allowed: bool
               <Field label="Base branch" required hint="Change sets branch from here and their pull requests target it.">
                 <Input value={form.baseBranch} onChange={(event) => setForm({ ...form, baseBranch: event.target.value })} required />
               </Field>
-              {!connected && (
-                <Field label="Personal access token" required hint="Contents read/write, Pull requests read/write. Never shown again.">
+              {!active && (
+                <Field
+                  label="Personal access token"
+                  required
+                  hint="Contents read/write, Pull requests read/write. Never shown again; a completed request clears it."
+                >
                   <Input
                     type="password"
                     autoComplete="new-password"
@@ -564,7 +580,7 @@ function GithubCard({ siteId, allowed, reason }: { siteId: string; allowed: bool
               required
               error={mappingError}
               hint={
-                connected
+                active
                   ? `JSON. The stored mapping is not readable back, so paste it again to change it (${status.data?.sourceRules ?? 0} rules are stored).`
                   : 'JSON. Route patterns to source files: every change set resolves through this, so a change with no rule is refused.'
               }
@@ -604,10 +620,10 @@ function GithubCard({ siteId, allowed, reason }: { siteId: string; allowed: bool
 
             <div className="flex flex-wrap items-center gap-2">
               <Button type="submit" variant="primary" loading={busy !== null} disabled={!allowed} title={!allowed ? reason : undefined}>
-                {connected ? 'Save changes' : 'Connect GitHub'}
+                {active ? 'Save changes' : 'Connect GitHub'}
               </Button>
               <Button onClick={() => setForm(null)}>Cancel</Button>
-              {connected && (
+              {active && (
                 <p className="text-[12px] leading-[18px] text-muted">
                   To replace the token, disconnect and connect again: an update never takes a credential.
                 </p>

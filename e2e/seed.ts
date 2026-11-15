@@ -41,16 +41,25 @@ export interface ThinLoopIds {
   changeSetId: string;
 }
 
+/**
+ * The seeded ids, derived from fixed names rather than timestamps or random values. The axe matrix
+ * (`e2e/routes.mjs`) reads the same values, so the populated detail screens it scans are the rows
+ * this seed writes.
+ */
+export const THIN_LOOP_IDS: ThinLoopIds = {
+  auditId: `adt_${hex('thin-loop-audit')}`,
+  issueId: `iss_${hex('thin-loop-issue')}`,
+  recommendationId: `rcm_${hex('thin-loop-recommendation')}`,
+  approvalId: `apr_${hex('thin-loop-approval')}`,
+  changeSetId: `chg_${hex('thin-loop-change')}`,
+};
+
 export async function seedThinLoop(
   db: Awaited<ReturnType<typeof e2eDb>>,
   input: { workspaceId: string; siteId: string; userId: string; domain: string },
 ): Promise<ThinLoopIds> {
-  const auditId = `adt_${hex('thin-loop-audit')}`;
-  const issueId = `iss_${hex('thin-loop-issue')}`;
+  const { auditId, issueId, recommendationId, approvalId, changeSetId } = THIN_LOOP_IDS;
   const findingId = `fnd_${hex('thin-loop-finding')}`;
-  const recommendationId = `rcm_${hex('thin-loop-recommendation')}`;
-  const approvalId = `apr_${hex('thin-loop-approval')}`;
-  const changeSetId = `chg_${hex('thin-loop-change')}`;
   const at = new Date('2026-11-10T09:00:00.000Z');
   const url = `https://${input.domain}/pricing`;
 
@@ -107,7 +116,7 @@ export async function seedThinLoop(
   // A recommendation a specialist would have written, published through the real approval flow by
   // the second person in the journey.
   const content = {
-    title: 'Shorten the pricing page title',
+    title: 'Rewrite the pricing page title',
     rationale: `The title on ${url} is cut off in the result (issue ${issueId}).`,
     evidence: [{ kind: 'issue', id: issueId, note: 'The pricing page title is too long.' }],
     hypothesis: 'If the title fits the result, the whole message is read and more people click.',
@@ -145,7 +154,7 @@ export async function seedThinLoop(
   // row to read. Its content is the drafted shape: a change with the source it resolves to.
   const changeContent = {
     connector: 'github',
-    title: 'Shorten the pricing page title',
+    title: 'Rewrite the pricing page title',
     summary: 'One title change, backed by the issue.',
     recommendationId,
     changes: [

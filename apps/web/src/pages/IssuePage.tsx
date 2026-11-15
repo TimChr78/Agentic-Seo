@@ -1,6 +1,7 @@
 import { ArrowRight, MessageSquareWarning } from 'lucide-react';
 import { useState } from 'react';
 import { api, errText, type IssueDetail } from '../app/api';
+import { isNotRechecked, useLatestFinishedAudit } from '../app/auditFreshness';
 import { ButtonLink, TextLink } from '../app/links';
 import { useCrumbs } from '../app/page';
 import { navigate } from '../app/router';
@@ -32,6 +33,7 @@ export default function IssuePage({ issueId }: { issueId: string }) {
   const toast = useToast();
   const [tab, setTab] = useTab<Tab>('tab', TABS, 'pages');
   const read = useApi(() => api.getIssue(issueId), [issueId]);
+  const latestAudit = useLatestFinishedAudit(site.id).latest;
   const linked = useApi(() => api.listRecommendations({ siteId: site.id, issueId, limit: 1 }), [site.id, issueId], {
     skip: read.data === undefined,
   });
@@ -97,7 +99,7 @@ export default function IssuePage({ issueId }: { issueId: string }) {
       <DetailPage
         title={issue.title}
         kind="Issue"
-        statePill={<IssueStatePill state={issue.state} regressed={issue.regressed} />}
+        statePill={<IssueStatePill state={issue.state} regressed={issue.regressed} unchecked={isNotRechecked(issue, latestAudit)} />}
         metadata={
           <>
             <span className="font-mono text-[12px]">{check.id}</span>

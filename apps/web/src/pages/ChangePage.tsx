@@ -5,7 +5,7 @@ import { useCrumbs } from '../app/page';
 import { useSession, useSite } from '../app/session';
 import { useTab } from '../app/tab';
 import { useApi } from '../app/useApi';
-import { Button, CodeView, EmptyState, Meta, Mono } from '../ui';
+import { Alert, Button, CodeView, EmptyState, Meta, Mono } from '../ui';
 import { DetailPage } from '../ui/DetailPage';
 import { DiffView } from '../ui/diff';
 import { Identifier } from '../ui/Identifier';
@@ -87,6 +87,7 @@ export default function ChangePage({ changeSetId }: { changeSetId: string }) {
 
   const run = detail.run;
   const events = status.data?.events ?? [];
+  const pagesTouched = touchedPages(detail, site.domain);
   const canWrite = can('artifacts:write') && !agent;
   const canApply = can('changes:apply') && !agent;
   const submittable = run.state === 'draft' || run.state === 'stale';
@@ -104,9 +105,7 @@ export default function ChangePage({ changeSetId }: { changeSetId: string }) {
   const consequence = (
     <div className="rounded-lg bg-surface-2 p-4 md:p-5">
       <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[14px] leading-[22px] font-medium text-fg">
-        <span>
-          {detail.changes.length} {detail.changes.length === 1 ? 'page' : 'pages'} touched
-        </span>
+        <span>{pagesTouched === 1 ? '1 page touched' : `${pagesTouched.toLocaleString()} pages touched`}</span>
         <span className="font-normal text-fg-2">·</span>
         <span className="font-normal text-fg-2">
           {run.prUrl ? `pull request #${run.prNumber}` : 'no pull request yet'}
@@ -202,10 +201,26 @@ export default function ChangePage({ changeSetId }: { changeSetId: string }) {
         activeTab={tab}
         onTabChange={setTab}
         tabs={[
-          { key: 'changes', label: `Changes (${detail.changes.length})`, panel: <DiffsTab diff={diff.data} /> },
-          { key: 'files', label: `Files (${diff.data?.files.length ?? 0})`, panel: <FilesTab diff={diff.data} /> },
-          { key: 'verification', label: 'Verification', panel: <VerificationTab status={status.data} /> },
-          { key: 'activity', label: 'Activity', panel: <ActivityTab status={status.data} /> },
+          {
+            key: 'changes',
+            label: `Changes (${detail.changes.length})`,
+            panel: <DiffsTab diff={diff.data} error={diff.error} onRetry={() => void diff.reload()} />,
+          },
+          {
+            key: 'files',
+            label: `Files (${diff.data?.files.length ?? 0})`,
+            panel: <FilesTab diff={diff.data} error={diff.error} onRetry={() => void diff.reload()} />,
+          },
+          {
+            key: 'verification',
+            label: 'Verification',
+            panel: <VerificationTab status={status.data} error={status.error} onRetry={() => void status.reload()} />,
+          },
+          {
+            key: 'activity',
+            label: 'Activity',
+            panel: <ActivityTab status={status.data} error={status.error} onRetry={() => void status.reload()} />,
+          },
         ]}
         context={
           <div className="space-y-5">
@@ -215,7 +230,19 @@ export default function ChangePage({ changeSetId }: { changeSetId: string }) {
             </div>
             <div>
               <h2 className="text-[13px] leading-5 font-semibold">Connector</h2>
-              {github.data?.repository ? (
+              {github.error && !github.data ? (
+                <Alert
+                  tone="warn"
+                  title="Couldn’t read the connector"
+                  action={
+                    <Button size="sm" onClick={() => void github.reload()}>
+                      Retry
+                    </Button>
+                  }
+                >
+                  {github.error}
+                </Alert>
+              ) : github.data?.repository ? (
                 <p className="mt-2 flex flex-wrap items-center gap-1.5 text-[12px] leading-[18px]">
                   <GitPullRequestArrow size={14} className="text-muted" aria-hidden />
                   <span>GitHub · {github.data.repository}</span>
@@ -303,7 +330,38 @@ function buildSteps(state: string, events: Event[], run: Run): PipelineStep[] {
   });
 }
 
-function DiffsTab({ diff }: { diff: ChangeSetDiff | undefined }) {
+/**
+ * The pages a change set touches, from its own data: the URL of every change, plus the routes a
+ * shared layout reaches. One change is not one page (a layout edit reaches several routes), and two
+ * edits on one page are still one page.
+ */
+function touchedPages(detail: ChangeSetDetail, domain: string): number {
+  const origin = `https://${domain}`;
+  const keyOf = (value: string) => {
+    try {
+      const url = new URL(value, origin);
+      return `${url.origin}${url.pathname}`;
+    } catch {
+      return value;
+    }
+  };
+  const pages = new Set<string>();
+  for (const change of detail.changes) {
+    pages.add(keyOf(change.url));
+    // A source that reaches more than its own route is a layout or a pattern; every route it
+    // reaches is a page this change set can alter.
+    if (change.source.affectedRoutes.length > 1) for (const route of change.source.affectedRoutes) pages.add(keyOf(route));
+  }
+  return pages.size;
+}
+
+function DiffsTab({ diff, error, onRetry }: { diff: ChangeSetDiff | undefined; error: string | null; onRetry: () => void }) {
+  if (error && !diff)
+    return (
+      <Alert tone="bad" title="Couldn’t load the diff" onRetry={onRetry}>
+        {error}
+      </Alert>
+    );
   if (!diff) return <p className="text-[13px] text-muted">Loading the diff…</p>;
   if (!diff.urls.length) return <EmptyState title="No page changes in this version">This draft carries no rendered change.</EmptyState>;
   return (
@@ -388,7 +446,13 @@ function RedirectDiff({ before, after }: { before: unknown; after: unknown }) {
   );
 }
 
-function FilesTab({ diff }: { diff: ChangeSetDiff | undefined }) {
+function FilesTab({ diff, error, onRetry }: { diff: ChangeSetDiff | undefined; error: string | null; onRetry: () => void }) {
+  if (error && !diff)
+    return (
+      <Alert tone="bad" title="Couldn’t load the files" onRetry={onRetry}>
+        {error}
+      </Alert>
+    );
   if (!diff) return <p className="text-[13px] text-muted">Loading the files…</p>;
   if (!diff.files.length) return <EmptyState title="No source file in this version">This draft carries no file change.</EmptyState>;
   return (
@@ -408,7 +472,13 @@ function FilesTab({ diff }: { diff: ChangeSetDiff | undefined }) {
   );
 }
 
-function VerificationTab({ status }: { status: ChangeSetStatus | undefined }) {
+function VerificationTab({ status, error, onRetry }: { status: ChangeSetStatus | undefined; error: string | null; onRetry: () => void }) {
+  if (error && !status)
+    return (
+      <Alert tone="bad" title="Couldn’t load the verification" onRetry={onRetry}>
+        {error}
+      </Alert>
+    );
   if (!status) return <p className="text-[13px] text-muted">Loading the verification…</p>;
   const results = status.verification.results;
   if (!results.length)
@@ -463,7 +533,13 @@ function VerificationTab({ status }: { status: ChangeSetStatus | undefined }) {
   );
 }
 
-function ActivityTab({ status }: { status: ChangeSetStatus | undefined }) {
+function ActivityTab({ status, error, onRetry }: { status: ChangeSetStatus | undefined; error: string | null; onRetry: () => void }) {
+  if (error && !status)
+    return (
+      <Alert tone="bad" title="Couldn’t load the activity" onRetry={onRetry}>
+        {error}
+      </Alert>
+    );
   if (!status) return <p className="text-[13px] text-muted">Loading the activity…</p>;
   if (!status.events.length) return <EmptyState title="No transition recorded">The change set has not moved yet.</EmptyState>;
   return (
