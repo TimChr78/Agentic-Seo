@@ -39,6 +39,8 @@ Every capability is a `defineCommand` with zod input/output, a `permission`, an 
 
 **Skills for external agents:** a Claude Code / Codex / Cursor plugin (`plugins/agentic-seo`) ships the MCP connection plus skills mirroring the specialists (§5). It follows OpenSEO's plugin pattern, so external agents get the same playbooks as hosted ones.
 
+**Companion tools for external agents:** Agentic SEO does not drive a browser for an agent, but an agent can connect a browser MCP server alongside ours. [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) is the recommended one: an agent reads a performance issue from `issues://<site>`, records a trace on the live page to find the cause, and cites the trace in `recommendations.create`. The trace is evidence the agent supplies, not a platform measurement: the recommendation's verification plan still names the platform metric (PSI, CrUX or a re-audit) that confirms the fix, and the change set still goes through approval. It is not a renderer for the platform ([ADR-0005](adr/0005-rendering.md)).
+
 **Rich tool output:** tools return compact tables (Markdown) plus structured content. Where the client supports MCP UI widgets, research and SERP results render as widgets (as OpenSEO's `show_*` tools). This is an optional extra, not a dependency.
 
 ## 3. SEO action classes

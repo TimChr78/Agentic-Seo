@@ -13,6 +13,7 @@ The crawler fetches HTML itself (undici + a streaming parser). Rendering goes th
 - Render every page: 10–50× slower, and it hides raw-HTML problems.
 - Chromium in the main image: size and attack surface.
 - Crawl4AI only: Python service as a hard dependency.
+- [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) as a renderer (considered 2026-11-16): it is an MCP server that lets an agent drive Chrome, with performance traces (LCP, CLS and INP breakdowns), network and console. Our server calling another MCP server to drive a browser adds a protocol layer for nothing: it is built on Puppeteer, so a Puppeteer or Playwright adapter behind the `Renderer` port gets the same traces directly. A browser that opens any URL it is told also sits outside the `fetch` egress policy. Rejected as a renderer; it stays a companion tool for external agents ([agents-and-autonomy.md §2](../agents-and-autonomy.md#2-one-command-layer)).
 
 ## Consequences
 Render-dependent checks report "Not evaluated" when no renderer is configured; they are never treated as passed. The renderer must obey the same SSRF egress policy.
